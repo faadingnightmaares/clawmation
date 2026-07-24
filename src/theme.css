@@ -1,0 +1,323 @@
+/* ════════════════════════════════════════════════════════════════════
+   Trace by Bindery Citadel — Design Tokens
+   Faithful port of the Python app's `_ds/tokens/colors_and_type.css`.
+
+   The source loaded Newsreader / Inter / Fira Code via a runtime Google
+   Fonts @import. This app is offline-first, so the faces are vendored as
+   local woff2 (./assets/fonts) and declared below — no network, no
+   fallback-to-Times. Only the weights the UI actually uses are shipped.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ─── Vendored typefaces (OFL; offline-first) ─── */
+@font-face { font-family: "Newsreader"; font-style: normal; font-weight: 300; font-display: swap; src: url("./assets/fonts/newsreader-300.woff2") format("woff2"); }
+@font-face { font-family: "Newsreader"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/newsreader-400.woff2") format("woff2"); }
+@font-face { font-family: "Newsreader"; font-style: normal; font-weight: 500; font-display: swap; src: url("./assets/fonts/newsreader-500.woff2") format("woff2"); }
+@font-face { font-family: "Newsreader"; font-style: normal; font-weight: 600; font-display: swap; src: url("./assets/fonts/newsreader-600.woff2") format("woff2"); }
+@font-face { font-family: "Newsreader"; font-style: italic; font-weight: 400; font-display: swap; src: url("./assets/fonts/newsreader-400-italic.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/inter-400.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap; src: url("./assets/fonts/inter-500.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap; src: url("./assets/fonts/inter-600.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap; src: url("./assets/fonts/inter-700.woff2") format("woff2"); }
+@font-face { font-family: "Fira Code"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/fira-code-400.woff2") format("woff2"); }
+@font-face { font-family: "Fira Code"; font-style: normal; font-weight: 500; font-display: swap; src: url("./assets/fonts/fira-code-500.woff2") format("woff2"); }
+
+:root {
+    /* ─── Base palette ─── */
+    --color-parchment: #faf8f5;   /* canvas / page */
+    --color-ink: #1a1816;          /* primary text + dark surfaces */
+    --color-gold: #c2a370;         /* THE accent — used sparingly */
+    --color-gold-warm: #d4b88a;    /* hover/secondary gold */
+    --color-charcoal: #141414;     /* near-black, deep surfaces */
+    --color-sand: #ede8df;         /* grid lines / subtle dividers */
+
+    /* ─── Verdict palette (muted earth tones, never saturated) ─── */
+    --verdict-allowed: #1a6640;
+    --verdict-allowed-bg: rgba(26, 102, 64, 0.07);
+    --verdict-blocked: #7d2a1e;
+    --verdict-blocked-bg: rgba(125, 42, 30, 0.07);
+    --verdict-approval: #7a5510;
+    --verdict-approval-bg: rgba(122, 85, 16, 0.07);
+    --verdict-conditional: #3d5f70;
+    --verdict-conditional-bg: rgba(61, 95, 112, 0.07);
+    --verdict-insufficient: rgba(26, 24, 22, 0.4);
+    --verdict-insufficient-bg: rgba(26, 24, 22, 0.04);
+
+    /* ─── Text alpha ladder (use these instead of new greys) ─── */
+    --text-100: #1a1816;
+    --text-78: rgba(26, 24, 22, 0.78);
+    --text-68: rgba(26, 24, 22, 0.68);
+    --text-50: rgba(26, 24, 22, 0.50);
+    --text-40: rgba(26, 24, 22, 0.40);
+    --text-32: rgba(26, 24, 22, 0.32);
+    --text-25: rgba(26, 24, 22, 0.25);
+
+    /* ─── Surfaces & borders ─── */
+    --surface-card: rgba(255, 255, 255, 0.72);
+    --surface-card-strong: rgba(255, 255, 255, 0.9);
+    --surface-inset: rgba(250, 248, 245, 0.6);   /* wells inside cards */
+    --border-faint: rgba(26, 24, 22, 0.06);
+    --border-default: rgba(26, 24, 22, 0.10);
+    --border-strong: rgba(26, 24, 22, 0.18);
+    --gold-border: rgba(194, 163, 112, 0.35);
+
+    /* ─── Layout — the one width knob for the whole app ─── */
+    --page-max: 1140px;
+
+    /* ─── Type families ─── */
+    --font-serif: "Newsreader", Georgia, "Times New Roman", serif;
+    --font-sans: "Inter", "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --font-mono: "Fira Code", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+    /* ─── Type scale (all sizes used in production) ─── */
+    --text-xs: 10px;     /* mono labels */
+    --text-sm: 11px;     /* small mono / nav */
+    --text-base: 13px;   /* default UI body */
+    --text-md: 14px;     /* dense forms */
+    --text-lg: 15px;     /* answer body */
+    --text-xl: 18px;     /* serif decision summary */
+    --text-2xl: 22px;    /* serif H3 */
+    --text-3xl: 28px;    /* serif H2 / hero stats */
+    --text-4xl: 38px;    /* serif H1 */
+    --text-5xl: 48px;    /* serif welcome / display */
+
+    /* ─── Tracking ─── */
+    --track-tight: -0.02em;   /* serif headlines */
+    --track-tight-1: -0.015em;
+    --track-snug: -0.01em;    /* sans body */
+    --track-loose: 0.06em;    /* mono labels */
+    --track-looser: 0.10em;   /* uppercase section labels */
+    --track-loosest: 0.12em;  /* very tracked overlines */
+
+    /* ─── Radii — restrained ─── */
+    --radius-xs: 4px;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 11px;     /* cards, inputs */
+    --radius-xl: 14px;     /* panels */
+    --radius-2xl: 18px;    /* dropdowns */
+    --radius-pill: 999px;
+
+    /* ─── Spacing ─── */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+    --space-12: 48px;
+    --space-16: 64px;
+
+    /* ─── Shadows — soft, ink-tinted, never blue ─── */
+    --shadow-1: 0 1px 4px rgba(26, 24, 22, 0.04),
+                0 1px 0 rgba(255, 255, 255, 0.9) inset;
+    --shadow-2: 0 2px 12px rgba(26, 24, 22, 0.035),
+                0 1px 3px rgba(26, 24, 22, 0.025);
+    --shadow-3: 0 4px 6px rgba(26, 24, 22, 0.03),
+                0 14px 44px rgba(26, 24, 22, 0.10);
+    --shadow-menu: 0 8px 30px rgba(26, 24, 22, 0.08);
+    --shadow-gold: 0 0 0 3px rgba(194, 163, 112, 0.10);
+}
+
+/* ─── Page foundation ─── */
+html, body, #root {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+}
+body {
+    background-color: var(--color-parchment);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+/* The app is a fixed full-window shell: top bar + [sidebar | scrolling main]. */
+#root {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* The signature parchment grid + paper noise.
+   Applied via class="ds-canvas" on <body> (see index.html). */
+.ds-canvas {
+    position: relative;
+    min-height: 100vh;
+}
+.ds-canvas::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image:
+        linear-gradient(to right, var(--color-sand) 0.5px, transparent 0.5px),
+        linear-gradient(to bottom, var(--color-sand) 0.5px, transparent 0.5px);
+    background-size: 64px 64px;
+    background-position: center;
+    opacity: 0.32;
+}
+.ds-canvas::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.05;
+    mix-blend-mode: multiply;
+}
+
+/* ─── The signature gold rule — used above any section heading ─── */
+.ds-rule {
+    width: 28px;
+    height: 1.5px;
+    background: var(--color-gold);
+    margin-bottom: 14px;
+}
+
+/* ─── Typographic primitives ─── */
+.t-display {
+    font-family: var(--font-serif);
+    font-size: var(--text-5xl);
+    font-weight: 300;
+    line-height: 1.08;
+    letter-spacing: var(--track-tight-1);
+    color: var(--color-ink);
+}
+.t-h1 {
+    font-family: var(--font-serif);
+    font-size: var(--text-4xl);
+    font-weight: 300;
+    line-height: 1.15;
+    letter-spacing: var(--track-tight-1);
+    color: var(--color-ink);
+}
+.t-h2 {
+    font-family: var(--font-serif);
+    font-size: var(--text-3xl);
+    font-weight: 300;
+    line-height: 1.2;
+    letter-spacing: var(--track-tight);
+    color: var(--color-ink);
+}
+.t-h3 {
+    font-family: var(--font-serif);
+    font-size: var(--text-2xl);
+    font-weight: 300;
+    line-height: 1.3;
+    letter-spacing: var(--track-tight-1);
+    color: var(--color-ink);
+}
+.t-lead {
+    font-family: var(--font-serif);
+    font-size: 21px;
+    font-weight: 400;
+    line-height: 1.62;
+    letter-spacing: var(--track-snug);
+    color: var(--color-ink);
+}
+.t-body {
+    font-family: var(--font-sans);
+    font-size: var(--text-lg);
+    font-weight: 400;
+    line-height: 1.78;
+    color: var(--text-68);
+}
+.t-body-sm {
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    font-weight: 400;
+    line-height: 1.6;
+    color: var(--text-68);
+}
+/* The mono ALLCAPS label — the most-used label form in the system. */
+.t-label {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 400;
+    letter-spacing: var(--track-looser);
+    text-transform: uppercase;
+    color: var(--text-32);
+}
+.t-label-gold {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 400;
+    letter-spacing: var(--track-loosest);
+    text-transform: uppercase;
+    color: var(--color-gold);
+}
+.t-section-label {
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: var(--track-looser);
+    text-transform: uppercase;
+    color: var(--text-32);
+}
+.t-mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--text-50);
+    letter-spacing: 0.01em;
+}
+
+/* Highlight underline — used to mark cited or notable text inline. */
+.t-highlight {
+    border-bottom: 2px solid var(--color-gold);
+    padding-bottom: 1px;
+}
+
+/* ─── Status-indicator pulses (top-bar mode dot) ─── */
+@keyframes vecPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+@keyframes vecRecPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(1.3); } }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Layout shell — the single centering knob (--page-max). Every view's
+   content flows through .ds-page, so wide screens get symmetric margins
+   instead of a top-left huddle, and narrow windows just fill the width.
+   ═══════════════════════════════════════════════════════════════════ */
+.ds-page {
+    width: 100%;
+    max-width: var(--page-max);
+    margin: 0 auto;
+}
+
+/* Class-based card, matched to the CARD object in components/ui.tsx.
+   Solid enough to read as a surface, soft enough to belong to parchment. */
+.ds-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-2);
+}
+.ds-inset {
+    background: var(--surface-inset);
+    border: 1px solid var(--border-faint);
+    border-radius: var(--radius-lg);
+}
+
+/* Keyboard focus — a gold ring in the accent, on every interactive thing. */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--color-parchment), 0 0 0 4px var(--gold-border);
+    border-radius: var(--radius-sm);
+}
+
+/* Themed scrollbar — the default Windows bar undercuts the parchment look. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-25) transparent;
+}
+*::-webkit-scrollbar { width: 11px; height: 11px; }
+*::-webkit-scrollbar-thumb {
+    background-clip: padding-box;
+    border: 3px solid transparent;
+    border-radius: var(--radius-pill);
+    background-color: var(--text-25);
+}
+*::-webkit-scrollbar-thumb:hover { background-color: var(--text-40); }
+*::-webkit-scrollbar-track { background: transparent; }

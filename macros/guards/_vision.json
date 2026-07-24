@@ -1,0 +1,135 @@
+{
+  "triggers": [
+    {
+      "action": "click",
+      "click_line": [
+        3,
+        34,
+        295,
+        34
+      ],
+      "click_lines": [
+        [
+          3,
+          34,
+          295,
+          34
+        ],
+        [
+          296,
+          33,
+          296,
+          33
+        ],
+        [
+          297,
+          32,
+          297,
+          32
+        ],
+        [
+          298,
+          31,
+          298,
+          31
+        ],
+        [
+          299,
+          30,
+          299,
+          3
+        ],
+        [
+          299,
+          3,
+          296,
+          0
+        ],
+        [
+          2,
+          0,
+          0,
+          2
+        ],
+        [
+          0,
+          2,
+          0,
+          31
+        ],
+        [
+          0,
+          31,
+          3,
+          34
+        ]
+      ],
+      "click_offset": [
+        3,
+        34
+      ],
+      "cooldown": 2.0,
+      "enabled": true,
+      "hsv_high": [
+        179,
+        255,
+        255
+      ],
+      "hsv_low": [
+        0,
+        0,
+        0
+      ],
+      "id": "v1784832097344",
+      "key": "",
+      "macro_sequence": [],
+      "method": "template",
+      "min_area": 40,
+      "name": "New Trigger",
+      "ocr_text": "",
+      "region": [
+        0.0,
+        0.0,
+        100.0,
+        100.0
+      ],
+      "resume_delay": 1.0,
+      "template_path": "C:\\Users\\a7mda\\Desktop\\mydevspace\\animeexpditionsmacro\\clawmation\\templates\\surgical_1784832150_302x35.png",
+      "threshold": 0.8
+    },
+    {
+      "id": "v1784767471833",
+      "name": "New Trigger",
+      "method": "template",
+      "hsv_low": [
+        0,
+        0,
+        0
+      ],
+      "hsv_high": [
+        179,
+        255,
+        255
+      ],
+      "region": [
+        0,
+        0,
+        100,
+        100
+      ],
+      "min_area": 40,
+      "template_path": "C:\\Users\\a7mda\\Desktop\\mydevspace\\animeexpditionsmacro\\clawmation\\templates\\template_1784767477_87x90.png",
+      "threshold": 0.8,
+      "click_offset": [],
+      "click_line": [],
+      "click_lines": [],
+      "ocr_text": "",
+      "action": "click",
+      "key": "",
+      "macro_sequence": [],
+      "resume_delay": 1,
+      "cooldown": 2,
+      "enabled": true
+    }
+  ]
+}

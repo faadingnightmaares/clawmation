@@ -1,0 +1,32 @@
+{
+  "name": "repeat_hotkey_test",
+  "record_resolution": [
+    2560,
+    1440
+  ],
+  "created_at": 1784659227.4523795,
+  "loop": true,
+  "loop_count": 3,
+  "events": [
+    {
+      "type": "KEY_PRESS",
+      "timestamp": 0.0,
+      "x": 0,
+      "y": 0,
+      "button": "left",
+      "key": "a",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "KEY_PRESS",
+      "timestamp": 0.05,
+      "x": 0,
+      "y": 0,
+      "button": "left",
+      "key": "b",
+      "delta": 0,
+      "duration": 0.0
+    }
+  ]
+}

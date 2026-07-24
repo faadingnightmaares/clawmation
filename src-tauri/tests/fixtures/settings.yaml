@@ -1,0 +1,9 @@
+capture_backend: mss
+hotkey_play: f4
+hotkey_record: f6
+hotkey_stop: f3
+indicator_on_top: false
+log_level: INFO
+resolution:
+- 2560
+- 1440

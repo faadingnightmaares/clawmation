@@ -1,0 +1,562 @@
+{
+  "name": "macro_1784601329",
+  "record_resolution": [
+    2560,
+    1440
+  ],
+  "created_at": 1784601329.9119852,
+  "loop": false,
+  "loop_count": 0,
+  "events": [
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 0.9932,
+      "x": 2317,
+      "y": 572,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 0.9982,
+      "x": 2318,
+      "y": 572,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.0081,
+      "x": 2319,
+      "y": 572,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.0211,
+      "x": 2320,
+      "y": 572,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.2531,
+      "x": 2509,
+      "y": 564,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.2662,
+      "x": 2511,
+      "y": 561,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.2741,
+      "x": 2512,
+      "y": 560,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.2802,
+      "x": 2512,
+      "y": 559,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_DOWN",
+      "timestamp": 1.3163,
+      "x": 2512,
+      "y": 559,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_UP",
+      "timestamp": 1.3993,
+      "x": 2512,
+      "y": 559,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.4382,
+      "x": 2512,
+      "y": 560,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.5751,
+      "x": 2510,
+      "y": 672,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_DOWN",
+      "timestamp": 1.5823,
+      "x": 2510,
+      "y": 672,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.5841,
+      "x": 2510,
+      "y": 673,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.5891,
+      "x": 2509,
+      "y": 674,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.6132,
+      "x": 2509,
+      "y": 675,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_UP",
+      "timestamp": 1.6613,
+      "x": 2509,
+      "y": 675,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.6941,
+      "x": 2509,
+      "y": 676,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.8841,
+      "x": 2491,
+      "y": 805,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.8882,
+      "x": 2491,
+      "y": 806,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.8922,
+      "x": 2491,
+      "y": 807,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.8971,
+      "x": 2491,
+      "y": 808,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_DOWN",
+      "timestamp": 1.9102,
+      "x": 2491,
+      "y": 808,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 1.9941,
+      "x": 2491,
+      "y": 809,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_UP",
+      "timestamp": 2.0013,
+      "x": 2491,
+      "y": 809,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1031,
+      "x": 2491,
+      "y": 890,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1092,
+      "x": 2491,
+      "y": 891,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1222,
+      "x": 2491,
+      "y": 892,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1331,
+      "x": 2491,
+      "y": 893,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1421,
+      "x": 2491,
+      "y": 894,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1472,
+      "x": 2491,
+      "y": 895,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1531,
+      "x": 2491,
+      "y": 896,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1581,
+      "x": 2491,
+      "y": 897,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1621,
+      "x": 2491,
+      "y": 898,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1741,
+      "x": 2491,
+      "y": 901,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1802,
+      "x": 2491,
+      "y": 902,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1861,
+      "x": 2491,
+      "y": 903,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_DOWN",
+      "timestamp": 2.1912,
+      "x": 2491,
+      "y": 903,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.1941,
+      "x": 2491,
+      "y": 904,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.2072,
+      "x": 2491,
+      "y": 905,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_UP",
+      "timestamp": 2.2823,
+      "x": 2491,
+      "y": 905,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.3222,
+      "x": 2491,
+      "y": 906,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.3421,
+      "x": 2491,
+      "y": 907,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.3522,
+      "x": 2491,
+      "y": 908,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.3692,
+      "x": 2491,
+      "y": 909,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.3842,
+      "x": 2491,
+      "y": 910,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.3931,
+      "x": 2491,
+      "y": 911,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.4042,
+      "x": 2491,
+      "y": 912,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_DOWN",
+      "timestamp": 2.7003,
+      "x": 2491,
+      "y": 912,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_UP",
+      "timestamp": 2.7903,
+      "x": 2491,
+      "y": 912,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.8482,
+      "x": 2491,
+      "y": 913,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 2.9461,
+      "x": 2490,
+      "y": 914,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 3.1901,
+      "x": 1596,
+      "y": 686,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 3.1962,
+      "x": 1595,
+      "y": 686,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    },
+    {
+      "type": "MOUSE_MOVE",
+      "timestamp": 3.2022,
+      "x": 1594,
+      "y": 685,
+      "button": "left",
+      "key": "",
+      "delta": 0,
+      "duration": 0.0
+    }
+  ]
+}
