@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent } from "react";
 import { animate } from "animejs";
 
-import { PRIMARY_VIEWS, type ViewId } from "@/nav";
+import { NAV, PRIMARY_VIEWS, type ViewId } from "@/nav";
 import { reducedMotion } from "@/lib/anime";
 import { cn } from "@/lib/utils";
 
@@ -11,12 +11,13 @@ interface ViewSwitchProps {
 }
 
 /**
- * The Macros / Watch switch. One physical thumb slides between the segments —
- * it stretches across the gap on the way and settles into the target, so the
- * eye tracks a moving object instead of two boxes swapping highlight.
+ * The switch carrying every place you actually work — Home, Macros, Watch,
+ * Autopilot. One physical thumb slides between the segments: it stretches
+ * across the gap on the way and settles into the target, so the eye tracks a
+ * moving object instead of boxes swapping highlight.
  *
- * When a More-menu view is showing, no segment is current: the thumb hides
- * rather than lying about where you are.
+ * Settings is the one view not in here, and while it shows, no segment is
+ * current — the thumb hides rather than lying about where you are.
  */
 export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -138,6 +139,7 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
 
       {PRIMARY_VIEWS.map((v, i) => {
         const active = i === index;
+        const accel = NAV.findIndex((n) => n.id === v.id) + 1;
         return (
           <button
             key={v.id}
@@ -146,14 +148,18 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
             }}
             type="button"
             aria-current={active ? "page" : undefined}
+            aria-label={v.label}
+            title={`${v.label}  ·  Alt+${accel}`}
             onClick={() => navigate(v.id)}
             className={cn(
-              "relative flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors duration-200 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              "relative flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors duration-200 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 md:px-3.5",
               active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
             )}
           >
             <v.Icon className="size-4" />
-            {v.label}
+            {/* Four labels don't fit a narrow window — below `md` the icons carry
+                it alone, and the thumb re-measures through the ResizeObserver. */}
+            <span className="hidden md:inline">{v.label}</span>
           </button>
         );
       })}

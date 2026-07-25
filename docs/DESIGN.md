@@ -70,9 +70,12 @@ glassmorphism, no neon-on-dark (all AI-"bold" traps, explicitly rejected).
 
 - **No left nav-rail.** A slim **top command bar**: cat mark + "Clawmation"
   wordmark · a compact segmented switcher · run-state at the right.
-- **Fewer top-level choices.** Two primary surfaces — **Macros** and **Watch** —
-  plus a **More** menu for Chains / Guards / Guide / Settings. (Seven similar
-  automation nouns in a rail was residual cockpit at the very first click.)
+- **Fewer top-level choices.** Four surfaces ride the switcher — **Home**,
+  **Macros**, **Watch**, **Autopilot** — with **Settings** as an icon beside it.
+  Guards and Chains fused into Autopilot (they are two halves of "run it without
+  me") and the Guide moved inside Settings, so nothing hides behind a **More**
+  menu any more: every surface is one click deep. (Seven similar automation nouns
+  was residual cockpit at the very first click.)
 - **No card-stack.** Content is a full-width focused surface: a calm header with
   the one primary action, then the list as **hairline rows on the dark ground**,
   not cream cards.
@@ -133,9 +136,9 @@ surface as that sentence, not a detection-settings form.
 
 ## Where it lives in the code
 
-All seven surfaces are built in this language. `src/components/CommandBar.tsx` is
-the top bar and run-state anchor, `src/nav.ts` decides which surfaces ride the
-switcher and which fold into More, `src/views/` are the pages, `src/index.css`
+Every surface is built in this language. `src/components/CommandBar.tsx` is the
+top bar and run-state anchor, `src/nav.ts` decides which surfaces ride the
+switcher and which sit beside it, `src/views/` are the pages, `src/index.css`
 holds the token ramp above, and `src/components/ui/` is shadcn/ui with the tokens
 applied — restyle there rather than per-view, so a change lands everywhere.
 

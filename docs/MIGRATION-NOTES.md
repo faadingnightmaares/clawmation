@@ -217,6 +217,13 @@ recording:
 
 ## Frontend skeleton (`src/`)
 
+> **Historical.** This section records the shell as first ported. The frontend
+> has since been rewritten (shadcn/ui, lucide icons, a frameless window with our
+> own title bar, a four-way command-bar switcher, and close-to-tray in place of
+> the `window_minimize_to_tray` command, which is gone). `docs/DESIGN.md`
+> describes the shell as it stands; this stays for the reasoning behind the
+> original choices.
+
 The React frontend is a faithful port of the Python pywebview UI, which is
 already React-shaped (`index.html`'s `class Component extends DCLogic` with
 `state`/`setState`/`render`). This slice ports only the **app shell** — the

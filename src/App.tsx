@@ -10,9 +10,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Home } from "@/views/Home";
 import { Macros } from "@/views/Macros";
 import { Watch } from "@/views/Watch";
-import { Guards } from "@/views/Guards";
-import { Chains } from "@/views/Chains";
-import { Guide } from "@/views/Guide";
+import { Autopilot } from "@/views/Autopilot";
 import { Settings } from "@/views/Settings";
 import type { ViewProps } from "@/views/types";
 
@@ -22,14 +20,10 @@ function renderView(view: ViewId, props: ViewProps) {
       return <Home {...props} />;
     case "macros":
       return <Macros {...props} />;
-    case "ai":
-      return <Guards {...props} />;
     case "vision":
       return <Watch {...props} />;
-    case "chains":
-      return <Chains {...props} />;
-    case "guide":
-      return <Guide {...props} />;
+    case "autopilot":
+      return <Autopilot {...props} />;
     case "settings":
       return <Settings {...props} />;
   }
@@ -39,8 +33,8 @@ export default function App() {
   const status = useStatus();
   const [view, setView] = useState<ViewId>("macros");
 
-  // Alt+1..7 jump straight to a view (index into NAV order), unless typing in a
-  // field. Preserves the original shortcut mapping.
+  // Alt+1..5 jump straight to a view (index into NAV order), unless typing in a
+  // field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey || e.ctrlKey || e.metaKey) return;

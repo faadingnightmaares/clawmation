@@ -3,6 +3,10 @@
 //! Menu: "Show Clawmation" (the default left-click action), "Replay last macro",
 //! a separator, then "Quit". Left-clicking the icon restores the window; the
 //! tooltip and item labels match the Python tray character-for-character.
+//!
+//! Quit is the only way out of the app: the window's close button hides to the
+//! tray rather than ending the process (see the `CloseRequested` handler in
+//! `lib.rs`), so this menu is the exit.
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};

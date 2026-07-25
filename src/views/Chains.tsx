@@ -101,6 +101,8 @@ function chainSummary(c: EnrichedChain): string {
   return parts.join(" · ");
 }
 
+/** The Chains half of Autopilot — macros run back to back, optionally on a
+ *  schedule. `Autopilot` owns the page header, so this starts at the content. */
 export function Chains(_props: ViewProps) {
   const [chains, setChains] = useState<EnrichedChain[]>([]);
   const [macros, setMacros] = useState<MacroListItem[]>([]);
@@ -378,13 +380,6 @@ export function Chains(_props: ViewProps) {
 
   return (
     <div className="space-y-8">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Chains</h1>
-        <p className="text-sm text-muted-foreground">
-          String several macros together and run them one after another — hands-off.
-        </p>
-      </header>
-
       {/* Live run banner */}
       {chainRunning && (
         <div

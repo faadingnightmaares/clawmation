@@ -55,9 +55,15 @@ pub fn run() {
         // undecorated and draws its own title bar, and a state file written
         // before that change would otherwise restore the native caption on top
         // of ours at every launch.
+        //
+        // VISIBLE is dropped too, because closing now hides the window to the
+        // tray: quitting from the tray while it is away would otherwise persist
+        // `visible: false` and the next launch would start with no window at all.
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_state_flags(StateFlags::all() & !StateFlags::DECORATIONS)
+                .with_state_flags(
+                    StateFlags::all() & !StateFlags::DECORATIONS & !StateFlags::VISIBLE,
+                )
                 .with_denylist(&[shell::indicator::LABEL])
                 .build(),
         )
@@ -89,19 +95,22 @@ pub fn run() {
             // Look for a new release once, off the startup path. Nothing waits on
             // it and a failure is silent — an offline machine must still start.
             commands::misc::check_in_background(&handle);
-            // Closing the main window quits the app, as in Python (`window_close`
-            // ends `webview.start()`). The always-open indicator would otherwise
-            // outlive it and keep the process running headless, so tear it down when
-            // main closes and let Tauri exit on the last window. Minimize-to-tray
-            // only *hides* main, so this fires solely on a real close.
+            // Close puts Clawmation away instead of quitting it: a macro, a guard
+            // or a scheduled chain is usually still running, and killing the app
+            // out from under a farming loop is never what the X meant. The window
+            // hides, the tray icon brings it back, and Quit on the tray menu is
+            // the one path that actually ends the process.
+            //
+            // The window-state plugin has its own CloseRequested handler that
+            // banks the geometry, and it runs regardless of `prevent_close` — so
+            // where you left the window survives the trip to the tray.
             if let Some(main) = app.get_webview_window("main") {
-                let close_handle = handle.clone();
+                let hide_handle = handle.clone();
                 main.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        if let Some(indicator) =
-                            close_handle.get_webview_window(shell::indicator::LABEL)
-                        {
-                            let _ = indicator.close();
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(main) = hide_handle.get_webview_window("main") {
+                            let _ = main.hide();
                         }
                     }
                 });
@@ -182,7 +191,6 @@ pub fn run() {
             commands::misc::get_version,
             commands::misc::check_update,
             commands::misc::install_update,
-            commands::window::window_minimize_to_tray,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

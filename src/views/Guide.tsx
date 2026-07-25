@@ -16,19 +16,18 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { ViewProps } from "./types";
 
+/** The how-it-works reference, shown as a tab inside Settings — it is something
+ *  you read once, not a place you work, so it does not earn a slot in the bar. */
 export function Guide({ navigate }: ViewProps) {
   const pageRef = useStaggerIn<HTMLDivElement>();
 
   return (
     <div ref={pageRef} className="space-y-8">
-      <header className="space-y-3">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Guide</h1>
-        <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          Clawmation records what you do — every click, keypress and pause — and plays it back for
-          you, as many times as you like. It can also watch your screen and step in on its own while
-          you’re away, so your grind keeps running even when you’re not at the keyboard.
-        </p>
-      </header>
+      <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
+        Clawmation records what you do — every click, keypress and pause — and plays it back for
+        you, as many times as you like. It can also watch your screen and step in on its own while
+        you’re away, so your grind keeps running even when you’re not at the keyboard.
+      </p>
 
       {/* Record */}
       <Section icon={ListVideo} title="Record your first macro">
@@ -100,7 +99,7 @@ export function Guide({ navigate }: ViewProps) {
           Guards live on each macro. Open a macro’s menu on the Macros page and add a guard to it.
         </p>
         <div className="flex flex-wrap gap-2">
-          <Cta onClick={() => navigate("ai")}>See what’s protected</Cta>
+          <Cta onClick={() => navigate("autopilot")}>See what’s protected</Cta>
           <Button variant="outline" onClick={() => navigate("macros")}>
             Go to Macros
           </Button>
@@ -131,9 +130,10 @@ export function Guide({ navigate }: ViewProps) {
       <Section icon={Workflow} title="Chain macros together">
         <p className="text-sm leading-relaxed text-muted-foreground">
           Have a few macros that always run in the same order? Chain them so they play back-to-back —
-          optionally on a schedule, so your daily routine can even start itself.
+          optionally on a schedule, so your daily routine can even start itself. You’ll find them on
+          the <span className="font-medium text-foreground">Chains</span> tab of Autopilot.
         </p>
-        <Cta onClick={() => navigate("chains")}>Build a chain</Cta>
+        <Cta onClick={() => navigate("autopilot")}>Build a chain</Cta>
       </Section>
 
       {/* Tips */}

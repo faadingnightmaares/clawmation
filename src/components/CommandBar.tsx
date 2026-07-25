@@ -1,30 +1,16 @@
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
-import {
-  Square,
-  ChevronDown,
-  Minimize2,
-  Sun,
-  Moon,
-  Repeat,
-} from "lucide-react";
+import { Square, Settings, Sun, Moon, Repeat } from "lucide-react";
 
-import { emergencyStop, stopRecord, windowMinimizeToTray } from "@/api";
+import { emergencyStop, stopRecord } from "@/api";
 import type { Status } from "@/api";
-import { MORE_VIEWS, type ViewId } from "@/nav";
+import { type ViewId } from "@/nav";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/Logo";
 import { ViewSwitch } from "@/components/ViewSwitch";
 import { WindowControls } from "@/components/WindowControls";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
 interface CommandBarProps {
   status: Status | null;
@@ -110,18 +96,10 @@ export function CommandBar({ status, view, navigate }: CommandBarProps) {
     }
   };
 
-  const onMinimize = async () => {
-    try {
-      await windowMinimizeToTray();
-      notify("info", "Minimized to tray — click the tray icon to restore.");
-    } catch {
-      notify("error", "Minimize failed");
-    }
-  };
-
   // This header *is* the title bar — the window is undecorated, so the bare
   // stretches of it carry `data-tauri-drag-region` and move the window. Only
   // elements without the attribute are clickable, so controls work as usual.
+  // That is also why the gap after the switcher stays empty: it is the grip.
   return (
     <header
       data-tauri-drag-region
@@ -154,31 +132,23 @@ export function CommandBar({ status, view, navigate }: CommandBarProps) {
         </Button>
       )}
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className="gap-1 text-muted-foreground">
-            More
-            <ChevronDown className="size-4" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
-          {MORE_VIEWS.map((v) => (
-            <DropdownMenuItem
-              key={v.id}
-              onSelect={() => navigate(v.id)}
-              className={cn(view === v.id && "text-primary")}
-            >
-              <v.Icon className="size-4" />
-              {v.label}
-            </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={onMinimize}>
-            <Minimize2 className="size-4" />
-            Minimize to tray
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {/* Settings sits apart from the switcher on purpose: it is where you go to
+          adjust the app, not one of the places you work in it. */}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => navigate("settings")}
+        aria-label="Settings"
+        aria-current={view === "settings" ? "page" : undefined}
+        title="Settings  ·  Alt+5"
+        className={cn(
+          view === "settings"
+            ? "bg-secondary text-foreground hover:bg-secondary"
+            : "text-muted-foreground",
+        )}
+      >
+        <Settings className="size-4" />
+      </Button>
 
       <Button
         variant="ghost"

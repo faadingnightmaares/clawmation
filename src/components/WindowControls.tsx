@@ -14,10 +14,13 @@ function appWindow() {
 }
 
 /**
- * Minimize / maximize / close for the frameless window. The native title bar is
- * off (`"decorations": false`), so these are the only way out of the app —
- * every one of them swallows its own failure rather than throwing into the
- * render tree and taking the header down with it.
+ * Minimize / maximize / close for the frameless window — the native title bar is
+ * off (`"decorations": false`), so these are the whole title bar. Every one of
+ * them swallows its own failure rather than throwing into the render tree and
+ * taking the header down with it.
+ *
+ * Close doesn't quit: the backend answers `CloseRequested` by hiding the window
+ * to the tray, so a run in progress survives it. Quitting is the tray menu.
  */
 export function WindowControls() {
   const [maximized, setMaximized] = useState(false);
@@ -63,7 +66,7 @@ export function WindowControls() {
         {maximized ? <Copy className="size-3.5 -scale-x-100" /> : <Square className="size-3.5" />}
       </ControlButton>
       <ControlButton
-        label="Close"
+        label="Close to tray"
         onClick={run((w) => w.close())}
         className="hover:bg-destructive hover:text-destructive-foreground"
       >

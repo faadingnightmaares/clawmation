@@ -1,22 +1,9 @@
-//! Window-chrome commands, and the "get out of the way" helper every screen
-//! grab the editor starts runs behind.
+//! The "get out of the way" helper every screen grab the editor starts runs
+//! behind.
 
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
 use tauri::Window;
-
-/// Minimize the main window — `Api.window_minimize_to_tray`. Python's docstring
-/// says "hide from taskbar", but the code just does `ShowWindow(SW_MINIMIZE)`, a
-/// plain minimize; the always-running tray icon is what keeps the window one
-/// click away. Faithful to the code, not the docstring.
-#[tauri::command(async)]
-pub fn window_minimize_to_tray(window: tauri::Window) -> Value {
-    match window.minimize() {
-        Ok(()) => json!({ "ok": true }),
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
-}
 
 /// After `hide()` is accepted, how long the desktop is given to redraw without
 /// us in it. `hide()` only queues the request, and the capture backends hand
@@ -40,7 +27,7 @@ const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
 /// The window is restored by a drop guard, so a panic inside `f` cannot leave
 /// the app invisible with only the tray icon to get it back.
 pub fn with_window_hidden<T>(window: &Window, f: impl FnOnce() -> T) -> T {
-    // Already out of the way (minimized to tray, say) — leave it exactly as the
+    // Already out of the way (closed to the tray, say) — leave it exactly as the
     // user left it rather than "restoring" a window they deliberately put away.
     if !window.is_visible().unwrap_or(true) || window.hide().is_err() {
         return f();

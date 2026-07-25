@@ -849,14 +849,6 @@ export function onUpdateAvailable(fn: (info: UpdateInfo) => void): Promise<Unlis
   return listen<UpdateInfo>("update-available", (e) => fn(e.payload));
 }
 
-// ─── Window / app shell ───
-
-/** `window_minimize_to_tray`: a plain window minimize — the always-running tray
- *  icon is what keeps it one click away. Returns `{ ok }`. */
-export function windowMinimizeToTray(): Promise<OpResult> {
-  return invoke<OpResult>("window_minimize_to_tray");
-}
-
 // ─── Import / export / bundles ───
 // Native save/open/folder dialogs live inside the Rust command (blocking), so
 // each call resolves once the user finishes the OS dialog, or with

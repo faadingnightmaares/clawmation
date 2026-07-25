@@ -10,6 +10,8 @@ import { Card } from "@/components/ui/card";
 import { GuardsSheet } from "@/components/editors/GuardsSheet";
 import type { ViewProps } from "./types";
 
+/** The Guards half of Autopilot — one row per macro, protected ones first.
+ *  `Autopilot` owns the page header, so this starts at the content. */
 export function Guards({ navigate }: ViewProps) {
   const [macros, setMacros] = useState<MacroListItem[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -56,13 +58,6 @@ export function Guards({ navigate }: ViewProps) {
 
   return (
     <div className="space-y-8">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Guards</h1>
-        <p className="text-sm text-muted-foreground">
-          Little watchers that keep your macros alive when something interrupts them.
-        </p>
-      </header>
-
       {/* Concept band — what a guard actually does */}
       <Card
         ref={heroRef}
