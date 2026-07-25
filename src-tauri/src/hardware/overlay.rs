@@ -1,4 +1,4 @@
-//! Fullscreen GDI overlay — the Win32 scaffolding the screen pickers draw on.
+//! Fullscreen GDI overlay: the Win32 scaffolding the screen pickers draw on.
 //!
 //! Ports the window/message/paint half that `region_picker.py`, `color_sampler.py`
 //! and `surgical_picker.py` each hand-rolled through `ctypes`, three near-identical
@@ -53,7 +53,7 @@ const FONT_WEIGHT: i32 = 400;
 /// in, so the constants port across unchanged.
 pub type Bgr = (u8, u8, u8);
 
-/// `COLORREF` is `0x00bbggrr` — exactly what `_rgb()` built by hand.
+/// `COLORREF` is `0x00bbggrr`, exactly what `_rgb()` built by hand.
 fn colorref(bgr: Bgr) -> COLORREF {
     let (b, g, r) = bgr;
     COLORREF((u32::from(b) << 16) | (u32::from(g) << 8) | u32::from(r))
@@ -63,7 +63,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(once(0)).collect()
 }
 
-/// Primary-display size in physical pixels — the overlay's full extent.
+/// Primary-display size in physical pixels, the overlay's full extent.
 pub fn screen_size() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
@@ -74,7 +74,7 @@ pub fn screen_size() -> (i32, i32) {
 ///
 /// Python flipped every buffer vertically because it described the DIB with a
 /// positive `biHeight` (bottom-up). A negative height says "top-down" and the flip
-/// disappears — same pixels on screen, one less full-frame copy per build.
+/// disappears: same pixels on screen, one less full-frame copy per build.
 pub struct Dib {
     bits: Vec<u8>,
     width: i32,
@@ -143,7 +143,7 @@ impl Painter {
         }
     }
 
-    /// Draw a batch of segments with one pen — the shape the pixel grid and the
+    /// Draw a batch of segments with one pen, the shape the pixel grid and the
     /// stroke list both want.
     pub fn lines(&self, segments: &[(i32, i32, i32, i32)], color: Bgr, width: i32) {
         if segments.is_empty() {
@@ -249,7 +249,7 @@ pub struct Window {
 
 impl Window {
     /// Retitle the window. Invisible on a borderless popup, but it is what shows
-    /// in the taskbar preview and in accessibility tooling — the Python pickers
+    /// in the taskbar preview and in accessibility tooling; the Python pickers
     /// used it as their phase indicator, so the calls are kept.
     pub fn set_title(&self, title: &str) {
         unsafe {
@@ -282,7 +282,7 @@ pub trait Scene {
 /// Show `scene` fullscreen and block until the user commits or cancels.
 ///
 /// The window lives on its own thread with its own message queue, exactly as the
-/// Python pickers did — the caller is a Tauri command thread that must not start
+/// Python pickers did; the caller is a Tauri command thread that must not start
 /// pumping Win32 messages. `timeout` bounds the wait: unlike Python, which
 /// abandoned a stuck overlay on screen forever, expiry posts `WM_CLOSE` so the
 /// window actually goes away.
@@ -395,7 +395,7 @@ unsafe fn create_window<S: Scene>(class: &str, title: &str, state: *mut S) -> Op
 unsafe fn pump() {
     let mut msg = MSG::default();
     // `GetMessageW` returns -1 on error, which `as_bool()` would read as "keep
-    // going" — compare against 0 explicitly.
+    // going". Compare against 0 explicitly.
     while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -475,7 +475,7 @@ unsafe extern "system" fn wndproc<S: Scene>(
 
 /// Double-buffered paint: the scene draws into a memory DC, which lands on screen
 /// in a single `BitBlt`. Drawing straight onto the visible DC lets the monitor
-/// sample a half-painted frame — the flicker the Python pickers fixed the same way.
+/// sample a half-painted frame, the flicker the Python pickers fixed the same way.
 unsafe fn paint<S: Scene>(hwnd: HWND, scene: &mut S) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn colorref_packs_bgr_the_way_win32_reads_it() {
-        // 0x00bbggrr — the layout `_rgb()` built by hand in every Python picker.
+        // 0x00bbggrr, the layout `_rgb()` built by hand in every Python picker.
         assert_eq!(colorref((0x11, 0x22, 0x33)).0, 0x0011_2233);
         assert_eq!(colorref((0, 0, 255)).0, 0x0000_00ff); // pure red
         assert_eq!(colorref((255, 0, 0)).0, 0x00ff_0000); // pure blue

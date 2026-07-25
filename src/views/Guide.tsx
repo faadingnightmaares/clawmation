@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { ViewProps } from "./types";
 
-/** The how-it-works reference, shown as a tab inside Settings — it is something
+/** The how-it-works reference, shown as a tab inside Settings; it is something
  *  you read once, not a place you work, so it does not earn a slot in the bar. */
 export function Guide({ navigate }: ViewProps) {
   const pageRef = useStaggerIn<HTMLDivElement>();
@@ -24,7 +24,7 @@ export function Guide({ navigate }: ViewProps) {
   return (
     <div ref={pageRef} className="space-y-8">
       <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
-        Clawmation records what you do — every click, keypress and pause — and plays it back for
+        Clawmation records what you do (every click, keypress and pause) and plays it back for
         you, as many times as you like. It can also watch your screen and step in on its own while
         you’re away, so your grind keeps running even when you’re not at the keyboard.
       </p>
@@ -37,7 +37,7 @@ export function Guide({ navigate }: ViewProps) {
         </p>
         <ol className="flex flex-col gap-2.5 text-sm text-muted-foreground">
           <NumStep n={1}>
-            Open your game, then press your record hotkey — or hit the Record button on the Macros
+            Open your game, then press your record hotkey, or hit the Record button on the Macros
             page.
           </NumStep>
           <NumStep n={2}>
@@ -46,12 +46,12 @@ export function Guide({ navigate }: ViewProps) {
           </NumStep>
           <NumStep n={3}>Press Stop to save it, and give it a name you’ll recognise later.</NumStep>
           <NumStep n={4}>
-            Press Run and choose how many times to repeat — a set number, or ∞ to keep going.
+            Press Run and choose how many times to repeat: a set number, or ∞ to keep going.
           </NumStep>
         </ol>
         <Note icon={Cat}>
-          While a macro is running, a little cat sits in the corner — wide awake when Clawmation is
-          playing, curled up asleep when it’s finished — so you can tell at a glance whether it’s
+          While a macro is running, a little cat sits in the corner (wide awake when Clawmation is
+          playing, curled up asleep when it’s finished), so you can tell at a glance whether it’s
           still going.
         </Note>
         <Cta onClick={() => navigate("macros")}>Record a macro</Cta>
@@ -64,11 +64,11 @@ export function Guide({ navigate }: ViewProps) {
           a little watcher that keeps it alive. The classic case: your loop is set to run forever, a
           guard watches for the <span className="font-medium text-foreground">Reconnect</span> button,
           and the instant it appears the guard pauses your macro, clicks Reconnect, waits for the game
-          to load back in, then carries on right where it left off — so the loop never dies.
+          to load back in, then carries on right where it left off, so the loop never dies.
         </p>
         <ol className="flex flex-col gap-2.5 text-sm text-muted-foreground">
           <NumStep n={1}>
-            Tell it what to look for and where — a colour, a button or some words, in one corner of the
+            Tell it what to look for and where: a colour, a button or some words, in one corner of the
             screen.
           </NumStep>
           <NumStep n={2}>
@@ -76,7 +76,7 @@ export function Guide({ navigate }: ViewProps) {
             runs.
           </NumStep>
           <NumStep n={3}>
-            The moment it spots the trigger, it pauses your macro and does what you set — a click or a
+            The moment it spots the trigger, it pauses your macro and does what you set: a click or a
             keypress.
           </NumStep>
           <NumStep n={4}>
@@ -109,14 +109,14 @@ export function Guide({ navigate }: ViewProps) {
       {/* Watch */}
       <Section icon={Eye} title="Let it watch the screen on its own">
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Sometimes you don’t need a whole macro — you just need Clawmation to catch one thing and
+          Sometimes you don’t need a whole macro. You just need Clawmation to catch one thing and
           react. That’s the Watch page.
         </p>
         <ol className="flex flex-col gap-2.5 text-sm text-muted-foreground">
           <NumStep n={1}>
-            Add a thing to watch for — a colour, a picture of a button, or some on-screen text.
+            Add a thing to watch for: a colour, a picture of a button, or some on-screen text.
           </NumStep>
-          <NumStep n={2}>Tell it what to do when that thing appears — click it, or press a key.</NumStep>
+          <NumStep n={2}>Tell it what to do when that thing appears: click it, or press a key.</NumStep>
           <NumStep n={3}>Press Start watching, and Clawmation reacts on its own. No macro required.</NumStep>
         </ol>
         <p className="text-sm text-muted-foreground">
@@ -129,9 +129,9 @@ export function Guide({ navigate }: ViewProps) {
       {/* Chains */}
       <Section icon={Workflow} title="Chain macros together">
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Have a few macros that always run in the same order? Chain them so they play back-to-back —
-          optionally on a schedule, so your daily routine can even start itself. You’ll find them on
-          the <span className="font-medium text-foreground">Chains</span> tab of Autopilot.
+          Have a few macros that always run in the same order? Chain them so they play back-to-back,
+          optionally on a schedule, so your daily routine can even start itself. You’ll find them at
+          the top of <span className="font-medium text-foreground">Autopilot</span>.
         </p>
         <Cta onClick={() => navigate("autopilot")}>Build a chain</Cta>
       </Section>
@@ -140,7 +140,7 @@ export function Guide({ navigate }: ViewProps) {
       <Section icon={Lightbulb} title="A few tips">
         <ul className="flex flex-col gap-2.5 text-sm text-muted-foreground">
           <Tip>
-            Keep the area you watch small — it’s faster and far less likely to fire on the wrong
+            Keep the area you watch small. It’s faster and far less likely to fire on the wrong
             thing.
           </Tip>
           <Tip>
@@ -148,7 +148,7 @@ export function Guide({ navigate }: ViewProps) {
             you meant.
           </Tip>
           <Tip>
-            Give macros clear names and categories — future-you will thank you once you have twenty of
+            Give macros clear names and categories. Future-you will thank you once you have twenty of
             them.
           </Tip>
         </ul>

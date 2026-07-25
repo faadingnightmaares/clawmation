@@ -2,14 +2,14 @@
  * The recording indicator's artwork: a cat tail dropping in from off-screen whose
  * tip is the cat's own face, counting the elapsed seconds in her eyes.
  *
- * Pure drawing — it takes a canvas context and a frame description and nothing
+ * Pure drawing: it takes a canvas context and a frame description and nothing
  * else, so the art can be rendered outside Tauri while it is being worked on.
  * `indicator.ts` owns the window's poll loop and calls in here.
  *
  * The face keeps the pixel cat this replaced (a port of `overlay.py`'s
  * `_render_cat`): same 3x5 digit font, same eye and head proportions, same state
- * colours. What is new is the tail holding it up, and a cream rim on every shape
- * — the old cat was ink-on-transparent and vanished over a dark game.
+ * colours. What is new is the tail holding it up, and a cream rim on every
+ * shape: the old cat was ink-on-transparent and vanished over a dark game.
  */
 
 /** Runtime state the drawing reacts to. `mode` is `get_status`'s vocabulary. */
@@ -32,15 +32,21 @@ const DIGIT_PLAY = "rgb(93,176,136)"; // green while playing
 const DIGIT_PAUSED = "rgb(214,158,92)"; // amber while recording-paused
 
 /** Sprite size. The page scales it 2x with `image-rendering: pixelated`, so every
- *  number in this file is a hard pixel — there is no sub-pixel anything. */
+ *  number in this file is a hard pixel; there is no sub-pixel anything.
+ *
+ *  Tall rather than square: the window sits flush against the top of the screen,
+ *  so this height *is* how far the tail falls before the face arrives. Change it
+ *  and `HEIGHT` in `shell/indicator.rs` and `#cat` in `indicator.html` change with
+ *  it, or the canvas and its window stop agreeing. */
 export const W = 112;
-export const H = 72;
+export const H = 104;
 
 // ── Head geometry ────────────────────────────────────────────────────────────
 // Parked at the right so the tail has the left two-thirds to travel through, but
-// far enough in that the ears still fit when they lean out.
+// far enough in that the ears still fit when they lean out. Low enough that the
+// tail above it reads as a length of tail rather than a hook.
 const HX = 52;
-const HY = 16;
+const HY = 48;
 const HW = 52;
 const HH = 46;
 const EYE_W = 16;
@@ -65,22 +71,28 @@ const DIGITS: Record<string, number[]> = {
 
 /** Centre line of the tail, base first, as Catmull-Rom control points. The first
  *  sits above the canvas and the last inside the head: the tail must read as
- *  arriving from off-screen and ending *under* the face, not butting against it. */
+ *  arriving from off-screen and ending *under* the face, not butting against it.
+ *
+ *  The base is deliberately cut off by the top of the canvas: with the window
+ *  flush to the screen edge, that cut *is* the tail disappearing over the top of
+ *  the screen, and the illusion only holds while the spine starts above y=0. */
 const SPINE: ReadonlyArray<readonly [number, number]> = [
-  [20, -12],
-  [13, 10],
-  [12, 33],
-  [22, 52],
-  [40, 61],
-  [58, 56],
+  [22, -16],
+  [16, 14],
+  [11, 40],
+  [12, 64],
+  [24, 82],
+  [42, 92],
+  [58, 88],
 ];
 
-const TAIL_BASE_R = 4.8;
+const TAIL_BASE_R = 5.4;
 const TAIL_TIP_R = 2.8;
-/** How far the middle of the tail swings, in pixels either side. */
-const SWAY = 2.6;
+/** How far the middle of the tail swings, in pixels either side. Scaled with the
+ *  tail's length; the same throw over a longer tail reads as a stiffer one. */
+const SWAY = 3.2;
 /** Width of the cream rim around the whole silhouette. The cat is ink-coloured,
- *  which is invisible over a dark game — the rim is what makes her read on any
+ *  which is invisible over a dark game; the rim is what makes her read on any
  *  background instead of only on light ones. */
 const RIM = 1.4;
 
@@ -94,7 +106,7 @@ function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): 
 }
 
 /** Point at `t` along the whole spine, with the sway applied. The sway is scaled
- *  by `sin(pi*t)` so both ends stay pinned — the base is anchored off-screen and
+ *  by `sin(pi*t)` so both ends stay pinned: the base is anchored off-screen and
  *  the tip is anchored to the head, and a tail that slid either would look
  *  detached rather than alive. */
 function spineAt(t: number, wobble: number): [number, number] {
@@ -113,7 +125,7 @@ function spineAt(t: number, wobble: number): [number, number] {
   ];
 }
 
-/** A filled circle drawn as one rect per scanline — pixel-exact and cheap enough
+/** A filled circle drawn as one rect per scanline: pixel-exact and cheap enough
  *  to redraw the whole tail every frame. */
 function stampDisc(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number): void {
   for (let y = Math.round(cy - r); y <= Math.round(cy + r); y++) {
@@ -163,7 +175,7 @@ function fillRect(
   ctx.fillRect(x, y, w, h);
 }
 
-/** One pixel-font digit at (x, y) sized w x h — `_draw_digit`. */
+/** One pixel-font digit at (x, y) sized w x h (`_draw_digit`). */
 function drawDigit(
   ctx: CanvasRenderingContext2D,
   ch: string,
@@ -192,7 +204,7 @@ function drawDigit(
   }
 }
 
-/** A stepped triangle ear that widens toward the bottom — `_draw_ear`. */
+/** A stepped triangle ear that widens toward the bottom (`_draw_ear`). */
 function drawEar(
   ctx: CanvasRenderingContext2D,
   baseX: number,
@@ -213,7 +225,7 @@ function drawEar(
 }
 
 /** The same ear with a 2px cream rim, made by stamping cream copies around an ink
- *  one. Growing the triangle instead would thicken only its base — the rim has to
+ *  one. Growing the triangle instead would thicken only its base; the rim has to
  *  survive all the way to the tip, which is the part that says "ear". */
 function outlinedEar(
   ctx: CanvasRenderingContext2D,
@@ -237,7 +249,7 @@ function outlinedEar(
 
 /** Round a rectangle's corners into a diagonal stair. `color` of `null` cuts them
  *  out of the silhouette; a colour paints them instead, which is what inner shapes
- *  need — clearing an eye would punch a hole clean through the head behind it. */
+ *  need: clearing an eye would punch a hole clean through the head behind it. */
 function stairCorners(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -263,8 +275,8 @@ function drawHead(ctx: CanvasRenderingContext2D, frame: Frame): void {
   const play = frame.mode === "playing";
   const paused = frame.mode === "paused";
 
-  // Ears, aligned so their widest step lands exactly on the head's rim edges —
-  // a pixel either way and the bottom step juts out as a tab on the head's side.
+  // Ears, aligned so their widest step lands exactly on the head's rim edges.
+  // A pixel either way and the bottom step juts out as a tab on the head's side.
   outlinedEar(ctx, HX, HY - 14, 18, 18, 5);
   outlinedEar(ctx, HX + HW - 18, HY - 14, 18, 18, 5);
 
@@ -298,7 +310,7 @@ function drawHead(ctx: CanvasRenderingContext2D, frame: Frame): void {
   const midX = HX + Math.trunc(HW / 2);
   fillRect(ctx, CREAM, midX - 3, EYE_Y + EYE_H + 4, 6, 5);
 
-  // Mouth — a flat line normally, two little fangs while playing
+  // Mouth: a flat line normally, two little fangs while playing
   if (play) {
     fillRect(ctx, CREAM, midX - 10, EYE_Y + EYE_H + 11, 5, 3);
     fillRect(ctx, CREAM, midX + 5, EYE_Y + EYE_H + 11, 5, 3);
@@ -321,14 +333,14 @@ function drawHead(ctx: CanvasRenderingContext2D, frame: Frame): void {
 // ── The whole picture ────────────────────────────────────────────────────────
 
 /** Sway speed per state: a slow breath while recording, brisker while a macro is
- *  playing, dead still while paused — so the tail alone tells you which. */
+ *  playing, dead still while paused, so the tail alone tells you which. */
 function swayFor(mode: string): number {
   if (mode === "paused") return 0;
   return mode === "playing" ? SWAY : SWAY * 0.7;
 }
 
 export function renderCat(ctx: CanvasRenderingContext2D, frame: Frame): void {
-  ctx.clearRect(0, 0, W, H); // transparent ground — the overlay has no plate
+  ctx.clearRect(0, 0, W, H); // transparent ground; the overlay has no plate
   drawTail(ctx, Math.sin(frame.phase) * swayFor(frame.mode));
   drawHead(ctx, frame);
 }

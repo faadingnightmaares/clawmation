@@ -1,4 +1,4 @@
-//! AI step-macro commands — the per-macro step editor's backend surface
+//! AI step-macro commands: the per-macro step editor's backend surface
 //! (`ui_app.py::{macro_to_steps, steps_save, steps_run, steps_test}`).
 //!
 //! `macro_to_steps` and `steps_save` are file work, so they follow the same
@@ -12,7 +12,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use tauri::{State, Window};
 
-use crate::commands::window::with_window_hidden;
+use crate::commands::window::with_window_out_of_frame;
 use crate::models::macro_def::Macro;
 use crate::models::step::{macro_to_steps as convert, AIMacro, Step};
 use crate::paths;
@@ -51,7 +51,7 @@ pub fn steps_run(state: State<AppState>, steps: Vec<Value>) -> Value {
 /// is written to find, so it goes away for the length of the grab.
 #[tauri::command(async)]
 pub fn steps_test(state: State<AppState>, window: Window, step: Value) -> Value {
-    with_window_hidden(&window, || state.core.steps_test(step))
+    with_window_out_of_frame(&window, || state.core.steps_test(step))
 }
 
 // ── Pure implementations (unit-tested against a temp dir) ────────────────────
@@ -75,10 +75,10 @@ fn macro_to_steps_in(macros_dir: &Path, macro_name: &str) -> Value {
 
 /// `steps_save`: parse the edited step dicts and write them as an AI macro
 /// (replacing any existing macro of that name). The frontend never sends loop
-/// settings, so the macro always saves with `loop=false, loop_count=1` — the
+/// settings, so the macro always saves with `loop=false, loop_count=1`, the
 /// defaults `AIMacro` carries. Returns `{ok, count}` on success (the wrapper turns
 /// `count` into the log line and drops it from the reply, as the source does) or
-/// `{ok:false, error}` — parse and write failures share the one `except` in
+/// `{ok:false, error}`. Parse and write failures share the one `except` in
 /// Python, so both land here.
 fn steps_save_in(ai_dir: &Path, macro_name: &str, steps: Vec<Value>) -> Value {
     let parsed: Result<Vec<Step>, _> = steps.into_iter().map(serde_json::from_value).collect();

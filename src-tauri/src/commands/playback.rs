@@ -1,9 +1,9 @@
-//! Playback commands — play, stop, and the global emergency stop.
+//! Playback commands: play, stop, and the global emergency stop.
 //!
 //! `play_macro` and `stop_playback` are thin wrappers over
 //! [`Core`](crate::core::Core). `emergency_stop` also reaches the vision agent
-//! that lives on [`AppState`], so it is orchestrated here rather than on `Core`
-//! — a faithful port of `Api.emergency_stop`.
+//! that lives on [`AppState`], so it is orchestrated here rather than on `Core`,
+//! a faithful port of `Api.emergency_stop`.
 
 use serde_json::{json, Value};
 use tauri::State;
@@ -61,6 +61,7 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
             if let Some(agent) = state.vision_agent.lock().unwrap().take() {
                 agent.stop();
             }
+            core.detections.set("watch", false);
             stopped.push("vision");
         }
     }

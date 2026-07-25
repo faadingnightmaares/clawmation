@@ -1,4 +1,4 @@
-//! Macro playback — the threaded replayer that drives `InputController`.
+//! Macro playback: the threaded replayer that drives `InputController`.
 //!
 //! Faithful port of `recorder.py::MacroPlayer`. Playback runs on a background
 //! thread; the public handle methods (`stop`/`pause`/`resume`/`is_playing`) are
@@ -104,8 +104,8 @@ impl PlayerShared {
 
     /// Block while paused, mirroring Python's `self._pause_event.wait()`.
     ///
-    /// The stop flag is checked *under the pause lock*, which — together with
-    /// `stop()` setting the flag under the same lock before notifying — closes
+    /// The stop flag is checked *under the pause lock*, which (together with
+    /// `stop()` setting the flag under the same lock before notifying) closes
     /// the lost-wakeup race: a stop that lands between the predicate check and
     /// the `wait` can't be missed.
     fn wait_while_paused(&self) {
@@ -201,7 +201,7 @@ fn play_loop(
 
         // Fresh absolute timeline per iteration: each event fires at
         // t0 + timestamp/speed. t0 is deliberately NOT rebased on pause/resume,
-        // so events queued during a pause fire in a catch-up burst on resume —
+        // so events queued during a pause fire in a catch-up burst on resume,
         // a preserved quirk the guard engine depends on (see MIGRATION-NOTES).
         let t0 = Instant::now();
         let mut prev: Option<(i32, i32)> = None;
@@ -223,7 +223,7 @@ fn play_loop(
             // Vision checkpoint: run only when a detector is wired AND the event
             // carries a non-empty config, mirroring Python's
             // `event.type == CHECKPOINT and event.checkpoint`. The vision-agent
-            // runner passes no detector, so its checkpoints are silent no-ops —
+            // runner passes no detector, so its checkpoints are silent no-ops,
             // faithful to its bare `MacroPlayer(controller)`. Either way the event
             // is consumed (Python's bare player falls through to a no-op replay).
             if event.event_type == InputEventType::Checkpoint {
@@ -280,12 +280,12 @@ fn play_loop(
     shared.playing.store(false, Ordering::SeqCst);
 }
 
-/// Execute one vision checkpoint — the orchestration half of Python's
+/// Execute one vision checkpoint: the orchestration half of Python's
 /// `MacroPlayer._run_checkpoint`. Detection (frame grab, region collapse, method
 /// route) lives behind the injected `detect`; this drives the poll/timeout loop
 /// and the resulting click/drag/key. The Python player logs checkpoint state
 /// (skips, timeouts, hold) only to stderr, never the UI, so those lines are
-/// dropped here — a timed-out checkpoint just returns.
+/// dropped here; a timed-out checkpoint just returns.
 fn run_checkpoint(
     shared: &PlayerShared,
     controller: &InputController,
@@ -381,8 +381,8 @@ fn run_checkpoint(
 
 /// Drag along a drawn line from (sx,sy) to (ex,ey), in crop offsets from the
 /// match top-left: hold the button at the start, sweep ~1px steps, release at the
-/// end — the smooth sweep sliders/charge-bars need. A key action can't sweep, so
-/// it falls back to pressing the key at the start.
+/// end, giving the smooth sweep sliders/charge-bars need. A key action can't
+/// sweep, so it falls back to pressing the key at the start.
 #[allow(clippy::too_many_arguments)]
 fn trace_line(
     shared: &PlayerShared,
@@ -399,7 +399,7 @@ fn trace_line(
 ) {
     let button = cfg.get("button").and_then(Value::as_str).unwrap_or("left");
 
-    // Key action can't sweep — press the key and return.
+    // Key action can't sweep, so press the key and return.
     if cfg.get("action").and_then(Value::as_str) == Some("key") {
         if let Some(key) = cfg.get("key").and_then(Value::as_str).filter(|k| !k.is_empty()) {
             controller.key_press(key);
@@ -432,7 +432,7 @@ fn trace_line(
 }
 
 /// Hold a button and continuously move the cursor to the detected target,
-/// releasing when the release condition is met — automates timing minigames
+/// releasing when the release condition is met. Automates timing minigames
 /// (e.g. a charge bar) where you track a moving indicator until it aligns.
 #[allow(clippy::too_many_arguments)]
 fn hold_follow(
@@ -523,7 +523,7 @@ impl MacroPlayer {
     }
 
     /// Start playback on a background thread. A no-op if a macro is already
-    /// playing (Python logs "Already playing — stop first" and returns).
+    /// playing (Python logs "Already playing, stop first" and returns).
     ///
     /// `checkpoint` is the per-call vision detector for macro checkpoint steps:
     /// `Some` from the main play path (Python's `MacroPlayer(..., detector=...)`),
@@ -725,7 +725,7 @@ mod tests {
 
         assert!(!player.is_playing(), "finished after wait()");
         assert_eq!(player.iteration(), 2, "ran exactly 2 reps");
-        // Lower bound only — proves wait_until actually paced the timeline
+        // Lower bound only: proves wait_until actually paced the timeline
         // instead of firing everything instantly. 0.9 * (2 * 0.25s) = 0.45s.
         assert!(
             elapsed >= Duration::from_millis(450),

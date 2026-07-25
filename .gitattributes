@@ -9,6 +9,6 @@
 *.jpg binary
 *.webp binary
 
-# Generated lockfiles — collapse them in diffs and reviews.
+# Generated lockfiles: collapse them in diffs and reviews.
 package-lock.json linguist-generated=true -diff
 src-tauri/Cargo.lock linguist-generated=true -diff

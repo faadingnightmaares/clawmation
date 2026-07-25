@@ -1,4 +1,4 @@
-//! Step / AI-macro data model — `macros/ai/<name>.json`.
+//! Step / AI-macro data model: `macros/ai/<name>.json`.
 //!
 //! Mirrors `anime_macro/ai_macro.py::{Step, AIMacro}`. `Step.from_dict` preserves
 //! persisted `0`/`""` (no coercion), so container `#[serde(default)]` + a manual
@@ -85,8 +85,8 @@ impl Default for AIMacro {
 }
 
 impl AIMacro {
-    /// The app only ever writes this file — the steps editor reads it back as raw
-    /// JSON — so the typed load exists to let the conversion tests assert on what
+    /// The app only ever writes this file (the steps editor reads it back as raw
+    /// JSON), so the typed load exists to let the conversion tests assert on what
     /// was written rather than on a string.
     #[cfg(test)]
     pub fn load(path: &Path) -> serde_json::Result<Self> {
@@ -101,7 +101,7 @@ impl AIMacro {
 }
 
 /// An 8-hex-char id, mirroring Python's `str(uuid.uuid4())[:8]`. The value carries
-/// no meaning — only uniqueness within one step list matters — so a process-global
+/// no meaning (only uniqueness within one step list matters), so a process-global
 /// counter mixed with the clock avoids the collisions a bare `now_millis()` would
 /// hit when `macro_to_steps` mints many ids in one tight loop, without adding a uuid
 /// dependency the codebase otherwise avoids.
@@ -115,7 +115,7 @@ fn short_id() -> String {
     format!("{:08x}", mix & 0xFFFF_FFFF)
 }
 
-/// Convert a recorded [`Macro`] into an editable list of [`Step`]s — Python's
+/// Convert a recorded [`Macro`] into an editable list of [`Step`]s, Python's
 /// `ai_macro.macro_to_steps`. Drops mouse-move noise, pairs down/up into clicks and
 /// key down/up into presses (skipping the matching up-event only when it is the very
 /// next event), and inserts a `delay` step for gaps over 0.5s between actions.
@@ -123,7 +123,7 @@ pub fn macro_to_steps(macro_def: &Macro) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
     let mut prev_time = 0.0_f64;
 
-    // Drop mouse-move noise — only meaningful actions remain.
+    // Drop mouse-move noise; only meaningful actions remain.
     let events: Vec<&MacroEvent> = macro_def
         .events
         .iter()
@@ -199,7 +199,7 @@ pub fn macro_to_steps(macro_def: &Macro) -> Vec<Step> {
                 i += 1;
             }
             _ => {
-                // Lone MOUSE_UP, MOUSE_CLICK, etc. — skip.
+                // Skip lone MOUSE_UP, MOUSE_CLICK, etc.
                 prev_time = e.timestamp;
                 i += 1;
             }

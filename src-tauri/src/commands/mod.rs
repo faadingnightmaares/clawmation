@@ -1,4 +1,4 @@
-//! Tauri commands — the 1:1 port of the pywebview `api.*` surface.
+//! Tauri commands: the 1:1 port of the pywebview `api.*` surface.
 
 pub mod ai;
 pub mod chains;

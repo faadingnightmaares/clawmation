@@ -1,4 +1,4 @@
-//! Recording commands — start, stop, and pause capture.
+//! Recording commands: start, stop, and pause capture.
 //!
 //! Thin `#[tauri::command]` wrappers over [`Core`](crate::core::Core), which
 //! holds the faithful port of `Api.start_record` / `stop_record` /

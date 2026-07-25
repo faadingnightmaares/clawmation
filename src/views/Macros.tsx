@@ -1,26 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { animate } from "animejs";
 import {
   BookmarkPlus,
+  ChevronDown,
   Copy,
   Download,
   Eye,
   FolderInput,
   Layers,
   ListVideo,
-  MoreVertical,
   Package,
   Pause,
-  Pencil,
   Play,
   Plus,
-  Repeat,
   Search,
   Shield,
   SlidersHorizontal,
   Square,
-  StickyNote,
-  Tag,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -55,11 +51,10 @@ import {
 import { STOPS, fmtAgo, fmtDur, fmtHotkey, repeatToIndex, repsFor } from "@/format";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import { useStaggerIn } from "@/lib/anime";
+import { reducedMotion, useStaggerIn } from "@/lib/anime";
 import type { ViewProps } from "./types";
 
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -76,12 +71,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -109,6 +98,10 @@ const SPEEDS = ["0.25", "0.5", "1", "1.5", "2", "4"] as const;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const CANCELLED = "cancelled";
 
+/** The repeat stops in words, for the places there is room for words. Index
+ *  matches `STOPS`; the compact chips on a row show the glyph instead. */
+const REPEAT_WORDS = ["Until I stop", "Once", "Twice", "3 times", "5 times", "10 times"];
+
 // Playback speed is a per-run argument to `play_macro`, not a stored macro field,
 // so the chosen value lives here. Keeping it in localStorage is what stops a
 // deliberate 2× from silently reverting to 1× the next time the app opens.
@@ -121,7 +114,7 @@ function readSpeeds(): Record<string, string> {
     const parsed: unknown = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
   } catch {
-    return {}; // hand-edited or truncated storage — start over rather than crash the view
+    return {}; // hand-edited or truncated storage; start over rather than crash the view
   }
 }
 
@@ -137,9 +130,7 @@ function Countdown({ n }: { n: number }) {
   }, [n]);
   return (
     <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-background/85 backdrop-blur-md">
-      <p className="mb-4 text-xs font-medium uppercase tracking-[0.3em] text-muted-foreground">
-        Get ready to record
-      </p>
+      <p className="mb-4 text-sm text-muted-foreground">Get ready to record</p>
       <div key={n} ref={ref} className="text-[10rem] font-bold leading-none text-primary">
         {n}
       </div>
@@ -148,14 +139,13 @@ function Countdown({ n }: { n: number }) {
   );
 }
 
-// ── A single reusable text prompt (name / category / notes), replacing the old
-//    window.prompt calls with something that matches the app. ──────────────────
+// ── A single reusable text prompt, for the two actions that name a *new* thing
+//    (everything a macro already owns is edited inline on its own row). ────────
 interface PromptSpec {
   title: string;
   label: string;
   value: string;
   placeholder?: string;
-  multiline?: boolean;
   submitLabel?: string;
   onSubmit: (value: string) => void;
 }
@@ -174,24 +164,14 @@ function PromptDialog({ spec, onClose }: { spec: PromptSpec | null; onClose: () 
         <DialogHeader>
           <DialogTitle>{spec.title}</DialogTitle>
         </DialogHeader>
-        <label className="text-sm font-medium text-muted-foreground">{spec.label}</label>
-        {spec.multiline ? (
-          <Textarea
-            autoFocus
-            rows={4}
-            value={value}
-            placeholder={spec.placeholder}
-            onChange={(e) => setValue(e.target.value)}
-          />
-        ) : (
-          <Input
-            autoFocus
-            value={value}
-            placeholder={spec.placeholder}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-          />
-        )}
+        <label className="text-sm text-muted-foreground">{spec.label}</label>
+        <Input
+          autoFocus
+          value={value}
+          placeholder={spec.placeholder}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             Cancel
@@ -216,8 +196,12 @@ export function Macros({ status }: ViewProps) {
   const [categoryFilter, setCategoryFilter] = useState("all");
 
   const [countdown, setCountdown] = useState<number | null>(null);
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
+  // The one row showing its settings. Only ever one: the panel is tall, and two
+  // open at once turns the list back into the stack of cards this replaced.
+  const [openRow, setOpenRow] = useState<string | null>(null);
+  // Set only when the open row is a *just-recorded* macro, which is the one time
+  // the name field should take focus by itself: it still has its generated name.
+  const [nameFresh, setNameFresh] = useState(false);
   const [prompt, setPrompt] = useState<PromptSpec | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [bulkConfirm, setBulkConfirm] = useState(false);
@@ -230,6 +214,7 @@ export function Macros({ status }: ViewProps) {
   const playingName = useRef<string | null>(null);
   const prevMode = useRef(mode);
   const [playingCard, setPlayingCard] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -246,16 +231,16 @@ export function Macros({ status }: ViewProps) {
     load();
   }, [load]);
 
-  // Single place that reacts to a run ending: refresh + arm rename after a
-  // recording, toast + clear the playing card after a playback.
+  // Single place that reacts to a run ending: refresh + open the new recording's
+  // row with its name ready to replace, toast + clear the playing row after a run.
   useEffect(() => {
     const prev = prevMode.current;
     if (prev === mode) return;
     if ((prev === "recording" || prev === "paused") && mode === "idle") {
       load().then(() => {
         if (pendingRename.current) {
-          setRenaming(pendingRename.current);
-          setRenameValue(pendingRename.current);
+          setOpenRow(pendingRename.current);
+          setNameFresh(true);
           pendingRename.current = null;
         }
       });
@@ -271,7 +256,28 @@ export function Macros({ status }: ViewProps) {
     prevMode.current = mode;
   }, [mode, load]);
 
+  // "/" jumps to the search box, Escape closes the open row: the two things a
+  // list this long is otherwise a mouse trip for.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing = !!el?.closest("input, textarea, [contenteditable='true']");
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (e.key === "Escape" && !typing) setOpenRow(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const busy = mode !== "idle" || countdown !== null;
+
+  const toggleRow = (name: string) => {
+    setNameFresh(false);
+    setOpenRow((cur) => (cur === name ? null : name));
+  };
 
   // ── Recording ────────────────────────────────────────────────────────────
   const toggleRecord = async () => {
@@ -280,7 +286,7 @@ export function Macros({ status }: ViewProps) {
         const res = await stopRecord();
         if (res?.ok) {
           pendingRename.current = res.name ?? null;
-          notify("success", `Saved “${res.name}” — ${res.events} actions`);
+          notify("success", `Saved “${res.name}” with ${res.events} actions`);
         } else {
           notify("error", res?.error || "Couldn't save the recording");
         }
@@ -303,12 +309,13 @@ export function Macros({ status }: ViewProps) {
     }
   };
 
+  const persistSpeeds = (next: Record<string, string>) => {
+    globalThis.localStorage?.setItem(SPEED_KEY, JSON.stringify(next));
+    return next;
+  };
+
   const setSpeed = (name: string, value: string) =>
-    setSpeeds((prev) => {
-      const next = { ...prev, [name]: value };
-      globalThis.localStorage?.setItem(SPEED_KEY, JSON.stringify(next));
-      return next;
-    });
+    setSpeeds((prev) => persistSpeeds({ ...prev, [name]: value }));
 
   const togglePause = async () => {
     try {
@@ -366,19 +373,26 @@ export function Macros({ status }: ViewProps) {
     }
   };
 
-  const commitRename = async () => {
-    const from = renaming;
-    const to = renameValue.trim();
-    setRenaming(null);
-    if (!from || !to || to === from) return;
+  const rename = async (from: string, to: string) => {
     try {
       const res = await renameMacro(from, to);
-      if (res?.ok) {
-        notify("success", `Renamed to “${res.name ?? to}”`);
-        load();
-      } else {
+      if (!res?.ok) {
         notify("error", res?.error || "Couldn't rename");
+        return;
       }
+      const name = res.name ?? to;
+      // The row is keyed by name, so follow it: the settings panel stays open on
+      // the macro the user is still editing, and its chosen speed goes with it.
+      setOpenRow((cur) => (cur === from ? name : cur));
+      setNameFresh(false);
+      setSpeeds((prev) => {
+        if (!prev[from]) return prev;
+        const next = { ...prev, [name]: prev[from] };
+        delete next[from];
+        return persistSpeeds(next);
+      });
+      notify("success", `Renamed to “${name}”`);
+      load();
     } catch {
       notify("error", "Couldn't rename");
     }
@@ -407,6 +421,7 @@ export function Macros({ status }: ViewProps) {
           next.delete(name);
           return next;
         });
+        setOpenRow((cur) => (cur === name ? null : cur));
         load();
       } else notify("error", res?.error || "Couldn't delete");
     } catch {
@@ -414,38 +429,23 @@ export function Macros({ status }: ViewProps) {
     }
   };
 
-  const askCategory = (m: MacroListItem) =>
-    setPrompt({
-      title: "Category",
-      label: "Group this macro under a label (leave blank to clear).",
-      value: m.category ?? "",
-      placeholder: "e.g. Farming",
-      onSubmit: async (v) => {
-        try {
-          await setCategory(m.name, v);
-          load();
-        } catch {
-          notify("error", "Couldn't set category");
-        }
-      },
-    });
+  const saveCategory = async (m: MacroListItem, value: string) => {
+    try {
+      await setCategory(m.name, value);
+      load();
+    } catch {
+      notify("error", "Couldn't set category");
+    }
+  };
 
-  const askNotes = (m: MacroListItem) =>
-    setPrompt({
-      title: "Notes",
-      label: "A reminder for later — what this macro does, where to run it.",
-      value: m.notes ?? "",
-      placeholder: "Runs the daily reward loop…",
-      multiline: true,
-      onSubmit: async (v) => {
-        try {
-          await setNotes(m.name, v);
-          load();
-        } catch {
-          notify("error", "Couldn't save notes");
-        }
-      },
-    });
+  const saveNotes = async (m: MacroListItem, value: string) => {
+    try {
+      await setNotes(m.name, value);
+      load();
+    } catch {
+      notify("error", "Couldn't save notes");
+    }
+  };
 
   const askSaveAsTemplate = (m: MacroListItem) =>
     setPrompt({
@@ -612,132 +612,135 @@ export function Macros({ status }: ViewProps) {
     <div className="flex flex-col gap-6">
       {countdown !== null && <Countdown n={countdown} />}
 
-      {/* ── Record hero ─────────────────────────────────────────────────── */}
-      <Card
-        className={cn(
-          "flex flex-col gap-5 p-6 transition-colors",
-          recording && "border-destructive/40 bg-destructive/5",
-        )}
-      >
+      {/* ── Header: what this is, and the one thing you came here to press ── */}
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Macros</h1>
+          <p className="text-sm text-muted-foreground">
+            {recording
+              ? "Do the task once. Every click and key is being captured."
+              : macros.length === 0
+                ? "Record what you do once, and Clawmation repeats it for you."
+                : `${macros.length} saved. Press Run on any of them.`}
+            {!recording && recordHotkey ? (
+              <>
+                {" "}
+                Or press <Kbd>{recordHotkey}</Kbd> without leaving your game.
+              </>
+            ) : null}
+          </p>
+        </div>
+
         {recording ? (
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-4">
-              <span className="relative flex size-3">
-                <span
-                  className={cn(
-                    "absolute inline-flex size-full rounded-full bg-destructive opacity-70",
-                    mode === "recording" && "animate-ping",
-                  )}
-                />
-                <span className="relative inline-flex size-3 rounded-full bg-destructive" />
-              </span>
-              <div>
-                <p className="font-mono text-3xl font-semibold tabular-nums">
-                  {fmtDur(status?.elapsed ?? 0)}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  {mode === "paused" ? "Paused" : "Recording"} · {status?.recorded_count ?? 0} action
-                  {(status?.recorded_count ?? 0) === 1 ? "" : "s"} captured
-                </p>
-              </div>
+          <div className="flex items-center gap-3 rounded-xl border border-destructive/40 bg-destructive/5 px-3 py-2">
+            <span className="relative flex size-2.5">
+              <span
+                className={cn(
+                  "absolute inline-flex size-full rounded-full bg-destructive opacity-70",
+                  mode === "recording" && "animate-ping",
+                )}
+              />
+              <span className="relative inline-flex size-2.5 rounded-full bg-destructive" />
+            </span>
+            <div className="leading-tight">
+              <p className="font-mono text-lg font-semibold tabular-nums">
+                {fmtDur(status?.elapsed ?? 0)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {mode === "paused" ? "Paused" : "Recording"} · {status?.recorded_count ?? 0} action
+                {(status?.recorded_count ?? 0) === 1 ? "" : "s"}
+              </p>
             </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={togglePause}>
-                {mode === "paused" ? <Play className="size-4" /> : <Pause className="size-4" />}
-                {mode === "paused" ? "Resume" : "Pause"}
-              </Button>
-              <Button variant="destructive" onClick={toggleRecord}>
-                <Square className="size-4 fill-current" />
-                Stop &amp; save
-              </Button>
-            </div>
+            <Button variant="outline" size="sm" onClick={togglePause}>
+              {mode === "paused" ? <Play className="size-4" /> : <Pause className="size-4" />}
+              {mode === "paused" ? "Resume" : "Pause"}
+            </Button>
+            <Button variant="destructive" size="sm" onClick={toggleRecord}>
+              <Square className="size-4 fill-current" />
+              Stop &amp; save
+            </Button>
           </div>
         ) : (
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-4">
-              <button
-                type="button"
-                onClick={toggleRecord}
-                disabled={mode === "playing" || countdown !== null}
-                className="group flex size-16 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition hover:brightness-105 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-40"
-                title="Start recording"
-              >
-                <span className="size-5 rounded-full bg-current transition group-hover:scale-90" />
-              </button>
-              <div>
-                <h1 className="text-lg font-semibold">Record a macro</h1>
-                <p className="max-w-md text-sm text-muted-foreground">
-                  Open your game, then press Record. Every click, key and pause is captured until
-                  you stop
-                  {recordHotkey ? (
-                    <>
-                      {" "}
-                      — or press <Kbd>{recordHotkey}</Kbd> hands-free
-                    </>
-                  ) : null}
-                  .
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={onImportMacro}>
-                <Upload className="size-4" />
-                Import
-              </Button>
-              <Button variant="ghost" size="sm" onClick={onImportBundle}>
-                <Package className="size-4" />
-                Bundle
-              </Button>
-            </div>
+          <div className="flex items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" title="Add a macro from a file">
+                  <Plus className="size-5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem onSelect={onImportMacro}>
+                  <Upload className="size-4" />
+                  Add a macro from a file
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={onImportBundle}>
+                  <Package className="size-4" />
+                  Add a bundle (macro + images)
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button size="lg" onClick={toggleRecord} disabled={busy}>
+              <span className="size-2.5 rounded-full bg-current" />
+              Record
+            </Button>
           </div>
         )}
-      </Card>
+      </header>
 
-      {/* ── Toolbar ─────────────────────────────────────────────────────── */}
+      {/* ── Search, category, sort ──────────────────────────────────────── */}
       {macros.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative min-w-[200px] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search macros…"
-              className="pl-9"
-            />
-          </div>
-          {categories.length > 0 && (
-            <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-              <SelectTrigger className="min-w-[150px]">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[200px] flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search macros…"
+                className="pl-9"
+              />
+            </div>
+            <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+              <SelectTrigger className="w-[170px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All categories</SelectItem>
-                {categories.map((c) => (
-                  <SelectItem key={c} value={c}>
-                    {c}
-                  </SelectItem>
-                ))}
+                <SelectItem value="recent">Recently played</SelectItem>
+                <SelectItem value="name">Name</SelectItem>
+                <SelectItem value="plays">Most played</SelectItem>
+                <SelectItem value="duration">Longest</SelectItem>
+                <SelectItem value="events">Most actions</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          {/* One click to filter, where the old dropdown took two. Only ever
+              rendered once the user has actually made categories. */}
+          {categories.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <FilterPill
+                active={categoryFilter === "all"}
+                onClick={() => setCategoryFilter("all")}
+              >
+                All
+              </FilterPill>
+              {categories.map((c) => (
+                <FilterPill
+                  key={c}
+                  active={categoryFilter === c}
+                  onClick={() => setCategoryFilter(categoryFilter === c ? "all" : c)}
+                >
+                  {c}
+                </FilterPill>
+              ))}
+            </div>
           )}
-          <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-            <SelectTrigger className="min-w-[150px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="recent">Recently played</SelectItem>
-              <SelectItem value="name">Name</SelectItem>
-              <SelectItem value="plays">Most played</SelectItem>
-              <SelectItem value="duration">Longest</SelectItem>
-              <SelectItem value="events">Most actions</SelectItem>
-            </SelectContent>
-          </Select>
         </div>
       )}
 
       {/* ── Bulk bar ────────────────────────────────────────────────────── */}
       {selected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5">
           <span className="text-sm font-medium">{selected.size} selected</span>
           <div className="flex-1" />
           <Button variant="ghost" size="sm" onClick={onBulkExport}>
@@ -759,7 +762,7 @@ export function Macros({ status }: ViewProps) {
         </div>
       )}
 
-      {/* ── List / empty state ──────────────────────────────────────────── */}
+      {/* ── The list ────────────────────────────────────────────────────── */}
       {macros.length === 0 ? (
         <EmptyState onRecord={toggleRecord} disabled={busy} />
       ) : visible.length === 0 ? (
@@ -767,171 +770,79 @@ export function Macros({ status }: ViewProps) {
           No macros match “{query}”.
         </p>
       ) : (
-        <div ref={listRef} className="flex flex-col gap-3">
-          {visible.map((m) => {
-            const repeatIdx = repeatToIndex(m.loop, m.loop_count);
-            const speed = speeds[m.name] ?? "1";
-            const isPlaying = playingCard === m.name && mode === "playing";
-            const guards = guardCounts[m.name] ?? 0;
-            const meta: string[] = [
-              `${m.events} action${m.events === 1 ? "" : "s"}`,
-              fmtDur(m.duration),
-            ];
-            if (m.play_count) meta.push(`played ${m.play_count}×`);
-            const ago = fmtAgo(m.last_played ?? 0);
-            if (ago) meta.push(ago);
-            return (
-              <Card key={m.name} className="gap-0 overflow-hidden p-0">
-                <div className="flex items-start gap-3 p-4">
-                  <Checkbox
-                    checked={selected.has(m.name)}
-                    onCheckedChange={() => toggleSelect(m.name)}
-                    className="mt-1"
-                    aria-label={`Select ${m.name}`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      {renaming === m.name ? (
-                        <Input
-                          autoFocus
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          onBlur={commitRename}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") commitRename();
-                            if (e.key === "Escape") setRenaming(null);
-                          }}
-                          className="h-7 max-w-xs"
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRenaming(m.name);
-                            setRenameValue(m.name);
-                          }}
-                          className="truncate rounded text-left font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          title="Click to rename"
-                        >
-                          {m.name}
-                        </button>
-                      )}
-                      {m.category && (
-                        <Badge variant="secondary" className="shrink-0 font-normal">
-                          {m.category}
-                        </Badge>
-                      )}
-                      {guards > 0 && (
-                        <Badge asChild variant="outline" className="shrink-0 font-normal">
-                          <button
-                            type="button"
-                            onClick={() => setGuardsFor(m.name)}
-                            title={`${guards} safety guard${guards === 1 ? "" : "s"} — click to edit`}
-                            className="gap-1 text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                          >
-                            <Shield className="size-3" />
-                            {guards}
-                          </button>
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                      {meta.join(" · ")}
-                    </p>
-                    {m.notes && (
-                      <p className="mt-1 truncate text-xs text-muted-foreground/80">{m.notes}</p>
-                    )}
-                  </div>
-
-                  <div className="flex shrink-0 items-center gap-2">
-                    <RepeatChips value={repeatIdx} onChange={(i) => changeRepeat(m, i)} />
-                    {isPlaying ? (
-                      <Button variant="destructive" size="sm" onClick={stopPlay}>
-                        <Square className="size-4 fill-current" />
-                        Stop
-                      </Button>
-                    ) : (
-                      <Button size="sm" onClick={() => play(m)} disabled={busy}>
-                        <Play className="size-4 fill-current" />
-                        {speed === "1" ? "Run" : `Run ${speed}×`}
-                      </Button>
-                    )}
-                    <MacroMenu
-                      speed={speed}
-                      onSpeed={(v) => setSpeed(m.name, v)}
-                      repeat={repeatIdx}
-                      onRepeat={(i) => changeRepeat(m, i)}
-                      onGuards={() => setGuardsFor(m.name)}
-                      onSteps={() => setStepsFor(m.name)}
-                      onCheckpoints={() => setCheckpointsFor(m.name)}
-                      onDuplicate={() => onDuplicate(m)}
-                      onRename={() => {
-                        setRenaming(m.name);
-                        setRenameValue(m.name);
-                      }}
-                      onCategory={() => askCategory(m)}
-                      onNotes={() => askNotes(m)}
-                      onSaveTemplate={() => askSaveAsTemplate(m)}
-                      onExport={() => onExportMacro(m)}
-                      onBundle={() => onExportBundle(m)}
-                      onDelete={() => setDeleteTarget(m.name)}
-                    />
-                  </div>
-                </div>
-                {isPlaying && (
-                  <div className="flex items-center gap-3 border-t border-border bg-secondary/30 px-4 py-2">
-                    <Progress
-                      value={
-                        (status?.play_total_reps ?? 0) > 0
-                          ? ((status?.play_iteration ?? 0) / (status?.play_total_reps ?? 1)) * 100
-                          : undefined
-                      }
-                      className="h-1.5 flex-1"
-                    />
-                    <span className="shrink-0 text-xs font-medium text-primary">
-                      {(status?.play_total_reps ?? 0) > 0
-                        ? `Rep ${status?.play_iteration ?? 0} / ${status?.play_total_reps}`
-                        : `Rep ${status?.play_iteration ?? 0} / ∞`}
-                    </span>
-                  </div>
-                )}
-              </Card>
-            );
-          })}
+        <div
+          ref={listRef}
+          className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card"
+        >
+          {visible.map((m) => (
+            <MacroRow
+              key={m.name}
+              macro={m}
+              guards={guardCounts[m.name] ?? 0}
+              speed={speeds[m.name] ?? "1"}
+              open={openRow === m.name}
+              focusName={openRow === m.name && nameFresh}
+              selected={selected.has(m.name)}
+              playing={playingCard === m.name && mode === "playing"}
+              iteration={status?.play_iteration ?? 0}
+              totalReps={status?.play_total_reps ?? 0}
+              busy={busy}
+              onToggle={() => toggleRow(m.name)}
+              onSelect={() => toggleSelect(m.name)}
+              onRun={() => play(m)}
+              onStop={stopPlay}
+              onSpeed={(v) => setSpeed(m.name, v)}
+              onRepeat={(i) => changeRepeat(m, i)}
+              onRename={(to) => rename(m.name, to)}
+              onCategory={(v) => saveCategory(m, v)}
+              onNotes={(v) => saveNotes(m, v)}
+              onGuards={() => setGuardsFor(m.name)}
+              onSteps={() => setStepsFor(m.name)}
+              onCheckpoints={() => setCheckpointsFor(m.name)}
+              onDuplicate={() => onDuplicate(m)}
+              onSavePreset={() => askSaveAsTemplate(m)}
+              onExport={() => onExportMacro(m)}
+              onBundle={() => onExportBundle(m)}
+              onDelete={() => setDeleteTarget(m.name)}
+            />
+          ))}
         </div>
       )}
 
       {/* ── Presets ─────────────────────────────────────────────────────── */}
       {templates.length > 0 && (
         <section className="flex flex-col gap-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-            <Layers className="size-4" />
-            Presets
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <Layers className="size-4 text-muted-foreground" />
+              Presets
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Saved setups you can start a new macro from.
+            </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
             {templates.map((t) => (
-              <Card key={t.name} className="flex flex-row items-center justify-between gap-2 p-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{t.name}</p>
+              <div key={t.name} className="flex items-center gap-3 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-foreground">{t.name}</p>
                   <p className="text-xs text-muted-foreground">
-                    {t.events} actions · {fmtDur(t.duration)}
+                    {t.events.toLocaleString()} actions · {fmtDur(t.duration)}
                   </p>
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button size="sm" variant="secondary" onClick={() => useTemplate(t)}>
-                    Use
-                  </Button>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    onClick={() => removeTemplate(t)}
-                    className="text-muted-foreground hover:text-destructive"
-                    title="Remove preset"
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                </div>
-              </Card>
+                <Button size="sm" variant="secondary" onClick={() => useTemplate(t)}>
+                  Use
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  onClick={() => removeTemplate(t)}
+                  className="text-muted-foreground hover:text-destructive"
+                  title="Remove preset"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
             ))}
           </div>
         </section>
@@ -1006,6 +917,322 @@ export function Macros({ status }: ViewProps) {
   );
 }
 
+// ── One row ──────────────────────────────────────────────────────────────────
+
+interface MacroRowProps {
+  macro: MacroListItem;
+  guards: number;
+  speed: string;
+  open: boolean;
+  focusName: boolean;
+  selected: boolean;
+  playing: boolean;
+  iteration: number;
+  totalReps: number;
+  busy: boolean;
+  onToggle: () => void;
+  onSelect: () => void;
+  onRun: () => void;
+  onStop: () => void;
+  onSpeed: (v: string) => void;
+  onRepeat: (i: number) => void;
+  onRename: (to: string) => void;
+  onCategory: (v: string) => void;
+  onNotes: (v: string) => void;
+  onGuards: () => void;
+  onSteps: () => void;
+  onCheckpoints: () => void;
+  onDuplicate: () => void;
+  onSavePreset: () => void;
+  onExport: () => void;
+  onBundle: () => void;
+  onDelete: () => void;
+}
+
+/**
+ * A macro as a hairline row: name, plain meta, repeat, and the one verb, Run.
+ * Everything else lives in a panel the row opens onto, so a setting is one click
+ * away instead of a menu, a submenu and a dialog. The whole row is the toggle
+ * (an overlay button behind the content), which is why the content layer is
+ * pointer-transparent and each real control opts back in.
+ */
+function MacroRow(p: MacroRowProps) {
+  const { macro } = p;
+  const panelId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  const [draftName, setDraftName] = useState(macro.name);
+  const [draftCategory, setDraftCategory] = useState(macro.category ?? "");
+  const [draftNotes, setDraftNotes] = useState(macro.notes ?? "");
+  useEffect(() => setDraftName(macro.name), [macro.name]);
+  useEffect(() => setDraftCategory(macro.category ?? ""), [macro.category]);
+  useEffect(() => setDraftNotes(macro.notes ?? ""), [macro.notes]);
+
+  useEffect(() => {
+    if (!p.open || !panelRef.current || reducedMotion()) return;
+    animate(panelRef.current, { opacity: [0, 1], translateY: [-6, 0], duration: 200, ease: "out(3)" });
+  }, [p.open]);
+
+  useEffect(() => {
+    if (p.open && p.focusName) {
+      nameRef.current?.focus();
+      nameRef.current?.select();
+    }
+  }, [p.open, p.focusName]);
+
+  const commitName = () => {
+    const to = draftName.trim();
+    if (!to || to === macro.name) {
+      setDraftName(macro.name);
+      return;
+    }
+    p.onRename(to);
+  };
+  const commitCategory = () => {
+    const v = draftCategory.trim();
+    if (v !== (macro.category ?? "")) p.onCategory(v);
+  };
+  const commitNotes = () => {
+    const v = draftNotes.trim();
+    if (v !== (macro.notes ?? "")) p.onNotes(v);
+  };
+
+  const repeatIdx = repeatToIndex(macro.loop, macro.loop_count);
+  const meta = [
+    `${macro.events.toLocaleString()} action${macro.events === 1 ? "" : "s"}`,
+    fmtDur(macro.duration),
+  ];
+  if (macro.play_count) meta.push(`played ${macro.play_count}×`);
+  const ago = fmtAgo(macro.last_played ?? 0);
+  if (ago) meta.push(ago);
+
+  return (
+    <div className={cn("transition-colors", p.playing && "bg-primary/5", p.open && "bg-muted/40")}>
+      <div className="group relative">
+        <button
+          type="button"
+          onClick={p.onToggle}
+          aria-expanded={p.open}
+          aria-controls={panelId}
+          className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <span className="sr-only">
+            {p.open ? "Hide settings for" : "Settings for"} {macro.name}
+          </span>
+        </button>
+
+        <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
+          {/* Glyph until you reach for the row, checkbox once you do: selection
+              without a checkbox column standing in every row all the time. */}
+          <div className="pointer-events-auto relative size-8 shrink-0">
+            <span
+              className={cn(
+                "absolute inset-0 flex items-center justify-center rounded-lg bg-secondary text-muted-foreground transition-opacity",
+                p.selected
+                  ? "opacity-0"
+                  : "group-hover:opacity-0 group-focus-within:opacity-0",
+              )}
+            >
+              <ListVideo className="size-4" />
+            </span>
+            <span
+              className={cn(
+                "absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
+                p.selected && "opacity-100",
+              )}
+            >
+              <Checkbox
+                checked={p.selected}
+                onCheckedChange={p.onSelect}
+                aria-label={`Select ${macro.name}`}
+              />
+            </span>
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate font-medium text-foreground">{macro.name}</span>
+              {macro.category && (
+                <Badge variant="secondary" className="shrink-0 font-normal">
+                  {macro.category}
+                </Badge>
+              )}
+              {p.guards > 0 && (
+                <Badge asChild variant="outline" className="pointer-events-auto shrink-0 font-normal">
+                  <button
+                    type="button"
+                    onClick={p.onGuards}
+                    title={`${p.guards} safety guard${p.guards === 1 ? "" : "s"}. Click to edit`}
+                    className="gap-1 text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                  >
+                    <Shield className="size-3" />
+                    {p.guards}
+                  </button>
+                </Badge>
+              )}
+            </div>
+            <p className="mt-0.5 truncate text-sm text-muted-foreground">{meta.join(" · ")}</p>
+            {macro.notes && !p.open && (
+              <p className="mt-1 truncate text-xs text-muted-foreground/80">{macro.notes}</p>
+            )}
+          </div>
+
+          <RepeatChips
+            value={repeatIdx}
+            onChange={p.onRepeat}
+            className="pointer-events-auto hidden md:flex"
+          />
+          {p.playing ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={p.onStop}
+              className="pointer-events-auto"
+            >
+              <Square className="size-4 fill-current" />
+              Stop
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={p.onRun}
+              disabled={p.busy}
+              className="pointer-events-auto"
+            >
+              <Play className="size-4 fill-current" />
+              {p.speed === "1" ? "Run" : `Run ${p.speed}×`}
+            </Button>
+          )}
+          <ChevronDown
+            className={cn(
+              "size-4 shrink-0 text-muted-foreground transition-transform",
+              p.open && "rotate-180",
+            )}
+          />
+        </div>
+      </div>
+
+      {p.playing && (
+        <div className="flex items-center gap-3 border-t border-border px-4 py-2">
+          <Progress
+            value={p.totalReps > 0 ? (p.iteration / p.totalReps) * 100 : undefined}
+            className="h-1.5 flex-1"
+          />
+          <span className="shrink-0 text-xs font-medium text-primary">
+            {p.totalReps > 0 ? `Rep ${p.iteration} / ${p.totalReps}` : `Rep ${p.iteration} / ∞`}
+          </span>
+        </div>
+      )}
+
+      {p.open && (
+        <div ref={panelRef} id={panelId} className="border-t border-border px-4 py-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Name">
+              <Input
+                ref={nameRef}
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Escape") setDraftName(macro.name);
+                }}
+              />
+            </Field>
+            <Field label="Category" hint="Groups it under a label. Leave blank for none.">
+              <Input
+                value={draftCategory}
+                onChange={(e) => setDraftCategory(e.target.value)}
+                onBlur={commitCategory}
+                onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+                placeholder="e.g. Farming"
+              />
+            </Field>
+            <div className="sm:col-span-2">
+              <Field label="Notes" hint="A reminder for later: what it does, where to run it.">
+                <Textarea
+                  rows={2}
+                  value={draftNotes}
+                  onChange={(e) => setDraftNotes(e.target.value)}
+                  onBlur={commitNotes}
+                  placeholder="Runs the daily reward loop…"
+                />
+              </Field>
+            </div>
+            <Field label="Playback speed" hint="1× is exactly how you recorded it.">
+              <div className="flex flex-wrap gap-1.5">
+                {SPEEDS.map((s) => (
+                  <Chip key={s} active={p.speed === s} onClick={() => p.onSpeed(s)}>
+                    {s}×
+                  </Chip>
+                ))}
+              </div>
+            </Field>
+            {/* The compact chips on the row are md-and-up; below that this is the
+                only way to reach the setting at all. */}
+            <div className="md:hidden">
+              <Field label="Repeat">
+                <div className="flex flex-wrap gap-1.5">
+                  {STOPS.map((s, i) => (
+                    <Chip key={s} active={repeatIdx === i} onClick={() => p.onRepeat(i)}>
+                      {REPEAT_WORDS[i]}
+                    </Chip>
+                  ))}
+                </div>
+              </Field>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4">
+            <Button variant="outline" size="sm" onClick={p.onGuards}>
+              <Shield className="size-4" />
+              Safety guards{p.guards > 0 ? ` · ${p.guards}` : ""}
+            </Button>
+            <Button variant="outline" size="sm" onClick={p.onCheckpoints}>
+              <Eye className="size-4" />
+              Vision checkpoints
+            </Button>
+            <Button variant="outline" size="sm" onClick={p.onSteps}>
+              <SlidersHorizontal className="size-4" />
+              Fine-tune actions
+            </Button>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-1">
+            <Button variant="ghost" size="sm" onClick={p.onDuplicate}>
+              <Copy className="size-4" />
+              Duplicate
+            </Button>
+            <Button variant="ghost" size="sm" onClick={p.onSavePreset}>
+              <BookmarkPlus className="size-4" />
+              Save as preset
+            </Button>
+            <Button variant="ghost" size="sm" onClick={p.onExport}>
+              <Download className="size-4" />
+              Share as file
+            </Button>
+            <Button variant="ghost" size="sm" onClick={p.onBundle}>
+              <FolderInput className="size-4" />
+              Share with images
+            </Button>
+            <div className="flex-1" />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={p.onDelete}
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Trash2 className="size-4" />
+              Delete
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Small pieces ─────────────────────────────────────────────────────────────
 
 function Kbd({ children }: { children: React.ReactNode }) {
@@ -1016,10 +1243,88 @@ function Kbd({ children }: { children: React.ReactNode }) {
   );
 }
 
-function RepeatChips({ value, onChange }: { value: number; onChange: (i: number) => void }) {
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-foreground">{label}</span>
+      {children}
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </label>
+  );
+}
+
+function Chip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+        active
+          ? "border-primary bg-primary/15 text-foreground"
+          : "border-border text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function FilterPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+        active
+          ? "border-primary bg-primary/15 text-foreground"
+          : "border-border text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function RepeatChips({
+  value,
+  onChange,
+  className,
+}: {
+  value: number;
+  onChange: (i: number) => void;
+  className?: string;
+}) {
   return (
     <div
-      className="hidden items-center rounded-md border border-border p-0.5 md:flex"
+      className={cn("items-center rounded-md border border-border p-0.5", className)}
       title="How many times to repeat"
     >
       {STOPS.map((s, i) => (
@@ -1027,6 +1332,8 @@ function RepeatChips({ value, onChange }: { value: number; onChange: (i: number)
           key={s}
           type="button"
           onClick={() => onChange(i)}
+          aria-label={`Repeat: ${REPEAT_WORDS[i]}`}
+          aria-pressed={value === i}
           className={cn(
             "min-w-6 rounded px-1.5 py-0.5 text-xs font-medium transition-colors",
             value === i
@@ -1041,126 +1348,9 @@ function RepeatChips({ value, onChange }: { value: number; onChange: (i: number)
   );
 }
 
-interface MacroMenuProps {
-  speed: string;
-  onSpeed: (v: string) => void;
-  repeat: number;
-  onRepeat: (i: number) => void;
-  onGuards: () => void;
-  onSteps: () => void;
-  onCheckpoints: () => void;
-  onDuplicate: () => void;
-  onRename: () => void;
-  onCategory: () => void;
-  onNotes: () => void;
-  onSaveTemplate: () => void;
-  onExport: () => void;
-  onBundle: () => void;
-  onDelete: () => void;
-}
-
-function MacroMenu(p: MacroMenuProps) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" className="text-muted-foreground">
-          <MoreVertical className="size-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuItem onSelect={p.onGuards}>
-          <Shield className="size-4" />
-          Safety guards
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onCheckpoints}>
-          <Eye className="size-4" />
-          Vision checkpoints
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onSteps}>
-          <SlidersHorizontal className="size-4" />
-          Fine-tune actions
-        </DropdownMenuItem>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <Play className="size-4" />
-            Speed
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup value={p.speed} onValueChange={p.onSpeed}>
-              {SPEEDS.map((s) => (
-                <DropdownMenuRadioItem key={s} value={s}>
-                  {s}×{s === "1" ? " (normal)" : ""}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        {/* The repeat chips on the card are md-and-up only; below that this is the
-            only way to reach the setting at all. */}
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger className="md:hidden">
-            <Repeat className="size-4" />
-            Repeat
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup
-              value={String(p.repeat)}
-              onValueChange={(v) => p.onRepeat(Number(v))}
-            >
-              {STOPS.map((s, i) => (
-                <DropdownMenuRadioItem key={s} value={String(i)}>
-                  {s === "∞" ? "Forever" : s === "1" ? "Once" : `${s} times`}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={p.onRename}>
-          <Pencil className="size-4" />
-          Rename
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onDuplicate}>
-          <Copy className="size-4" />
-          Duplicate
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onCategory}>
-          <Tag className="size-4" />
-          Category
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onNotes}>
-          <StickyNote className="size-4" />
-          Notes
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onSaveTemplate}>
-          <BookmarkPlus className="size-4" />
-          Save as preset
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={p.onExport}>
-          <Download className="size-4" />
-          Export to file
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={p.onBundle}>
-          <FolderInput className="size-4" />
-          Export bundle
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={p.onDelete}
-          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
-        >
-          <Trash2 className="size-4" />
-          Delete
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 function EmptyState({ onRecord, disabled }: { onRecord: () => void; disabled: boolean }) {
   return (
-    <Card className="flex flex-col items-center gap-5 px-6 py-14 text-center">
+    <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
       <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
         <ListVideo className="size-7" />
       </div>
@@ -1179,7 +1369,7 @@ function EmptyState({ onRecord, disabled }: { onRecord: () => void; disabled: bo
         <Plus className="size-4" />
         Record your first macro
       </Button>
-    </Card>
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@ const POLL_MS = 500;
 /**
  * Polls `get_status` once immediately and then every 500ms, returning the
  * latest payload (or `null` before the first response). Mirrors the Python
- * UI's `onTick`: a single failed poll is best-effort — it skips this tick and
+ * UI's `onTick`: a single failed poll is best-effort; it skips this tick and
  * retries on the next one rather than tearing down the UI.
  */
 export function useStatus(): Status | null {
@@ -21,7 +21,7 @@ export function useStatus(): Status | null {
         const next = await getStatus();
         if (alive) setStatus(next);
       } catch {
-        // Transient poll failure (e.g. backend mid-startup) — retry next tick.
+        // Transient poll failure (e.g. backend mid-startup). Retry next tick.
       }
     };
     tick();

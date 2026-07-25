@@ -1,11 +1,11 @@
-//! The transparent pixel-cat recording indicator — the Rust seat of Python's
+//! The transparent pixel-cat recording indicator, the Rust seat of Python's
 //! `NativeIndicator` (`overlay.py`) and the `_sync_indicator` glue that shows it.
 //!
 //! Python drew the cat itself into a Win32 layered window; here the drawing lives
 //! in the `indicator.html` webview and this module owns only the *window*. It
 //! builds one transparent, click-through, no-activate overlay at startup (hidden,
 //! top-right), and [`Indicator::sync`] shows it for recording/playing/paused and
-//! hides it at idle — driven from [`Core::set_mode`](crate::core::Core::set_mode),
+//! hides it at idle, driven from [`Core::set_mode`](crate::core::Core::set_mode),
 //! the exact spot where `ui_app._set_mode` calls `_sync_indicator`.
 
 use std::sync::Mutex;
@@ -15,17 +15,18 @@ use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilde
 /// Window label; the `indicator` capability and the render page key off it.
 pub const LABEL: &str = "indicator";
 
-/// Overlay size: the 112×72 cat-tail canvas (`src/indicator/cat.ts`) at 2× so the
-/// counting eyes stay legible in the corner — see the page's `image-rendering:
-/// pixelated`. Wider and shorter than the head-only cat this replaced, because
-/// the tail now drops in from off-canvas to the left of the face.
+/// Overlay size: the 112×104 cat-tail canvas (`src/indicator/cat.ts`) at 2× so the
+/// counting eyes stay legible in the corner; see the page's `image-rendering:
+/// pixelated`. Taller than the head-only cat this replaced, because the tail now
+/// drops the length of the window before the face arrives.
 const WIDTH: f64 = 224.0;
-const HEIGHT: f64 = 144.0;
-/// Gap from the top-right screen corner — `NativeIndicator.MARGIN`.
+const HEIGHT: f64 = 208.0;
+/// Gap from the right screen edge (`NativeIndicator.MARGIN`). Horizontal only:
+/// see the vertical placement in [`create`].
 const MARGIN: f64 = 16.0;
 
 /// Holds the app handle, bound in `setup()` once the overlay exists. A `sync`
-/// before that (or in tests, where no window is built) finds `None` and no-ops —
+/// before that (or in tests, where no window is built) finds `None` and no-ops,
 /// the analogue of Python's `if self._hwnd:` guard around show/hide.
 #[derive(Default)]
 pub struct Indicator {
@@ -42,7 +43,7 @@ impl Indicator {
         *self.app.lock().unwrap() = Some(app);
     }
 
-    /// Show the cat for recording/playing/paused, hide it at idle — the port of
+    /// Show the cat for recording/playing/paused, hide it at idle: the port of
     /// `NativeIndicator.set_state`'s show/hide branch. The page reads mode and
     /// elapsed straight off `get_status`, so this only toggles window visibility;
     /// an unattached handle (pre-`setup`, or tests) no-ops.
@@ -58,13 +59,13 @@ impl Indicator {
     }
 }
 
-/// Build the overlay once — hidden, top-right of the primary monitor. The builder
+/// Build the overlay once: hidden, top-right of the primary monitor. The builder
 /// flags reproduce `overlay.py`'s Win32 ex-styles: `transparent` (WS_EX_LAYERED
-/// per-pixel alpha), `focusable(false)` (WS_EX_NOACTIVATE — never steals focus
-/// from the game), `skip_taskbar` (WS_EX_TOOLWINDOW — no taskbar/Alt-Tab entry),
+/// per-pixel alpha), `focusable(false)` (WS_EX_NOACTIVATE, never steals focus
+/// from the game), `skip_taskbar` (WS_EX_TOOLWINDOW, no taskbar/Alt-Tab entry),
 /// `always_on_top` (WS_EX_TOPMOST), and `set_ignore_cursor_events` (WS_EX_TRANSPARENT
 /// click-through). It starts hidden; `set_mode` reveals it. Errors bubble to the
-/// caller in `setup`, which logs and continues — a failed overlay must not abort
+/// caller in `setup`, which logs and continues; a failed overlay must not abort
 /// startup, matching `_run`'s try/except that leaves the indicator absent.
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("indicator.html".into()))
@@ -82,13 +83,21 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
     // Click-through: mouse events fall straight through to the game below.
     win.set_ignore_cursor_events(true)?;
-    // Park it top-right with MARGIN, in logical px (`sw - WIDTH - MARGIN`, `MARGIN`
-    // from `_create_window`). Done after build — still hidden, so no flash — since
-    // the placement depends on the monitor the window actually landed on.
+    // And out of every screen grab: the cat sits over the top-right corner of the
+    // screen the whole time a macro plays, which is the corner a trigger watching
+    // that region is trying to read.
+    let _ = crate::hardware::shield::set_excluded(win.hwnd()?.0, true);
+    // Park it against the top-right corner, in logical px. Inset from the right by
+    // MARGIN, but flush to the top at y = 0: the cat hangs by a tail whose base is
+    // drawn already cut off by the canvas edge, and only the physical screen edge
+    // makes that cut read as "the tail continues over the top". A gap there (the
+    // `MARGIN` this used to use for y) leaves the tail ending in mid-air instead.
+    // Done after build (still hidden, so no flash), since the placement depends on
+    // the monitor the window actually landed on.
     if let Ok(Some(monitor)) = win.primary_monitor() {
         let logical_w = monitor.size().width as f64 / monitor.scale_factor();
         let x = (logical_w - WIDTH - MARGIN).max(0.0);
-        let _ = win.set_position(LogicalPosition::new(x, MARGIN));
+        let _ = win.set_position(LogicalPosition::new(x, 0.0));
     }
     Ok(())
 }

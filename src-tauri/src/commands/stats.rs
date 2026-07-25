@@ -1,4 +1,4 @@
-//! Stats commands — the dashboard's aggregate play statistics and run log.
+//! Stats commands: the dashboard's aggregate play statistics and run log.
 //!
 //! Ports of `Api.get_stats_summary` and `get_run_history`. The summary composes
 //! five sources: per-macro play counts ([`PlayStats::all`](crate::engine::stats::PlayStats::all)),
@@ -44,7 +44,7 @@ pub fn get_run_history(state: State<AppState>, limit: Option<usize>) -> Value {
     json!(state.core.play_stats.history(limit.unwrap_or(30)))
 }
 
-/// `len(list(MACROS_DIR.glob("*.json")))` — number of macro files on disk.
+/// `len(list(MACROS_DIR.glob("*.json")))`: number of macro files on disk.
 fn count_macro_files() -> usize {
     match std::fs::read_dir(paths::macros_dir()) {
         Ok(entries) => entries

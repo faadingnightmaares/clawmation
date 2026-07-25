@@ -1,4 +1,4 @@
-//! Macro scheduler engine — fire macros/chains on an interval or at a set time.
+//! Macro scheduler engine: fire macros/chains on an interval or at a set time.
 //!
 //! Mirrors `anime_macro/scheduler.py::MacroScheduler`. One background thread ticks
 //! once a second; when a schedule is due and the app is idle it fires the target
@@ -191,7 +191,7 @@ impl Inner {
             };
 
             for d in due {
-                // Only fire when idle — never interrupt an active session.
+                // Only fire when idle; never interrupt an active session.
                 if !(self.is_idle)() {
                     continue;
                 }
@@ -224,7 +224,7 @@ impl Inner {
 #[cfg(test)]
 impl MacroScheduler {
     /// Inject a pre-built schedule without minting an id or clamping the
-    /// interval — the analogue of the Python test's `sched._schedules[id] = s`.
+    /// interval, the analogue of the Python test's `sched._schedules[id] = s`.
     fn insert_raw(&self, s: Schedule) {
         self.inner.schedules.lock().unwrap().push(s);
     }

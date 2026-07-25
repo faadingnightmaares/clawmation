@@ -1,52 +1,29 @@
-import { useState } from "react";
-import { ShieldCheck, Workflow } from "lucide-react";
-
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Guards } from "./Guards";
 import { Chains } from "./Chains";
+import { Guards } from "./Guards";
 import type { ViewProps } from "./types";
 
 /**
- * Guards and Chains under one roof. They were separate pages, which made them
- * look like separate ideas — they are both answers to "keep running while I'm
- * not here", and you reach for them in the same breath.
+ * Guards and chains, on one page. They used to be two tabs, which made them look
+ * like two ideas you had to choose between. They are both answers to "keep
+ * running while I'm not here", and you set them up in the same sitting. Chains
+ * come first because they are the thing you start; guards are what protect it.
  *
- * The inactive tab stays unmounted (Radix's default), which matters here: the
- * Chains panel runs a 500ms poll for the live-run banner and must not keep it up
- * while you are reading the Guards list.
+ * Both halves are mounted the whole time, so the Chains poll now backs off while
+ * nothing is running rather than relying on being unmounted.
  */
 export function Autopilot(props: ViewProps) {
-  const [tab, setTab] = useState("guards");
-
   return (
-    <div className="space-y-8">
+    <div className="flex flex-col gap-8">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">Autopilot</h1>
         <p className="text-sm text-muted-foreground">
-          Keep your macros running while you're away — safety nets that catch trouble, and chains
-          that play them one after another.
+          Keep your macros running while you're away, with chains that play them one after another, and
+          guards that catch trouble mid-run.
         </p>
       </header>
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="w-full sm:w-auto">
-          <TabsTrigger value="guards" className="sm:px-6">
-            <ShieldCheck />
-            Guards
-          </TabsTrigger>
-          <TabsTrigger value="chains" className="sm:px-6">
-            <Workflow />
-            Chains
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="guards" className="pt-4">
-          <Guards {...props} />
-        </TabsContent>
-        <TabsContent value="chains" className="pt-4">
-          <Chains {...props} />
-        </TabsContent>
-      </Tabs>
+      <Chains {...props} />
+      <Guards {...props} />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-//! Schedule data model — `config/schedules.json` as a bare array.
+//! Schedule data model: `config/schedules.json` as a bare array.
 //!
 //! Mirrors `anime_macro/scheduler.py::Schedule`. Like `Chain`, Python coerces a
 //! persisted `0` for `interval_min` (-> 30.0) and `repeat` (-> 1) back to the
@@ -88,7 +88,7 @@ impl<'de> Deserialize<'de> for Schedule {
             id: raw.id,
             macro_name: raw.macro_name,
             kind: raw.kind,
-            // `x or 30.0` / `x or 1` — absent OR persisted-zero both become the default.
+            // `x or 30.0` / `x or 1`: absent OR persisted-zero both become the default.
             interval_min: if raw.interval_min == 0.0 {
                 30.0
             } else {

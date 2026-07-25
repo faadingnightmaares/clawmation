@@ -38,7 +38,7 @@ import type { EditorSheetProps } from "./GuardsSheet";
 // image shows up, then clicks it / presses a key (Wait & act), or holds a button
 // as the target moves and lets go when it appears/disappears (Hold & follow).
 // The draft here is the working copy the form edits; `add` freezes it into the
-// exact config map the backend stores — every one of those fields is load-bearing
+// exact config map the backend stores; every one of those fields is load-bearing
 // (the checkpoint runner reads them by name), so the object below is transcribed,
 // not paraphrased, and tsc cannot police it (`addCheckpoint` takes an open `Json`).
 
@@ -123,7 +123,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
 
   const patch = (p: Partial<CheckpointDraft>) => setDraft((d) => ({ ...d, ...p }));
 
-  // ── Native screen selections — each merges its result back into the draft ──
+  // ── Native screen selections: each merges its result back into the draft ──
   const onPickColor = async () => {
     try {
       const r = await guardPickColor();
@@ -181,7 +181,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
       notify("error", "Capture an image first.");
       return;
     }
-    // The stored config map — every field the checkpoint runner reads.
+    // The stored config map: every field the checkpoint runner reads.
     const checkpoint = {
       mode: draft.mode,
       method: draft.method,
@@ -247,7 +247,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
         <SheetHeader className="px-6 pb-2 pr-12 pt-6">
           <SheetTitle>Checkpoints</SheetTitle>
           <SheetDescription>
-            Make “{macroName}” wait for the screen to be ready before it carries on — perfect for loading
+            Make “{macroName}” wait for the screen to be ready before it carries on. Perfect for loading
             screens, popups, and moving targets.
           </SheetDescription>
         </SheetHeader>
@@ -416,7 +416,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
               >
                 <Crop className="size-4" /> {regionSet ? "Watch area set" : "Limit to an area"}
               </Button>
-              <span className="text-xs text-muted-foreground">Optional — keeps it looking where it matters.</span>
+              <span className="text-xs text-muted-foreground">Optional. Keeps it looking where it matters.</span>
             </div>
 
             {/* Then… */}

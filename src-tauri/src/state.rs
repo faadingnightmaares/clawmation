@@ -24,7 +24,7 @@ pub struct AppState {
     pub scheduler: Arc<MacroScheduler>,
     /// Present only while the vision-agent loop is running (`Api.start_vision`).
     pub vision_agent: Arc<Mutex<Option<VisionAgent>>>,
-    /// The vision panel's rolling event feed (`Api._vision_log`) — `(kind, msg)`
+    /// The vision panel's rolling event feed (`Api._vision_log`): `(kind, msg)`
     /// pairs, newest last, capped at 50. Fed by the agent's `on_event` closure.
     pub vision_log: Arc<Mutex<Vec<(String, String)>>>,
 }
@@ -62,10 +62,10 @@ impl AppState {
         let fire: Box<dyn Fn(&str, i64) -> bool + Send + Sync> = {
             let core = core.clone();
             Box::new(move |name, repeat| {
-                // Scheduled-run toast — `Api._scheduler_fire`.
+                // Scheduled-run toast, `Api._scheduler_fire`.
                 if core.config.lock().unwrap().notify_on_schedule {
                     core.notifier.notify(
-                        "Clawmation \u{2014} Scheduled Macro",
+                        "Clawmation: Scheduled Macro",
                         &format!("Running '{name}'"),
                     );
                 }
@@ -79,7 +79,7 @@ impl AppState {
             let core = core.clone();
             let chains = chains.clone();
             Box::new(move |cid| {
-                // Scheduled-chain toast — `Api._scheduler_fire_chain`. Resolve the
+                // Scheduled-chain toast, `Api._scheduler_fire_chain`. Resolve the
                 // chain's name for a friendlier message, falling back to its id.
                 if core.config.lock().unwrap().notify_on_schedule {
                     let chain_name = chains
@@ -89,7 +89,7 @@ impl AppState {
                         .map(|c| c.name)
                         .unwrap_or_else(|| cid.to_string());
                     core.notifier.notify(
-                        "Clawmation \u{2014} Scheduled Chain",
+                        "Clawmation: Scheduled Chain",
                         &format!("Running chain '{chain_name}'"),
                     );
                 }

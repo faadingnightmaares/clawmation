@@ -1,8 +1,8 @@
-//! System tray icon + menu — the port of `Api._start_tray` and `SystemTray._run`.
+//! System tray icon + menu: the port of `Api._start_tray` and `SystemTray._run`.
 //!
 //! Menu: "Show Clawmation" (the default left-click action), "Replay last macro",
 //! a separator, then "Quit". Left-clicking the icon restores the window; the
-//! tooltip and item labels match the Python tray character-for-character.
+//! item labels match the Python tray character-for-character.
 //!
 //! Quit is the only way out of the app: the window's close button hides to the
 //! tray rather than ending the process (see the `CloseRequested` handler in
@@ -24,7 +24,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("clawmation")
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("Clawmation \u{2014} Macro Recorder")
+        .tooltip("Clawmation: Macro Recorder")
         .menu(&menu)
         // Left-click restores the window (pystray's `default=True` item); the menu
         // opens on right-click, Tauri's default.
@@ -49,7 +49,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Restore and focus the main window — `Api._tray_show` (SW_RESTORE +
+/// Restore and focus the main window: `Api._tray_show` (SW_RESTORE +
 /// SetForegroundWindow). Also used by the single-instance callback when a second
 /// launch is folded back into the running one.
 pub fn show_main_window(app: &AppHandle) {

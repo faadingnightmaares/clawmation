@@ -1,4 +1,4 @@
-//! Recorded macro data model — `macros/<name>.json`.
+//! Recorded macro data model: `macros/<name>.json`.
 //!
 //! Mirrors `anime_macro/recorder.py::{Macro, InputEvent, InputEventType}`.
 //! Python's `from_dict` reads some keys by subscript (`d["name"]`, `d["type"]`,

@@ -1,4 +1,4 @@
-//! User configuration — persisted to `config/settings.yaml`.
+//! User configuration, persisted to `config/settings.yaml`.
 //!
 //! Mirrors `anime_macro/config.py::MacroConfig`. Field defaults and the on-disk
 //! YAML shape stay compatible so existing installs keep working. Unknown keys in
@@ -79,7 +79,7 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/settings.yaml");
         let text = std::fs::read_to_string(&path).expect("fixture readable");
-        // Deserialize the text directly — `MacroConfig::load` is hardcoded to the
+        // Deserialize the text directly; `MacroConfig::load` is hardcoded to the
         // real config dir and cannot point at the fixture.
         let cfg: MacroConfig = serde_yaml::from_str(&text).expect("settings.yaml parses");
 

@@ -1,4 +1,4 @@
-//! Guard data model — `macros/guards/<macro_name>.json` as `{"guards": [...]}`.
+//! Guard data model: `macros/guards/<macro_name>.json` as `{"guards": [...]}`.
 //!
 //! Mirrors `anime_macro/guards.py::Guard`. `from_dict` preserves persisted
 //! `0`/`""`/`[]` (no falsy coercion), so container-level `#[serde(default)]`
@@ -33,7 +33,7 @@ pub struct Guard {
     pub method: String,
     pub hsv_low: [i64; 3],
     pub hsv_high: [i64; 3],
-    /// Region as percentage *corners* `[x1, y1, x2, y2]` of the frame — the
+    /// Region as percentage *corners* `[x1, y1, x2, y2]` of the frame, the
     /// order `config.py::Region` takes and `extract_roi` slices as
     /// `frame[y1:y2, x1:x2]`. Not `[x, y, w, h]`.
     pub region: [f64; 4],

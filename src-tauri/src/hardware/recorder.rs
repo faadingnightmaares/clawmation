@@ -1,4 +1,4 @@
-//! Global input recording — raw Win32 low-level hooks capturing mouse/keyboard.
+//! Global input recording: raw Win32 low-level hooks capturing mouse/keyboard.
 //!
 //! Faithful port of `anime_macro/recorder.py::MacroRecorder`. The Python app
 //! records through pynput, which installs `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks
@@ -11,14 +11,14 @@
 //! Two structural facts of low-level hooks shape this module:
 //!   * the hook procedure is a bare C callback with no user-data parameter, so
 //!     the recording state lives in a process-global `Mutex` the procs lock.
-//!     That is honest rather than ugly — a system-wide hook is inherently a
+//!     That is honest rather than ugly: a system-wide hook is inherently a
 //!     singleton, exactly like pynput's module-level listeners.
 //!   * a low-level hook only fires while its installing thread pumps messages,
 //!     so recording runs on a dedicated thread with a `GetMessage` loop, stopped
 //!     by posting `WM_QUIT` to it.
 //!
-//! The hooks are non-suppressing — every event is passed on via `CallNextHookEx`
-//! — so the user's real clicks and keys still reach the game while recording,
+//! The hooks are non-suppressing (every event is passed on via `CallNextHookEx`),
+//! so the user's real clicks and keys still reach the game while recording,
 //! matching pynput's observe-only listeners.
 
 use std::collections::HashSet;
@@ -56,7 +56,7 @@ pub(crate) fn round4(ts: f64) -> f64 {
 /// Vertical wheel notches from a `WM_MOUSEWHEEL` `mouseData`, matching pynput:
 /// the signed high word floor-divided by one notch. A high-resolution wheel that
 /// reports a fraction of a notch therefore contributes 0 until a full notch
-/// accumulates — bug-for-bug with pynput's integer `// WHEEL_DELTA`.
+/// accumulates, bug-for-bug with pynput's integer `// WHEEL_DELTA`.
 fn wheel_notches(mouse_data: u32) -> i64 {
     let raw = (mouse_data >> 16) as u16 as i16 as i64;
     raw.div_euclid(WHEEL_DELTA)
@@ -71,7 +71,7 @@ fn xbutton_name(mouse_data: u32) -> Option<&'static str> {
     }
 }
 
-/// The recorded key string for a virtual-key code — the inverse of
+/// The recorded key string for a virtual-key code, the inverse of
 /// [`input::resolve_vk`](crate::hardware::input) and the fidelity crux of this
 /// slice. It reproduces what pynput's `_key_name` (`key.char or ""`, else
 /// `key.name`) would have written for the same physical key, so recordings made
@@ -92,7 +92,7 @@ fn xbutton_name(mouse_data: u32) -> Option<&'static str> {
 /// Best-effort, matching the `resolve_vk` asymmetry documented in
 /// MIGRATION-NOTES: numpad keys map to their digit/operator character (a
 /// pynput-equivalent character, not a strict inverse) and pynput names Python's
-/// `_VK` can't resolve (`num_lock`, `scroll_lock`, `menu`, `f13`–`f20`) are
+/// `_VK` can't resolve (`num_lock`, `scroll_lock`, `menu`, `f13` to `f20`) are
 /// still recorded faithfully but replay as no-ops just as they would in Python.
 /// None of these appear in this app's macros (0 of 604 real events use any key
 /// beyond `a`/`b`).
@@ -220,7 +220,7 @@ impl RecorderState {
         }
     }
 
-    /// Seconds since `start`, excluding time spent paused — the mirror of
+    /// Seconds since `start`, excluding time spent paused, the mirror of
     /// Python's `_elapsed` (`perf_counter() - start - paused_total`), so playback
     /// has no dead gaps where the user paused to think.
     fn elapsed(&self) -> f64 {
@@ -236,7 +236,7 @@ impl RecorderState {
             return;
         }
         // Skip only exact same-pixel duplicates (mouse jitter at rest). NEVER
-        // mutate the previous event's timestamp — that would compress the gap to
+        // mutate the previous event's timestamp; that would compress the gap to
         // the next real event and make playback fire early.
         if let Some(last) = self.events.last() {
             if last.event_type == InputEventType::MouseMove && last.x == x && last.y == y {
@@ -412,7 +412,7 @@ fn hook_thread(ready: mpsc::Sender<u32>) {
     }
 }
 
-/// Current wall-clock time as `(unix_seconds_int, unix_seconds_float)` — the two
+/// Current wall-clock time as `(unix_seconds_int, unix_seconds_float)`, the two
 /// forms Python takes from `time.time()`: `int(time.time())` for the macro name
 /// and the raw float for `created_at`.
 fn now_unix() -> (u64, f64) {
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(key_name(0x41), "a");
         assert_eq!(key_name(0x5A), "z");
         assert_eq!(key_name(0x30), "0");
-        // Function keys — f3/f4/f6 are the app's ignore hotkeys.
+        // Function keys: f3/f4/f6 are the app's ignore hotkeys.
         assert_eq!(key_name(0x72), "f3");
         assert_eq!(key_name(0x7B), "f12");
         // Special keys use pynput's Key.name.
@@ -621,8 +621,8 @@ mod tests {
     fn move_dedup_skips_only_exact_same_pixel() {
         let mut s = state();
         s.handle_move(100, 200);
-        s.handle_move(100, 200); // same pixel — skipped
-        s.handle_move(101, 200); // moved — kept
+        s.handle_move(100, 200); // same pixel, skipped
+        s.handle_move(101, 200); // moved, kept
         assert_eq!(s.events.len(), 2);
         assert_eq!(s.events[0].x, 100);
         assert_eq!(s.events[1].x, 101);
@@ -651,9 +651,9 @@ mod tests {
     #[test]
     fn key_events_record_the_name_and_honor_ignore_keys() {
         let mut s = RecorderState::new(HashSet::from(["f3".to_string()]));
-        s.handle_key(true, 0x41); // 'a' — kept
+        s.handle_key(true, 0x41); // 'a', kept
         s.handle_key(false, 0x41);
-        s.handle_key(true, 0x72); // f3 — ignored (app hotkey)
+        s.handle_key(true, 0x72); // f3, ignored (app hotkey)
         s.handle_key(false, 0x72);
         assert_eq!(s.events.len(), 2);
         assert_eq!(s.events[0].event_type, InputEventType::KeyDown);

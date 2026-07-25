@@ -92,7 +92,7 @@ pub fn bgr_to_gray(bgr: &[u8], w: usize, h: usize) -> Gray {
 const HSV_SHIFT: i32 = 12;
 const HSV_HALF: i32 = 1 << (HSV_SHIFT - 1);
 
-/// `cvRound(255 * 2^12 / i)` — the reciprocal table saturation is scaled by.
+/// `cvRound(255 * 2^12 / i)`: the reciprocal table saturation is scaled by.
 fn sdiv_table() -> &'static [i32; 256] {
     static TABLE: OnceLock<[i32; 256]> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -104,7 +104,7 @@ fn sdiv_table() -> &'static [i32; 256] {
     })
 }
 
-/// `cvRound(180 * 2^12 / (6 * i))` — hue is expressed on 0..179, and the raw
+/// `cvRound(180 * 2^12 / (6 * i))`: hue is expressed on 0..179, and the raw
 /// numerator spans six 60-degree sectors.
 fn hdiv_table() -> &'static [i32; 256] {
     static TABLE: OnceLock<[i32; 256]> = OnceLock::new();
@@ -117,7 +117,7 @@ fn hdiv_table() -> &'static [i32; 256] {
     })
 }
 
-/// `cvRound` — nearest, ties to even.
+/// `cvRound`: nearest, ties to even.
 pub fn cv_round(v: f64) -> i32 {
     v.round_ties_even() as i32
 }
@@ -127,7 +127,7 @@ pub fn cv_floor(v: f32) -> i32 {
     v.floor() as i32
 }
 
-/// `saturate_cast<uchar>` from a float — rounds, then clamps to 0..255.
+/// `saturate_cast<uchar>` from a float: rounds, then clamps to 0..255.
 pub fn saturate_u8(v: f32) -> u8 {
     cv_round(f64::from(v)).clamp(0, 255) as u8
 }
@@ -157,7 +157,7 @@ pub fn bgr_to_hsv(b: u8, g: u8, r: u8) -> (u8, u8, u8) {
 }
 
 /// `cv2.inRange(cv2.cvtColor(bgr, COLOR_BGR2HSV), lower, upper)`, fused so the
-/// intermediate HSV image is never materialised — on a full 2560x1440 grab that
+/// intermediate HSV image is never materialised: on a full 2560x1440 grab that
 /// is 11 MB of allocation the Python path paid and this one does not.
 pub fn hsv_in_range(bgr: &[u8], w: usize, h: usize, lower: [u8; 3], upper: [u8; 3]) -> Gray {
     let mut data = Vec::with_capacity(w * h);
@@ -236,7 +236,7 @@ pub fn morph_close(src: &Gray, iterations: usize) -> Gray {
     m
 }
 
-/// `cv2.dilate` with a 5x5 elliptical kernel — the one `_auto_mask` uses. At 5x5
+/// `cv2.dilate` with a 5x5 elliptical kernel, the one `_auto_mask` uses. At 5x5
 /// OpenCV's `MORPH_ELLIPSE` is the plus-shape-with-corners-filled below.
 const ELLIPSE5: [[bool; 5]; 5] = [
     [false, false, true, false, false],
@@ -335,7 +335,7 @@ pub struct Contour {
 }
 
 impl Contour {
-    /// `cv2.contourArea` — the shoelace formula over the border polygon. Note
+    /// `cv2.contourArea`: the shoelace formula over the border polygon. Note
     /// this is *not* the pixel count: a solid `w`x`h` blob traces its border
     /// pixel centres and so measures `(w-1)*(h-1)`.
     pub fn area(&self) -> f64 {
@@ -352,7 +352,7 @@ impl Contour {
         (a / 2.0).abs()
     }
 
-    /// `cv2.boundingRect` — `(x, y, w, h)`, inclusive of both extremes.
+    /// `cv2.boundingRect`: `(x, y, w, h)`, inclusive of both extremes.
     pub fn bounding_rect(&self) -> (i32, i32, i32, i32) {
         let mut x0 = i32::MAX;
         let mut y0 = i32::MAX;
@@ -400,7 +400,7 @@ pub fn find_external_contours(mask: &Gray) -> Vec<Contour> {
             let id = next_label;
             next_label += 1;
             // Flood the component (8-connected) and note whether any of its
-            // pixels touches the outer background — that is what makes it
+            // pixels touches the outer background: that is what makes it
             // external rather than a blob sitting inside someone else's hole.
             let mut external = false;
             let mut stack = vec![(x, y)];
@@ -432,7 +432,7 @@ pub fn find_external_contours(mask: &Gray) -> Vec<Contour> {
     out
 }
 
-/// The background pixels 4-connected to the image border — everything OpenCV
+/// The background pixels 4-connected to the image border, everything OpenCV
 /// would consider "outside" all contours.
 fn outer_background(mask: &Gray) -> Vec<bool> {
     let (w, h) = (mask.w, mask.h);
@@ -513,7 +513,7 @@ fn trace_border(mask: &Gray, origin: (i32, i32)) -> Contour {
                 break;
             }
             if s == s_start {
-                // Fully isolated pixel — cannot happen once `found` is true,
+                // Fully isolated pixel: cannot happen once `found` is true,
                 // but a runaway inner loop is worse than an early exit.
                 break;
             }
@@ -541,8 +541,8 @@ pub enum Interp {
 /// `cv2.resize`.
 ///
 /// The one place this is not a transcription: OpenCV resamples 8-bit images
-/// through fixed-point weights, and these run in `f32`. The coordinate mapping —
-/// the half-pixel shift that decides *alignment* — is OpenCV's; only the weight
+/// through fixed-point weights, and these run in `f32`. The coordinate mapping
+/// (the half-pixel shift that decides *alignment*) is OpenCV's; only the weight
 /// rounding differs, which moves a correlation score in the third decimal and
 /// never moves a match.
 pub fn resize(src: &Gray, dw: usize, dh: usize, interp: Interp) -> Gray {
@@ -617,7 +617,7 @@ fn resize_linear(src: &Gray, dw: usize, dh: usize) -> Gray {
     out
 }
 
-/// The source span each output pixel averages, as `(index, weight)` pairs —
+/// The source span each output pixel averages, as `(index, weight)` pairs:
 /// OpenCV's `INTER_AREA` decimation weights, where partially covered edge pixels
 /// contribute their overlap fraction.
 fn area_taps(dst_len: usize, src_len: usize) -> Vec<Vec<(usize, f32)>> {

@@ -42,7 +42,7 @@ pub fn round2(v: f64) -> f64 {
     format!("{v:.2}").parse().expect("a fixed-precision float always reparses")
 }
 
-/// The same trick at three decimals — `round(x, 3)`, which is the precision both
+/// The same trick at three decimals: `round(x, 3)`, which is the precision both
 /// Test buttons report a match confidence at.
 pub fn round3(v: f64) -> f64 {
     format!("{v:.3}").parse().expect("a fixed-precision float always reparses")
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(round2(0.5), 0.5);
         assert_eq!(round2(1.005), 1.0); // 1.005 is really 1.00499… in f64 → 1.0
         assert_eq!(round2(2.675), 2.67); // 2.675 is really 2.67499… in f64 → 2.67
-        // Exact dyadic ties round to even — the naive `(v*100).round()/100` gets
+        // Exact dyadic ties round to even; the naive `(v*100).round()/100` gets
         // these wrong (and 2.675 too), so they pin the format-parse behaviour.
         assert_eq!(round2(0.125), 0.12);
         assert_eq!(round2(0.375), 0.38);

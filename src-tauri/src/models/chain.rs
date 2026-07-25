@@ -1,9 +1,9 @@
-//! Chain data model — `config/chains.json` as a bare array.
+//! Chain data model: `config/chains.json` as a bare array.
 //!
 //! Mirrors `anime_macro/chains.py::Chain`. Python's `from_dict` uses
 //! `float(d.get("delay_between", 1.0) or 1.0)` and `int(d.get("repeat", 1) or 1)`,
 //! which coerce a *persisted* `0` back to the default on load. That silently
-//! defeats "repeat = 0 → infinite" after a disk round-trip — a genuine source
+//! defeats "repeat = 0 → infinite" after a disk round-trip, a genuine source
 //! quirk. We reproduce it exactly for a faithful 1:1 migration rather than
 //! silently changing behavior; see MIGRATION-NOTES.md if this should be fixed.
 
@@ -17,7 +17,7 @@ pub struct Chain {
     pub name: String,
     pub macro_names: Vec<String>,
     pub delay_between: f64,
-    /// Times to run the whole chain. 0 means infinite — but see the note above:
+    /// Times to run the whole chain. 0 means infinite, but see the note above:
     /// a persisted 0 is coerced to 1 on load, matching the Python source.
     pub repeat: i64,
 }
@@ -60,7 +60,7 @@ impl<'de> Deserialize<'de> for Chain {
             id: raw.id,
             name: raw.name,
             macro_names: raw.macro_names,
-            // `x or 1.0` / `x or 1` — absent OR persisted-zero both become the default.
+            // `x or 1.0` / `x or 1`: absent OR persisted-zero both become the default.
             delay_between: if raw.delay_between == 0.0 {
                 1.0
             } else {

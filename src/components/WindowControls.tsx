@@ -14,7 +14,7 @@ function appWindow() {
 }
 
 /**
- * Minimize / maximize / close for the frameless window — the native title bar is
+ * Minimize / maximize / close for the frameless window. The native title bar is
  * off (`"decorations": false`), so these are the whole title bar. Every one of
  * them swallows its own failure rather than throwing into the render tree and
  * taking the header down with it.

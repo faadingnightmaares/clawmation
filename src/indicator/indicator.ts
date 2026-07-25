@@ -16,12 +16,12 @@ import { renderCat, W, H } from "./cat";
 
 const canvas = document.getElementById("cat") as HTMLCanvasElement;
 // Sized from the art's own constants so the drawing surface can never disagree
-// with it. The window and CSS sizes are 2x these — see `shell::indicator`.
+// with it. The window and CSS sizes are 2x these; see `shell::indicator`.
 canvas.width = W;
 canvas.height = H;
 const ctx = canvas.getContext("2d")!;
 
-/** Status cadence — matches Python's SetTimer, and one blink per two ticks. */
+/** Status cadence. Matches Python's SetTimer, and one blink per two ticks. */
 const POLL_MS = 500;
 /** Frame cadence. Fast enough that the sway reads as motion, slow enough that an
  *  always-on-top overlay costs the game nothing. */
@@ -47,7 +47,7 @@ async function poll(): Promise<void> {
   try {
     status = await invoke<Status>("get_status");
   } catch {
-    return; // backend not up yet — try again next tick
+    return; // backend not up yet; try again next tick
   }
   mode = status.mode ?? "idle";
   const live = status.elapsed ?? 0;

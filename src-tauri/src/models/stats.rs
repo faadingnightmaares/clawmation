@@ -1,4 +1,4 @@
-//! Play-stats data model — `config/stats.json`.
+//! Play-stats data model: `config/stats.json`.
 //!
 //! Mirrors `anime_macro/stats.py::PlayStats`. On-disk shape is
 //! `{"stats": {name: {count, first_played, last_played}}, "history": [...]}`.
@@ -40,7 +40,7 @@ fn default_status() -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatsFile {
-    // BTreeMap (not HashMap) so serialized key order is deterministic — Python's
+    // BTreeMap (not HashMap) so serialized key order is deterministic. Python's
     // dict preserves insertion order; sorted output is a stable, diff-friendly
     // equivalent for a file only this app reads.
     #[serde(default)]

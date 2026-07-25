@@ -11,7 +11,7 @@ use crate::logbuf::LogEntry;
 pub struct WindowStatus {
     pub found: bool,
     pub title: String,
-    /// `"WxH"` when found, `"—"` otherwise.
+    /// `"WxH"` when found, empty otherwise.
     pub size: String,
 }
 

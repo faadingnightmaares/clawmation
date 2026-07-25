@@ -1,6 +1,6 @@
 //! The interactive screen pickers, in process.
 //!
-//! Ports `color_sampler.py`, `region_picker.py` and `surgical_picker.py` — the
+//! Ports `color_sampler.py`, `region_picker.py` and `surgical_picker.py`, the
 //! three sidecar modules that were pure `ctypes` Win32 with cv2 used only at the
 //! very end, to convert a colour and to write a PNG. [`overlay`] supplies the
 //! window and the message pump, [`preview`] the PNG/thumbnail encoding, and
@@ -44,8 +44,8 @@ const SURGICAL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Titles for the two box pickers. Both take a click as well as a drag now, and
 /// a lasso nobody knows is there is a lasso nobody uses.
-const REGION_HINT: &str = "Clawmation — Click an element, or drag a box (Esc cancels)";
-const SURGICAL_HINT: &str = "Clawmation — Click an element, or drag a box around it";
+const REGION_HINT: &str = "Clawmation: Click an element, or drag a box (Esc cancels)";
+const SURGICAL_HINT: &str = "Clawmation: Click an element, or drag a box around it";
 
 const VK_BACK: u32 = 0x08;
 const VK_RETURN: u32 = 0x0D;
@@ -54,6 +54,7 @@ const VK_LEFT: u32 = 0x25;
 const VK_UP: u32 = 0x26;
 const VK_RIGHT: u32 = 0x27;
 const VK_DOWN: u32 = 0x28;
+const VK_D: u32 = 0x44;
 const VK_G: u32 = 0x47;
 
 // ── cv2-exact BGR → HSV ──────────────────────────────────────────────────────
@@ -62,7 +63,7 @@ const VK_G: u32 = 0x47;
 const HSV_SHIFT: i32 = 12;
 const HSV_HALF: i32 = 1 << (HSV_SHIFT - 1);
 
-/// `cvRound(255 * 2^12 / i)` — the reciprocal table saturation is scaled by.
+/// `cvRound(255 * 2^12 / i)`, the reciprocal table saturation is scaled by.
 fn sdiv_table() -> &'static [i32; 256] {
     static TABLE: OnceLock<[i32; 256]> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -74,7 +75,7 @@ fn sdiv_table() -> &'static [i32; 256] {
     })
 }
 
-/// `cvRound(180 * 2^12 / (6 * i))` — hue is expressed on 0..179, and the raw
+/// `cvRound(180 * 2^12 / (6 * i))`: hue is expressed on 0..179, and the raw
 /// numerator spans six 60-degree sectors.
 fn hdiv_table() -> &'static [i32; 256] {
     static TABLE: OnceLock<[i32; 256]> = OnceLock::new();
@@ -87,7 +88,7 @@ fn hdiv_table() -> &'static [i32; 256] {
     })
 }
 
-/// `cvRound` — nearest, ties to even.
+/// `cvRound`: nearest, ties to even.
 fn cv_round(v: f64) -> i32 {
     v.round_ties_even() as i32
 }
@@ -338,7 +339,7 @@ impl Scene for RegionScene {
         p.image(&self.dark, 0, 0);
         // Mid-drag the box being drawn wins; otherwise the lasso shows what a
         // click would take. Both are drawn the same, because they are the same
-        // offer — undarkened, so the pixels can be read against the backdrop.
+        // offer, undarkened, so the pixels can be read against the backdrop.
         let shown = match self.rect() {
             (x, y, w, h) if self.dragging && w > 0 && h > 0 => Some((x, y, w, h)),
             // A press that has not travelled yet is still a click in progress,
@@ -553,7 +554,7 @@ impl SurgicalScene {
             ox: (sw - w * zoom) / 2,
             oy: (sh - h * zoom) / 2,
         });
-        win.set_title("Clawmation — DRAG to draw the exact pixels to hit (Esc cancels)");
+        win.set_title("Clawmation: DRAG to draw the exact pixels to hit (Esc cancels)");
     }
 
     fn back_to_adjust(&mut self, win: &Window) {
@@ -563,7 +564,7 @@ impl SurgicalScene {
         self.line_start = None;
         self.line_end = None;
         self.target = None;
-        win.set_title("Clawmation — Adjust the box (Enter to confirm, Esc to cancel)");
+        win.set_title("Clawmation: Enter to use it (Esc cancels)");
     }
 
     fn rebuild_zoom(&mut self) {
@@ -590,16 +591,30 @@ impl SurgicalScene {
         )
     }
 
-    /// Lock every drawn stroke in and close. A stroke list is required — the
-    /// DONE button is only drawn once there is one, so this guards Enter.
-    fn commit(&mut self) -> Flow {
-        if self.strokes.is_empty() {
+    /// Close on `rect`, with whatever strokes have been drawn on it.
+    ///
+    /// Nothing drawn means the click lands on the middle of the element, which
+    /// is what picking one already says: the lasso found the bounds, and the
+    /// centre of a button is the part of it you press. Downstream still gets a
+    /// stroke list (a single degenerate one) because `click_lines` is the
+    /// contract the template carries.
+    fn commit_rect(&mut self, (x, y, w, h): (i32, i32, i32, i32)) -> Flow {
+        if w < 1 || h < 1 {
             return Flow::Idle;
         }
-        let Some(t) = &self.target else { return Flow::Idle };
-        let (x, y, w, h) = t.rect;
-        self.picked = Some((x, y, w, h, std::mem::take(&mut self.strokes)));
+        let mut strokes = std::mem::take(&mut self.strokes);
+        if strokes.is_empty() {
+            let (mx, my) = (w / 2, h / 2);
+            strokes.push([mx, my, mx, my]);
+        }
+        self.picked = Some((x, y, w, h, strokes));
         Flow::Close
+    }
+
+    /// Phase-2 commit: the crop is already fixed, so only the strokes are new.
+    fn commit(&mut self) -> Flow {
+        let Some(t) = &self.target else { return Flow::Idle };
+        self.commit_rect(t.rect)
     }
 
     // ── Phase 1 ──────────────────────────────────────────────────────────────
@@ -687,7 +702,7 @@ impl SurgicalScene {
                     }
                     self.mode = Mode::Adjust;
                     self.clamp_selection();
-                    win.set_title("Clawmation — Adjust the box (Enter to confirm, Esc to cancel)");
+                    win.set_title("Clawmation: Enter to use it (Esc cancels)");
                 } else {
                     self.dragging = false;
                     self.resize_corner = -1;
@@ -720,6 +735,16 @@ impl SurgicalScene {
                     return Flow::Idle;
                 }
                 if vk == VK_RETURN {
+                    let r = self.rect();
+                    if r.2 >= 6 && r.3 >= 6 {
+                        return self.commit_rect(r);
+                    }
+                    return Flow::Idle;
+                }
+                // The pixel editor is no longer on the way out: the middle of
+                // the element is the click point unless someone says otherwise,
+                // and this is how they say otherwise.
+                if vk == VK_D {
                     let (_, _, w, h) = self.rect();
                     if w >= 6 && h >= 6 {
                         self.enter_target_phase(win);
@@ -853,7 +878,7 @@ impl SurgicalScene {
         p.text_centered(
             sw / 2,
             10,
-            "Enter = confirm   arrows = nudge (Shift=10)   right-click = redo   Esc = cancel",
+            "Enter = use it   arrows = nudge (Shift=10)   right-click = redo   D = pick exact pixels   Esc = cancel",
             READOUT,
         );
     }
@@ -919,7 +944,7 @@ impl SurgicalScene {
         let text = if self.drawing {
             format!("drawing stroke {}...   release to add it", n + 1)
         } else if n == 0 {
-            format!("crop {cw}x{ch}   click = point  ·  drag = line  ·  scroll = zoom  ·  G = grid  ·  Backspace = back")
+            format!("crop {cw}x{ch}   click = point  ·  drag = line  ·  scroll = zoom  ·  G = grid  ·  Enter = use the middle  ·  Backspace = back")
         } else {
             let plural = if n == 1 { "" } else { "s" };
             format!("{n} stroke{plural}   right-click/Backspace = undo  ·  Enter = done  ·  Esc = cancel")
@@ -986,7 +1011,7 @@ pub fn sample_color() -> Value {
     let Some(frame) = grab_screen() else { return no_capture() };
     match overlay::run(
         "ClawmationColorSampler",
-        "Clawmation — Pick Color",
+        "Clawmation: Pick Color",
         ColorScene::new(frame),
         COLOR_TIMEOUT,
     ) {
@@ -1075,7 +1100,7 @@ pub fn surgical_capture(templates_dir: &Path) -> Value {
     })
 }
 
-/// Import an image file the user already has as a template — the compute half of
+/// Import an image file the user already has as a template, the compute half of
 /// `_add_template_image`, with the file dialog left to the caller.
 ///
 /// Whatever format the source was, it is re-encoded to PNG, so everything under
@@ -1300,9 +1325,43 @@ mod tests {
         assert_eq!(scene.rect(), button);
     }
 
+    #[test]
+    fn confirming_a_snap_commits_the_middle_without_the_pixel_editor() {
+        let (frame, button) = framed_button();
+        let mut scene = SurgicalScene::new(frame);
+        let win = Window::detached();
+
+        scene.event(Event::MouseMove { x: 150, y: 95 }, &win);
+        scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
+        scene.event(Event::LeftUp { x: 150, y: 95 }, &win);
+        assert_eq!(scene.event(Event::Key { vk: VK_RETURN, shift: false }, &win), Flow::Close);
+
+        assert!(scene.target.is_none(), "the pixel editor was opened anyway");
+        let (x, y, w, h, strokes) = scene.take().expect("the snap");
+        assert_eq!((x, y, w, h), button);
+        // Crop-relative, and a point rather than a line.
+        let (mx, my) = (button.2 / 2, button.3 / 2);
+        assert_eq!(strokes, vec![[mx, my, mx, my]]);
+    }
+
+    #[test]
+    fn d_still_opens_the_pixel_editor_for_an_off_centre_click() {
+        let (frame, button) = framed_button();
+        let mut scene = SurgicalScene::new(frame);
+        let win = Window::detached();
+
+        scene.event(Event::MouseMove { x: 150, y: 95 }, &win);
+        scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
+        scene.event(Event::LeftUp { x: 150, y: 95 }, &win);
+        assert_eq!(scene.event(Event::Key { vk: VK_D, shift: false }, &win), Flow::Repaint);
+
+        let target = scene.target.as_ref().expect("the pixel editor");
+        assert_eq!(target.rect, button);
+    }
+
     // ── Live overlay ─────────────────────────────────────────────────────────
     // The tests above are pure math; these four are the only thing that proves
-    // the Win32 half — window class, message pump, painting, hit handling —
+    // the Win32 half (window class, message pump, painting, hit handling)
     // actually runs, because they open the real overlay and drive it with the
     // app's own `SendInput` controller. They take over the screen, the cursor and
     // the keyboard, so they stay `#[ignore]`d and are run by hand with
@@ -1348,7 +1407,7 @@ mod tests {
         Driver { done, handle }
     }
 
-    /// Press the left button down, walk to the far corner, release — the drag
+    /// Press the left button down, walk to the far corner, release: the drag
     /// both region scenes are built around. The intermediate steps are what make
     /// `WM_MOUSEMOVE` arrive while the button is held.
     fn drag(input: &InputController, x0: i32, y0: i32, x1: i32, y1: i32) {

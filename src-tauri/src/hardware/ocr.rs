@@ -24,7 +24,7 @@ use super::vision::Detection;
 /// The recognizer wants a reasonable number of pixels per glyph. Screen text in
 /// a tight guard region is often 10-14px tall, which it reads poorly or not at
 /// all, so anything smaller than this on its short side is scaled up first.
-/// Purely an input transform — reported coordinates are always divided back.
+/// Purely an input transform; reported coordinates are always divided back.
 const MIN_SHORT_SIDE: u32 = 160;
 
 /// Ceiling on that upscale, so a 1x4 sliver can't ask for a giant allocation.
@@ -45,7 +45,7 @@ pub struct Word {
 /// language pack as "text absent".
 #[derive(Debug)]
 pub enum OcrError {
-    /// No recognizer for any of the user's languages — no OCR language pack.
+    /// No recognizer for any of the user's languages: no OCR language pack.
     Unavailable,
     /// The WinRT call itself failed.
     Windows(windows::core::Error),
@@ -83,7 +83,7 @@ fn engine() -> Result<&'static Mutex<WinOcrEngine>, OcrError> {
         .ok_or(OcrError::Unavailable)
 }
 
-/// True when this machine can OCR at all — used to report the capability
+/// True when this machine can OCR at all, used to report the capability
 /// honestly in status rather than silently returning "no match".
 pub fn available() -> bool {
     engine().is_ok()
@@ -144,27 +144,33 @@ fn bgr_to_bgra(bgr: &[u8]) -> Vec<u8> {
 /// Read every word in `frame`, in reading order. Coordinates come back in the
 /// frame's own pixel space with any internal upscale already divided out.
 pub fn read_words(frame: &Frame) -> Result<Vec<Word>, OcrError> {
-    Ok(lines_of(frame)?.into_iter().flatten().collect())
+    Ok(read_lines(frame)?.into_iter().flatten().collect())
 }
 
 /// Recognize `frame`, keeping the engine's own line grouping so a multi-word
 /// phrase can be matched across the spaces between words.
-fn lines_of(frame: &Frame) -> Result<Vec<Vec<Word>>, OcrError> {
+///
+/// Public because recognizing is by far the most expensive thing the watcher
+/// does: callers with several needles over the same area read the lines once and
+/// run every needle past them with [`match_lines`], instead of paying for one
+/// full recognition per needle.
+pub fn read_lines(frame: &Frame) -> Result<Vec<Vec<Word>>, OcrError> {
     if frame.width == 0 || frame.height == 0 {
         return Ok(Vec::new());
     }
     let factor = scale_factor(frame.width, frame.height);
+    // At factor 1 (the full-screen case), the frame's own buffer is handed
+    // straight to the converter. Cloning it first would copy several megabytes
+    // per pass for nothing.
+    let upscaled;
     let (bgr, w, h) = if factor > 1 {
-        (
-            upscale_bgr(&frame.bgr, frame.width, frame.height, factor),
-            frame.width * factor,
-            frame.height * factor,
-        )
+        upscaled = upscale_bgr(&frame.bgr, frame.width, frame.height, factor);
+        (&upscaled[..], frame.width * factor, frame.height * factor)
     } else {
-        (frame.bgr.clone(), frame.width, frame.height)
+        (&frame.bgr[..], frame.width, frame.height)
     };
 
-    let bgra = bgr_to_bgra(&bgr);
+    let bgra = bgr_to_bgra(bgr);
     let buffer = CryptographicBuffer::CreateFromByteArray(&bgra)?;
     let bitmap =
         SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, w as i32, h as i32)?;
@@ -205,7 +211,7 @@ fn normalize(s: &str) -> String {
 /// How many character errors a needle of `len` characters may absorb.
 ///
 /// The recognizer is accurate on crisp text and unreliable on the outlined,
-/// textured lettering games use — it turns an l into an I, drops the tail off a
+/// textured lettering games use: it turns an l into an I, drops the tail off a
 /// t, reads a 0 as an O. A guard for "Reconnect" that is thrown away over one
 /// such character is the difference between a trigger that works and one the
 /// user gives up on. Short needles get no slack at all, because at three or four
@@ -219,8 +225,8 @@ fn edit_budget(len: usize) -> usize {
 }
 
 /// Levenshtein distance between `needle` and the best-matching substring of
-/// `hay` ending at each position — Sellers' variant, where the start of the
-/// match is free. Returns the end offset of the closest match within `budget`,
+/// `hay` ending at each position (Sellers' variant, where the start of the
+/// match is free). Returns the end offset of the closest match within `budget`,
 /// preferring fewer errors and then the earlier end.
 fn approx_end(hay: &[char], needle: &[char], budget: usize) -> Option<(usize, usize)> {
     let m = needle.len();
@@ -294,24 +300,31 @@ fn union(words: &[&Word]) -> (f64, f64, f64, f64) {
 /// Find `needle` in `frame` and return one detection per matching line.
 ///
 /// `origin` is the region's top-left in screen space, added to every result so
-/// callers get absolute coordinates — the same `roi_offset` contract the sidecar's
+/// callers get absolute coordinates, the same `roi_offset` contract the sidecar's
 /// detections carried. Matching runs over the whitespace-normalized line, so a
 /// phrase spanning several words still matches, and tolerates a few misread
 /// characters (see [`find_fuzzy`]). An empty `needle` returns every line,
 /// mirroring `ocr_find`'s `if target and`.
 pub fn find_text(frame: &Frame, needle: &str, origin: (i64, i64)) -> Result<Vec<Detection>, OcrError> {
+    Ok(match_lines(&read_lines(frame)?, needle, origin))
+}
+
+/// The matching half of [`find_text`], over lines already read by
+/// [`read_lines`]. Pure and cheap (string work over a handful of words), so a
+/// caller with several needles pays for recognition once.
+pub fn match_lines(lines: &[Vec<Word>], needle: &str, origin: (i64, i64)) -> Vec<Detection> {
     let target = normalize(needle);
     let (ox, oy) = origin;
     let mut out = Vec::new();
 
-    for words in lines_of(frame)? {
+    for words in lines {
         // Rebuild the line exactly as `normalize` would see it, remembering where
         // each word landed so a hit maps back to the words that produced it.
         // Offsets are counted in characters, the unit `find_fuzzy` reports in.
         let mut text = String::new();
         let mut chars = 0usize;
         let mut offsets = Vec::with_capacity(words.len());
-        for word in &words {
+        for word in words {
             let piece = normalize(&word.text);
             if piece.is_empty() {
                 offsets.push((chars, chars));
@@ -331,7 +344,7 @@ pub fn find_text(frame: &Frame, needle: &str, origin: (i64, i64)) -> Result<Vec<
             (words.iter().collect(), 0)
         } else {
             match find_fuzzy(&text, &target) {
-                Some((at, end, dist)) => (covered(&words, &offsets, at, end), dist),
+                Some((at, end, dist)) => (covered(words, &offsets, at, end), dist),
                 None => continue,
             }
         };
@@ -353,10 +366,10 @@ pub fn find_text(frame: &Frame, needle: &str, origin: (i64, i64)) -> Result<Vec<
             roi_offset: [ox, oy],
         });
     }
-    Ok(out)
+    out
 }
 
-/// Every word in `frame`, joined — the port of `ocr_region`.
+/// Every word in `frame`, joined: the port of `ocr_region`.
 pub fn read_text(frame: &Frame) -> Result<String, OcrError> {
     Ok(read_words(frame)?
         .iter()
@@ -428,7 +441,7 @@ mod tests {
             Word { text: "again".into(), x: 12.0, y: 0.0, w: 12.0, h: 4.0 },
             Word { text: "now".into(), x: 26.0, y: 0.0, w: 8.0, h: 4.0 },
         ];
-        // "play again now" — offsets of each word in the joined text.
+        // "play again now": offsets of each word in the joined text.
         let offsets = vec![(0, 4), (5, 10), (11, 14)];
         let hit = covered(&words, &offsets, 0, 10);
         assert_eq!(hit.len(), 2);
@@ -444,8 +457,8 @@ mod tests {
 
     #[test]
     fn fuzzy_match_forgives_a_misread_character() {
-        // Substitution, deletion and insertion — the three ways a glyph goes
-        // wrong — each land on the same word with one error charged.
+        // Substitution, deletion and insertion (the three ways a glyph goes
+        // wrong) each land on the same word with one error charged.
         for line in ["click recannect", "click reconect", "click recoonnect"] {
             let (start, end, dist) = find_fuzzy(line, "reconnect").expect(line);
             assert_eq!(dist, 1, "{line}");
@@ -488,7 +501,7 @@ mod tests {
 
     /// End-to-end against the live desktop: grabs the real screen and reads it.
     /// Ignored by default because it needs a display, an OCR language pack, and
-    /// legible text actually on screen — run it with `--ignored` to check the
+    /// legible text actually on screen; run it with `--ignored` to check the
     /// recognizer on this machine.
     #[test]
     #[ignore = "requires a display with readable text and an OCR language pack"]

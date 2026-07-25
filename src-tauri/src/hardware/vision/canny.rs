@@ -1,4 +1,4 @@
-//! `cv2.Canny(src, 50, 150)`, transcribed — 3x3 Sobel, L1 gradient magnitude,
+//! `cv2.Canny(src, 50, 150)`, transcribed: 3x3 Sobel, L1 gradient magnitude,
 //! directional non-maximum suppression, hysteresis.
 //!
 //! Edges are the detector's second matching tier and the skeleton `_auto_mask`
@@ -24,7 +24,7 @@ pub fn canny(src: &Gray, low: i32, high: i32) -> Gray {
     let (w, h) = (src.w, src.h);
     let (dx, dy) = sobel3(src);
 
-    // L1 magnitude — OpenCV's default (`L2gradient=False`).
+    // L1 magnitude, OpenCV's default (`L2gradient=False`).
     let mag: Vec<i32> = dx.iter().zip(&dy).map(|(&x, &y)| x.abs() + y.abs()).collect();
     let magnitude = |x: i32, y: i32| -> i32 {
         if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
@@ -96,7 +96,7 @@ pub fn canny(src: &Gray, low: i32, high: i32) -> Gray {
     Gray::from_vec(w, h, map.into_iter().map(|v| if v == 2 { 255 } else { 0 }).collect())
 }
 
-/// The two 3x3 Sobel derivatives, `BORDER_REPLICATE` at the edges — the same
+/// The two 3x3 Sobel derivatives, `BORDER_REPLICATE` at the edges, the same
 /// pair `cv2.Canny` computes internally.
 fn sobel3(src: &Gray) -> (Vec<i32>, Vec<i32>) {
     let (w, h) = (src.w, src.h);

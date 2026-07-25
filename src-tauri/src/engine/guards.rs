@@ -1,4 +1,4 @@
-//! GuardEngine — the self-healing overlay that clears interrupt conditions
+//! GuardEngine: the self-healing overlay that clears interrupt conditions
 //! mid-playback (disconnect dialogs, reward popups, AFK checks, …) so an
 //! unattended macro keeps running.
 //!
@@ -26,7 +26,7 @@ use super::sleep_interruptible;
 use crate::hardware::vision::Detection;
 use crate::models::guard::Guard;
 
-/// 5Hz — fast enough to catch an interrupt within 200ms, slow enough to leave
+/// 5Hz: fast enough to catch an interrupt within 200ms, slow enough to leave
 /// the game and the detector headroom (matches Python's `POLL_INTERVAL`).
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -49,19 +49,19 @@ pub enum Action {
     MouseUp(String),
 }
 
-/// `detect(eligible_guards) -> {guard_id: [detections]}` — one batched grab.
+/// `detect(eligible_guards) -> {guard_id: [detections]}`: one batched grab.
 pub type Detect = Box<dyn Fn(&[Guard]) -> HashMap<String, Vec<Detection>> + Send + Sync>;
 /// `player() -> (is_playing, is_paused)`.
 pub type PlayerState = Box<dyn Fn() -> (bool, bool) + Send + Sync>;
-/// `actuate(action)` — perform one input/player primitive.
+/// `actuate(action)`: perform one input/player primitive.
 pub type Actuate = Box<dyn Fn(Action) + Send + Sync>;
-/// `on_fire(guard, x, y)` — UI feedback the instant a guard triggers.
+/// `on_fire(guard, x, y)`: UI feedback the instant a guard triggers.
 pub type OnFire = Box<dyn Fn(&Guard, i64, i64) + Send + Sync>;
 
 /// The geometric intent of a firing guard, independent of *how* it executes.
 /// Whether the click humanizes (Bézier-then-click) and whether the action is a
 /// key press instead are execution choices applied in `handle`, not encoded
-/// here — exactly as Python decides them inside `_handle`/`_handle_lines`,
+/// here, exactly as Python decides them inside `_handle`/`_handle_lines`,
 /// after the branch that picks the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
@@ -102,7 +102,7 @@ pub fn plan_action(guard: &Guard, best: &Detection) -> Plan {
 /// travel through the end. A stroke that isn't a 4-tuple produces no points and
 /// is skipped, matching Python's `if not ln or len(ln) != 4: continue`. The
 /// per-step truncation is deliberately `f64 as i64` (toward zero), reproducing
-/// Python's `int(...)` — including its floating-point rounding on fractions.
+/// Python's `int(...)`, including its floating-point rounding on fractions.
 pub fn stroke_points(stroke: &[i64], tlx: i64, tly: i64) -> Vec<(i64, i64)> {
     if stroke.len() != 4 {
         return Vec::new();
@@ -125,7 +125,7 @@ pub fn stroke_points(stroke: &[i64], tlx: i64, tly: i64) -> Vec<(i64, i64)> {
 }
 
 /// The coordinates `on_fire` reports for a plan: the click point, or a drag's
-/// first stroke start. A malformed first stroke yields `None` — Python reads
+/// first stroke start. A malformed first stroke yields `None`; Python reads
 /// `lines[0][0..2]` there and swallows the resulting `IndexError`, so no
 /// callback fires.
 fn fire_point(plan: &Plan) -> Option<(i64, i64)> {
@@ -238,7 +238,7 @@ impl Inner {
     /// One poll cycle: gate on active playback, detect the cooldown-eligible
     /// guards in a single batch, then handle every match in order.
     fn tick(&self) {
-        // Only act while a macro is actively playing (not paused) — never fight
+        // Only act while a macro is actively playing (not paused); never fight
         // the user or a paused run.
         let (is_playing, is_paused) = (self.player)();
         if !is_playing || is_paused {
@@ -283,7 +283,7 @@ impl Inner {
     }
 
     /// Pause the macro, perform the guard's action, wait its settle delay, then
-    /// resume — the self-healing bracket from `_handle`/`_handle_lines`.
+    /// resume, the self-healing bracket from `_handle`/`_handle_lines`.
     fn handle(&self, guard: &Guard, plan: &Plan) {
         if let Some(on_fire) = &self.on_fire {
             if let Some((fx, fy)) = fire_point(plan) {
@@ -317,7 +317,7 @@ impl Inner {
             sleep_interruptible(&self.running, Duration::from_secs_f64(guard.resume_delay));
         }
 
-        // Resume only if the macro was and still is playing — if it finished or
+        // Resume only if the macro was and still is playing: if it finished or
         // was stopped during our handle, leave it stopped (Python's guard).
         let (still_playing, _) = (self.player)();
         if was_playing && still_playing {
@@ -326,13 +326,13 @@ impl Inner {
     }
 
     /// Drag along each stroke: press at the start, sweep pixel-by-pixel, release.
-    /// The release always runs — even if `stop()` interrupts the sweep — so a
+    /// The release always runs (even if `stop()` interrupts the sweep), so a
     /// held button is never stranded.
     fn sweep(&self, tlx: i64, tly: i64, strokes: &[Vec<i64>]) {
         for stroke in strokes {
             let pts = stroke_points(stroke, tlx, tly);
             if pts.is_empty() {
-                continue; // malformed stroke (len != 4) — skipped, like Python
+                continue; // malformed stroke (len != 4): skipped, like Python
             }
             let (startx, starty) = pts[0];
             let (endx, endy) = *pts.last().unwrap();
@@ -509,7 +509,7 @@ mod tests {
     fn cooldown_skips_a_guard_still_cooling() {
         let (engine, log, _) = harness("g", vec![detection(1, 2, 0, 0)]);
         let mut g = base_guard("g");
-        g.cooldown = 100.0; // long — the immediate second tick is within it
+        g.cooldown = 100.0; // long: the immediate second tick is within it
         engine.test_prime(vec![g]);
         engine.test_tick();
         engine.test_tick();

@@ -9,6 +9,8 @@ import {
   isTriggerReady,
   lookOf,
   newTriggerDraft,
+  newWatchDraft,
+  repeatStopOf,
   resumeStopOf,
 } from "./triggers";
 
@@ -90,7 +92,7 @@ describe("guard ↔ draft round-trip", () => {
     expect(guardFromDraft(d)).toEqual(g);
   });
 
-  it("emits exactly the persisted key set — no macro_sequence, no transient leakage", () => {
+  it("emits exactly the persisted key set: no macro_sequence, no transient leakage", () => {
     const out = guardFromDraft(draftFromGuard(storedGuard()));
     expect(Object.keys(out).sort()).toEqual(PERSISTED);
   });
@@ -136,8 +138,27 @@ describe("plain-language helpers", () => {
     expect(resumeStopOf(5)).toBe(6);
   });
 
+  it("snaps a cooldown to the nearest repeat stop", () => {
+    expect(repeatStopOf(0)).toBe(0);
+    expect(repeatStopOf(1)).toBe(1);
+    expect(repeatStopOf(2)).toBe(1);
+    expect(repeatStopOf(4)).toBe(5);
+    expect(repeatStopOf(60)).toBe(30);
+  });
+
+  it("a fresh Watch trigger waits for nothing between repeats", () => {
+    // The watcher exists to keep pressing a thing the moment it returns…
+    expect(newWatchDraft().cooldown).toBe(0);
+    // …while a guard firing mid-playback stays on the steadier default.
+    expect(newTriggerDraft().cooldown).toBe(2);
+  });
+
   it("judges readiness by look", () => {
-    expect(isTriggerReady(newTriggerDraft())).toBe(true); // colour has a default hsv range
+    // An untouched draft carries the whole colour spectrum, which matches every
+    // pixel on screen as one blob. That is "nothing picked yet", not a trigger.
+    expect(isTriggerReady(newTriggerDraft())).toBe(false);
+    const picked = { ...newTriggerDraft(), hsv_low: [20, 80, 80], hsv_high: [40, 255, 255] };
+    expect(isTriggerReady(picked)).toBe(true);
     const img = { ...newTriggerDraft(), method: "template", template_path: "" };
     expect(isTriggerReady(img)).toBe(false);
     expect(isTriggerReady({ ...img, template_path: "x.png" })).toBe(true);

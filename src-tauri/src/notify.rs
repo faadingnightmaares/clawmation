@@ -1,4 +1,4 @@
-//! Tray toast notifications with a shared 30-second cooldown — the Rust
+//! Tray toast notifications with a shared 30-second cooldown, the Rust
 //! analogue of Python's `SystemTray.notify` anti-fatigue throttle.
 //!
 //! One [`Notifier`] is held on [`Core`](crate::core::Core) and shared by all
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
-/// Seconds between toasts (Microsoft anti-fatigue guidance) —
+/// Seconds between toasts (Microsoft anti-fatigue guidance):
 /// `SystemTray.NOTIFY_COOLDOWN`.
 const NOTIFY_COOLDOWN: Duration = Duration::from_secs(30);
 
@@ -35,7 +35,7 @@ impl Notifier {
         *self.app.lock().unwrap() = Some(app);
     }
 
-    /// Show a toast, enforcing the shared cooldown — `SystemTray.notify`. No-ops
+    /// Show a toast, enforcing the shared cooldown (`SystemTray.notify`). No-ops
     /// if the handle isn't attached yet or the cooldown is active; the timer
     /// advances only on a successful show (Python updates `_last_notify_time`
     /// only after `_icon.notify` succeeds).

@@ -1,12 +1,12 @@
 // A "trigger" is one guard: a thing Clawmation watches for on screen, plus what
 // it does when it appears. Guards (per-macro safety) and Watch triggers share
-// the exact same persisted shape — this module is the single source of truth for
+// the exact same persisted shape; this module is the single source of truth for
 // converting between that stored shape and the editor's working draft.
 //
 // The stored guard is a closed set of 18 fields (see the byte-identical `clean`
 // objects the old MacrosView/VisionView both wrote). The `Guard` type carries a
 // `[key: string]: unknown` index signature, so a mistyped field name assigns
-// cleanly and silently no-ops on save — tsc cannot catch it. To stay honest the
+// cleanly and silently no-ops on save; tsc cannot catch it. To stay honest the
 // draft reuses the persisted field names verbatim as pure pass-throughs, and the
 // whole plain-language reframe (Image/Color/Text, Strict/Balanced/Loose, "wait
 // after" outcomes) lives in the editor UI, derived from these fields by the pure
@@ -95,7 +95,7 @@ export function methodFor(look: LookKind): string {
 }
 
 // ── Accuracy ↔ match threshold (Image only) ────────────────────────────────
-// The old editor exposed a raw 0.50–0.99 "Match ≥" slider. We replace the number
+// The old editor exposed a raw 0.50 to 0.99 "Match ≥" slider. We replace the number
 // with three named stops; the raw threshold still round-trips untouched for any
 // value a stop doesn't sit exactly on.
 export const ACCURACY_STOPS: { key: "loose" | "balanced" | "strict"; label: string; desc: string; threshold: number }[] = [
@@ -122,7 +122,7 @@ export const RESUME_STOPS: { seconds: number; label: string; hint: string }[] = 
   { seconds: 12, label: "Long reconnect", hint: "Rejoining a world takes a while" },
 ];
 
-/** The canonical seconds of the stop nearest a stored delay — used to highlight
+/** The canonical seconds of the stop nearest a stored delay, used to highlight
  *  the right chip without mutating the stored value. */
 export function resumeStopOf(seconds: number): number {
   const s = seconds ?? 0;
@@ -133,12 +133,51 @@ export function resumeStopOf(seconds: number): number {
   return best.seconds;
 }
 
+// ── "How often can it fire" ↔ cooldown seconds ─────────────────────────────
+// The standalone watcher's only pacing control: after a trigger fires it waits
+// this long before looking for the same thing again. Zero is a real setting, not
+// a degenerate one (collecting something that keeps reappearing should go as
+// fast as the screen can be read), so it leads the list.
+export const REPEAT_STOPS: { seconds: number; label: string; hint: string }[] = [
+  { seconds: 0, label: "As fast as it can", hint: "No wait at all, best for collecting things quickly" },
+  { seconds: 1, label: "About once a second", hint: "A steady tap rather than a burst" },
+  { seconds: 5, label: "Every few seconds", hint: "For something that comes back slowly" },
+  { seconds: 30, label: "Once in a while", hint: "Half a minute between repeats" },
+];
+
+/** The canonical seconds of the repeat stop nearest a stored cooldown. */
+export function repeatStopOf(seconds: number): number {
+  const s = seconds ?? 0;
+  let best = REPEAT_STOPS[0];
+  for (const stop of REPEAT_STOPS) {
+    if (Math.abs(stop.seconds - s) < Math.abs(best.seconds - s)) best = stop;
+  }
+  return best.seconds;
+}
+
 /** True when the watch area is the whole screen (the stored "anywhere" default). */
 export function isAnywhere(region: number[]): boolean {
   return region.length === 4 && region[0] === 0 && region[1] === 0 && region[2] === 100 && region[3] === 100;
 }
 
-/** A one-line, jargon-free summary of what a trigger does — for list rows. */
+/** The untouched HSV range a fresh draft carries: hue 0-179, saturation 0-255,
+ *  value 0-255, which is to say every colour there is. It has to be told apart
+ *  from a picked colour, because a trigger saved on it matches the entire screen
+ *  as one blob and clicks the middle of it. */
+export function isUnpickedColor(low: number[], high: number[]): boolean {
+  return (
+    low.length === 3 &&
+    high.length === 3 &&
+    low[0] === 0 &&
+    low[1] === 0 &&
+    low[2] === 0 &&
+    high[0] === 179 &&
+    high[1] === 255 &&
+    high[2] === 255
+  );
+}
+
+/** A one-line, jargon-free summary of what a trigger does, for list rows. */
 export function describeTrigger(d: TriggerDraft): string {
   const look = lookOf(d.method);
   const what =
@@ -154,12 +193,18 @@ export function describeTrigger(d: TriggerDraft): string {
   return `When ${what}${where}, ${act}.`;
 }
 
-/** Is this trigger fully specified enough to save and run? Mirrors the old
- *  validation: a color needs a picked colour, an image needs a captured picture,
- *  text needs words to find. */
+/** Is this trigger fully specified enough to save and run? A colour needs one
+ *  actually picked, an image needs a captured picture, text needs words to find.
+ *
+ *  The colour arm used to accept any three-element range, which let a brand-new
+ *  draft save on its untouched full-spectrum default. That trigger matches every
+ *  pixel on screen as a single blob and clicks its centre, on repeat. The
+ *  default now reads as "nothing chosen yet", which is what it is. */
 export function isTriggerReady(d: TriggerDraft): boolean {
   const look = lookOf(d.method);
-  if (look === "color") return Array.isArray(d.hsv_low) && d.hsv_low.length === 3;
+  if (look === "color") {
+    return Array.isArray(d.hsv_low) && d.hsv_low.length === 3 && !isUnpickedColor(d.hsv_low, d.hsv_high);
+  }
   if (look === "image") return !!d.template_path;
   return d.ocr_text.trim().length > 0;
 }
@@ -174,7 +219,7 @@ function newId(): string {
 }
 
 /** A fresh trigger. Defaults to watching for a Color (the reliable path with a
- *  pick-on-screen picker) — the old code defaulted new Watch triggers to an
+ *  pick-on-screen picker). The old code defaulted new Watch triggers to an
  *  empty Image, a documented dead end. */
 export function newTriggerDraft(name = ""): TriggerDraft {
   return {
@@ -199,6 +244,14 @@ export function newTriggerDraft(name = ""): TriggerDraft {
     _extra: {},
     _preview: null,
   };
+}
+
+/** A fresh Watch trigger: [`newTriggerDraft`] with no wait between repeats. The
+ *  standalone watcher usually exists to keep pressing a thing the moment it comes
+ *  back, so zero is its right default; per-macro guards keep the steadier two
+ *  seconds, where re-firing during playback is a hazard rather than the point. */
+export function newWatchDraft(name = ""): TriggerDraft {
+  return { ...newTriggerDraft(name), cooldown: 0 };
 }
 
 const num = (v: unknown, d: number): number => (typeof v === "number" && !Number.isNaN(v) ? v : d);

@@ -71,8 +71,8 @@ pub fn update_config(app: AppHandle, state: State<AppState>, patch: Value) -> Va
     }
     drop(guard);
 
-    // A shortcut can parse and still be refused — Windows hands a global hotkey
-    // to whoever asked first — so the keys that did not take ride back with the
+    // A shortcut can parse and still be refused (Windows hands a global hotkey
+    // to whoever asked first), so the keys that did not take ride back with the
     // result instead of failing silently.
     let unbound = if hotkeys_changed {
         crate::shell::hotkeys::register_from_config(&app)
@@ -85,7 +85,7 @@ pub fn update_config(app: AppHandle, state: State<AppState>, patch: Value) -> Va
 
 /// Release the global shortcuts while the settings UI listens for a keystroke.
 /// Without this, capturing a key that is already bound would fire that binding
-/// instead — global shortcuts are exclusive and never reach the webview.
+/// instead; global shortcuts are exclusive and never reach the webview.
 #[tauri::command(async)]
 pub fn hotkeys_suspend(app: AppHandle) -> Value {
     crate::shell::hotkeys::suspend(&app);

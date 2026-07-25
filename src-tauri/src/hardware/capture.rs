@@ -1,4 +1,4 @@
-//! Screen capture — DXGI Desktop Duplication (primary), GDI BitBlt (fallback).
+//! Screen capture: DXGI Desktop Duplication (primary), GDI BitBlt (fallback).
 //!
 //! Faithful port of `anime_macro/capture.py::ScreenCapture`. Python names its
 //! backends after the libraries it wrapped: `dxcam` (DXGI Desktop Duplication,
@@ -20,16 +20,16 @@
 //!     `get_latest_frame()` never returns `None`. We reproduce those *semantics*
 //!     synchronously: each `grab()` does one non-blocking `AcquireNextFrame`, and
 //!     on `WAIT_TIMEOUT` (nothing new) returns the cached last frame. Same
-//!     observable result — a fresh frame while the screen moves, the last frame
-//!     while it is still, never `None` after the first — without a capture thread
+//!     observable result (a fresh frame while the screen moves, the last frame
+//!     while it is still, never `None` after the first) without a capture thread
 //!     the clean codebase does not need.
 //!   * `fps` is Python's exact metric: a rolling mean over the last 60 samples of
 //!     `1 / (time to read one frame)`. It measures read throughput, not the
 //!     backend's true capture rate, so the absolute number differs from Python's
-//!     buffer-read timing — but it is cosmetic telemetry (shown in the UI, never
+//!     buffer-read timing, but it is cosmetic telemetry (shown in the UI, never
 //!     a decision input), and the *formula* is identical.
 //!
-//! Intentionally not ported yet (no live consumer — see MIGRATION-NOTES):
+//! Intentionally not ported yet (no live consumer; see MIGRATION-NOTES):
 //!   * `grab_rgb` (BGR→RGB): lands with the first RGB consumer (a picker /
 //!     color sampler slice); every current frame consumer reads BGR.
 //!   * the `AppState` lazy-`get_capture` wiring and the `get_status` resolved
@@ -64,7 +64,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_
 
 /// A captured frame: tightly-packed BGR bytes plus its dimensions. Deliberately
 /// a plain data carrier (not an `image` crate type) so the deferred vision-stack
-/// decision — pure-Rust `image`/`imageproc` vs the `opencv` crate — stays open.
+/// decision (pure-Rust `image`/`imageproc` vs the `opencv` crate) stays open.
 #[derive(Clone)]
 pub struct Frame {
     /// `width * height * 3` bytes, row-major, BGR order (as OpenCV/Python expect).
@@ -76,7 +76,7 @@ pub struct Frame {
 impl Frame {
     /// A tight sub-frame of `self`, clamped to its bounds.
     ///
-    /// `None` when the rectangle is degenerate or lands entirely outside — the
+    /// `None` when the rectangle is degenerate or lands entirely outside; the
     /// caller then has nothing to search, which is not an error. Lets one
     /// full-screen grab serve several region-scoped consumers per cycle instead
     /// of re-grabbing per region.
@@ -156,7 +156,7 @@ fn region_rect(region: Region, screen_w: i32, screen_h: i32) -> (i32, i32, i32, 
 ///
 /// `row_pitch` is the source's bytes-per-row: a D3D11 staging texture (and any
 /// DIB) pads each row wider than `width * 4`, so we must index by `row_pitch`,
-/// never by `width * 4` — a tight-pack assumption skews the image diagonally
+/// never by `width * 4`; a tight-pack assumption skews the image diagonally
 /// (and the result is non-zero, so it slips past a naive "not all black" check).
 /// Rows/columns past the source edge are left black instead of read
 /// out-of-bounds, so an over-large region clamps cleanly.
@@ -200,8 +200,8 @@ fn bgra_to_bgr_crop(
 
 /// A live Desktop Duplication session. Created once; `grab` reuses it across
 /// calls and transparently rebuilds it after `DXGI_ERROR_ACCESS_LOST` (raised on
-/// every fullscreen transition, resolution change, and secure-desktop/UAC switch
-/// — routine for a game macro). COM objects release themselves when this drops.
+/// every fullscreen transition, resolution change, and secure-desktop/UAC switch,
+/// all routine for a game macro). COM objects release themselves when this drops.
 struct DxgiCapture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -213,7 +213,7 @@ struct DxgiCapture {
     staging: Option<ID3D11Texture2D>,
     staging_dims: (u32, u32),
     /// Last good frame, reused on `WAIT_TIMEOUT` (static screen) and while the
-    /// duplication is being rebuilt — this is what makes `grab` never-`None`.
+    /// duplication is being rebuilt; this is what makes `grab` never-`None`.
     last_frame: Option<Frame>,
 }
 
@@ -268,7 +268,7 @@ impl DxgiCapture {
         // Copy only frames that carry an actual desktop present. The first
         // `AcquireNextFrame` after `DuplicateOutput` (and any mouse-only update)
         // returns `LastPresentTime == 0` with a *blank* surface, so we skip those
-        // and keep the last good frame — dxcam's capture loop does the same. Wait
+        // and keep the last good frame; dxcam's capture loop does the same. Wait
         // up to a second for that first real frame; once one is cached, never
         // block: a static screen falls straight through to the reused frame.
         let deadline =
@@ -299,7 +299,7 @@ impl DxgiCapture {
                 Err(e) => {
                     let code = e.code();
                     if code == DXGI_ERROR_ACCESS_LOST || code == DXGI_ERROR_ACCESS_DENIED {
-                        // Duplication invalidated (fullscreen/mode switch) — drop
+                        // Duplication invalidated (fullscreen/mode switch): drop
                         // it so the next grab rebuilds; reuse the cache meanwhile.
                         self.duplication = None;
                         return self.last_frame.clone();
@@ -532,7 +532,7 @@ mod tests {
     fn bgra_to_bgr_respects_row_pitch() {
         // 2×2 BGRA source with a padded pitch of 12 bytes (8 used + 4 pad). If
         // the copy assumed a tight 8-byte pitch, row 1 would read the padding
-        // and the image would skew — this pins that it doesn't.
+        // and the image would skew; this pins that it doesn't.
         let pitch = 12;
         let mut src = vec![0u8; pitch * 2];
         // (0,0) B,G,R = 1,2,3 ; (1,0) = 4,5,6
@@ -581,7 +581,7 @@ mod tests {
         eprintln!("resolved backend: {}", cap.backend());
 
         let frame = cap.grab().expect("grab returned a frame");
-        // Dimensions must equal the primary output — a RowPitch skew or wrong
+        // Dimensions must equal the primary output; a RowPitch skew or wrong
         // crop would still be non-zero, so asserting size is the real check.
         assert_eq!(frame.width, sw as u32, "frame width");
         assert_eq!(frame.height, sh as u32, "frame height");

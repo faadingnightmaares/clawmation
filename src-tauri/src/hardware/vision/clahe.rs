@@ -11,7 +11,7 @@ use super::image::{cv_floor, saturate_u8, Gray};
 
 const HIST_SIZE: usize = 256;
 
-/// The equaliser, holding only its parameters — OpenCV's `CLAHE` object caches
+/// The equaliser, holding only its parameters. OpenCV's `CLAHE` object caches
 /// nothing between calls either.
 pub struct Clahe {
     clip_limit: f64,
@@ -34,7 +34,7 @@ impl Clahe {
             return src.clone();
         }
         // OpenCV builds the LUTs off a padded copy whenever *either* dimension
-        // fails to divide evenly — and then pads a whole extra tile on the axis
+        // fails to divide evenly, and then pads a whole extra tile on the axis
         // that did divide. Reproduced rather than corrected: the LUTs, and so
         // every equalised pixel, depend on it.
         let (lut_src, tile_w, tile_h) = if src.w % self.tiles_x == 0 && src.h % self.tiles_y == 0 {
@@ -84,7 +84,7 @@ impl Clahe {
         self.interpolate(src, &luts, tile_w, tile_h)
     }
 
-    /// Blend the four surrounding tile LUTs per pixel — OpenCV's
+    /// Blend the four surrounding tile LUTs per pixel: OpenCV's
     /// `CLAHE_Interpolation_Body`, half-pixel offsets and edge clamping included.
     fn interpolate(&self, src: &Gray, luts: &[u8], tile_w: usize, tile_h: usize) -> Gray {
         let inv_tw = 1.0 / tile_w as f32;
@@ -125,7 +125,7 @@ impl Clahe {
 }
 
 /// Cap every bin at `clip` and hand the excess back out evenly, the residual
-/// spread at a fixed stride — OpenCV redistributes rather than discards, which
+/// spread at a fixed stride. OpenCV redistributes rather than discards, which
 /// is what keeps the LUT monotonic after clipping.
 fn clip_histogram(hist: &mut [i32; HIST_SIZE], clip: i32) {
     let mut clipped = 0i32;

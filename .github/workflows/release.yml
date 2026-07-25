@@ -2,7 +2,7 @@ name: Release
 
 # Tag a commit `v1.0.1` and push it; this builds the installers, signs the update
 # artifact, writes `latest.json`, and publishes a draft release. Review the draft
-# and publish it — installed copies start seeing the update the moment you do.
+# and publish it; installed copies start seeing the update the moment you do.
 #
 # Requires one repository secret, `TAURI_SIGNING_PRIVATE_KEY`: the contents of
 # the minisign private key whose public half is in `src-tauri/tauri.conf.json`.
@@ -58,6 +58,6 @@ jobs:
             The app shows these notes verbatim in its update prompt, so write
             them for the person deciding whether to restart right now.
           releaseDraft: true
-          # Writes latest.json alongside the installers — the manifest the
+          # Writes latest.json alongside the installers: the manifest the
           # updater endpoint in tauri.conf.json points at.
           includeUpdaterJson: true

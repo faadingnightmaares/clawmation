@@ -1,7 +1,7 @@
 // The native region/color pickers return *physical* pixel coordinates; guards
 // and checkpoints store the watch area as screen percentages so a saved area
-// survives a resolution change. The Python UI divided by a hardcoded 2560×1440
-// — wrong on every other display. Derive the real physical size instead.
+// survives a resolution change. The Python UI divided by a hardcoded 2560×1440,
+// which is wrong on every other display. Derive the real physical size instead.
 
 function screenSize(): { w: number; h: number } {
   const dpr = window.devicePixelRatio || 1;
@@ -16,7 +16,7 @@ function screenSize(): { w: number; h: number } {
 // enough that OCR reads nothing. The backend stores the region as f64 either way.
 const clampPct = (n: number) => Math.max(0, Math.min(100, Math.round(n * 100) / 100));
 
-/** A picked pixel rect `{x,y,w,h}` → `[x1,y1,x2,y2]` percentages (0–100). */
+/** A picked pixel rect `{x,y,w,h}` → `[x1,y1,x2,y2]` percentages (0 to 100). */
 export function pxRectToPct(x: number, y: number, w: number, h: number): number[] {
   const s = screenSize();
   return [

@@ -1,4 +1,4 @@
-//! Clawmation — Rust/Tauri backend.
+//! Clawmation: Rust/Tauri backend.
 //!
 //! A faithful port of the Python "Clawmation" macro recorder/player. This module
 //! wires the managed application state and registers the Tauri command surface
@@ -34,7 +34,7 @@ pub fn run() {
     tauri::Builder::default()
         // Single-instance first: a duplicate launch is folded back into the
         // running app (focus its window and exit) before any window, hotkey, or
-        // capture device is claimed — the port of `_acquire_single_instance` +
+        // capture device is claimed, the port of `_acquire_single_instance` +
         // `_focus_existing_instance`.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             shell::tray::show_main_window(app);
@@ -64,7 +64,7 @@ pub fn run() {
                 .with_state_flags(
                     StateFlags::all() & !StateFlags::DECORATIONS & !StateFlags::VISIBLE,
                 )
-                .with_denylist(&[shell::indicator::LABEL])
+                .with_denylist(&[shell::indicator::LABEL, shell::detections::LABEL])
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -74,7 +74,7 @@ pub fn run() {
         .manage(HotkeyBindings::default())
         .setup(|app| {
             // Bind the notifier's app handle, then start the backend-initiated
-            // shell — global hotkeys from config and the system tray — mirroring
+            // shell (global hotkeys from config and the system tray), mirroring
             // `launch_ui`'s `_register_hotkeys()` / `_start_tray()` startup calls.
             let handle = app.handle().clone();
             app.state::<AppState>().core.notifier.attach(handle.clone());
@@ -82,7 +82,7 @@ pub fn run() {
             shell::tray::build(&handle)?;
             // Build the transparent pixel-cat overlay (hidden until record/play).
             // Like Python's `_start_indicator` try/except, a failure is logged and
-            // startup continues — the overlay is optional and must never abort the
+            // startup continues; the overlay is optional and must never abort the
             // app. `indicator_alive` flips true only when the window really exists,
             // keeping `get_status`'s report honest (`_indicator is not None`).
             match shell::indicator::create(&handle) {
@@ -92,8 +92,15 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("Clawmation: recording indicator unavailable: {e}"),
             }
+            // The live detection overlay, on the same terms: hidden until a
+            // detection loop arms it, and optional: without it the triggers run
+            // exactly as before, just unwatched.
+            match shell::detections::create(&handle) {
+                Ok(()) => app.state::<AppState>().core.detections.attach(handle.clone()),
+                Err(e) => eprintln!("Clawmation: detection overlay unavailable: {e}"),
+            }
             // Look for a new release once, off the startup path. Nothing waits on
-            // it and a failure is silent — an offline machine must still start.
+            // it and a failure is silent; an offline machine must still start.
             commands::misc::check_in_background(&handle);
             // Close puts Clawmation away instead of quitting it: a macro, a guard
             // or a scheduled chain is usually still running, and killing the app
@@ -102,7 +109,7 @@ pub fn run() {
             // the one path that actually ends the process.
             //
             // The window-state plugin has its own CloseRequested handler that
-            // banks the geometry, and it runs regardless of `prevent_close` — so
+            // banks the geometry, and it runs regardless of `prevent_close`, so
             // where you left the window survives the trip to the tray.
             if let Some(main) = app.get_webview_window("main") {
                 let hide_handle = handle.clone();
@@ -164,6 +171,7 @@ pub fn run() {
             commands::vision::vision_start,
             commands::vision::vision_stop,
             commands::vision::vision_status,
+            commands::vision::get_detections,
             commands::scheduler::list_schedules,
             commands::scheduler::add_schedule,
             commands::scheduler::remove_schedule,

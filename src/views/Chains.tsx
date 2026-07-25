@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Play,
   Plus,
@@ -41,6 +42,7 @@ import { fmtDur } from "@/format";
 import { useStaggerIn } from "@/lib/anime";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -50,6 +52,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -60,7 +69,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
   SheetContent,
@@ -70,8 +78,13 @@ import {
 } from "@/components/ui/sheet";
 import type { ViewProps } from "./types";
 
-// The 500 ms heartbeat that keeps the running-chain banner in step with the run.
-const POLL_MS = 500;
+// Mid-run this heartbeat drives a progress bar, so it stays quick. Idle it only
+// has to notice that a run started somewhere else (a hotkey, a schedule), and
+// asking twice a second for that was the old Chains tab paying for a banner
+// nobody was looking at. Autopilot keeps this section mounted the whole time it
+// is open, which makes the idle rate worth having.
+const POLL_RUNNING_MS = 500;
+const POLL_IDLE_MS = 2000;
 
 /** The editor's working copy of a chain, plus its own macro-picker selection. */
 interface ChainEditorState {
@@ -101,7 +114,7 @@ function chainSummary(c: EnrichedChain): string {
   return parts.join(" · ");
 }
 
-/** The Chains half of Autopilot — macros run back to back, optionally on a
+/** The Chains half of Autopilot: macros run back to back, optionally on a
  *  schedule. `Autopilot` owns the page header, so this starts at the content. */
 export function Chains(_props: ViewProps) {
   const [chains, setChains] = useState<EnrichedChain[]>([]);
@@ -120,7 +133,7 @@ export function Chains(_props: ViewProps) {
   const listRef = useStaggerIn<HTMLDivElement>(chains.length);
   const bannerRef = useRef<HTMLDivElement>(null);
 
-  // Validate each chain and total its duration — mirrors the old loadChains.
+  // Validate each chain and total its duration; mirrors the old loadChains.
   const loadChains = useCallback(async () => {
     try {
       const list = await listChains();
@@ -166,6 +179,8 @@ export function Chains(_props: ViewProps) {
     };
   }, [loadChains]);
 
+  const chainRunning = !!runningChain?.running;
+
   // Poll the running chain so the progress banner tracks the live run.
   useEffect(() => {
     let alive = true;
@@ -174,18 +189,16 @@ export function Chains(_props: ViewProps) {
         const rc = await getRunningChain();
         if (alive) setRunningChain(rc);
       } catch {
-        /* transient — retry next tick */
+        /* transient; retry next tick */
       }
     };
     void tick();
-    const id = setInterval(tick, POLL_MS);
+    const id = setInterval(tick, chainRunning ? POLL_RUNNING_MS : POLL_IDLE_MS);
     return () => {
       alive = false;
       clearInterval(id);
     };
-  }, []);
-
-  const chainRunning = !!runningChain?.running;
+  }, [chainRunning]);
 
   useEffect(() => {
     if (chainRunning && bannerRef.current) {
@@ -263,7 +276,7 @@ export function Chains(_props: ViewProps) {
     try {
       const res = await runChain(chainId);
       if ((res as { ok?: boolean }).ok) notify("success", `Playing “${name}” now.`);
-      else notify("error", "Couldn’t start — something may already be running.");
+      else notify("error", "Couldn’t start. Something may already be running.");
     } catch (e) {
       notify("error", String(e));
     }
@@ -348,7 +361,7 @@ export function Chains(_props: ViewProps) {
       const atTime = scheduleKind === "daily" ? scheduleTime : undefined;
       const res = await scheduleChain(scheduleFor, scheduleKind, intervalMin, atTime);
       if (res.ok) {
-        notify("success", "Scheduled — it’ll run on its own.");
+        notify("success", "Scheduled. It’ll run on its own.");
         setScheduleFor(null);
       } else {
         notify("error", res.error || "Couldn’t schedule that.");
@@ -379,160 +392,167 @@ export function Chains(_props: ViewProps) {
     : [];
 
   return (
-    <div className="space-y-8">
-      {/* Live run banner */}
+    <section className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">Chains</h2>
+          <p className="text-xs text-muted-foreground">
+            {chains.length
+              ? "Each one plays its macros in order, top to bottom."
+              : "Several macros, played back to back, in the order you set."}
+          </p>
+        </div>
+        {chains.length > 0 && (
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={handleImport}>
+              <Upload className="size-4" /> Import
+            </Button>
+            <Button size="sm" onClick={openNewChain}>
+              <Plus className="size-4" /> New chain
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Live run: the same hairline width as the list, so the page doesn't
+          lurch when a chain starts. */}
       {chainRunning && (
         <div
           ref={bannerRef}
-          className="relative overflow-hidden rounded-2xl border border-primary/40 bg-primary/[0.07] p-6"
+          className="flex flex-col gap-3 rounded-xl border border-primary/40 bg-primary/5 px-4 py-3"
         >
-          <div className="flex flex-col items-start gap-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-center gap-4">
-              <span className="relative flex size-3 shrink-0">
-                <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-70" />
-                <span className="relative inline-flex size-3 rounded-full bg-primary" />
-              </span>
-              <div className="min-w-0">
-                <p className="truncate text-base font-semibold text-foreground">
-                  Running “{runningChain?.name ?? ""}”
-                </p>
-                <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                  Step {runStep} of {runTotal}
-                  {runningChain?.current_macro ? ` · ${runningChain.current_macro}` : ""}
-                  {runHasIterations ? ` · round ${runningChain?.iteration ?? 1} of ${runningChain?.total_iterations}` : ""}
-                </p>
-              </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="relative flex size-2.5 shrink-0">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-70" />
+              <span className="relative inline-flex size-2.5 rounded-full bg-primary" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-foreground">
+                Running “{runningChain?.name ?? ""}”
+              </p>
+              <p className="truncate text-xs text-muted-foreground">
+                Step {runStep} of {runTotal}
+                {runningChain?.current_macro ? ` · ${runningChain.current_macro}` : ""}
+                {runHasIterations ? ` · round ${runningChain?.iteration ?? 1} of ${runningChain?.total_iterations}` : ""}
+              </p>
             </div>
-            <Button variant="secondary" onClick={handleStop} className="shrink-0">
-              <Square className="size-4" /> Stop
+            <Button variant="outline" size="sm" onClick={handleStop} className="shrink-0">
+              <Square className="size-4 fill-current" /> Stop
             </Button>
           </div>
-          <Progress value={runProgressPct} className="mt-4" />
+          <Progress value={runProgressPct} />
         </div>
       )}
 
-      {/* Chain list */}
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-semibold text-foreground">Your chains</h2>
-            <p className="text-xs text-muted-foreground">Each one plays its macros in order, top to bottom.</p>
-          </div>
-          {chains.length > 0 && (
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={handleImport}>
-                <Upload className="size-4" /> Import
-              </Button>
-              <Button size="sm" onClick={openNewChain}>
-                <Plus className="size-4" /> New chain
-              </Button>
-            </div>
-          )}
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" /> Loading…
         </div>
+      ) : chains.length ? (
+        <div ref={listRef} className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+          {chains.map((c) => {
+            const id = String(c.id);
+            const name = c.name ?? "Untitled chain";
+            const live = chainRunning && String(runningChain?.id ?? "") === id;
+            return (
+              <div key={id} className={cn("group relative transition-colors", live && "bg-primary/5")}>
+                {/* The row opens the chain, where the order and timings live. */}
+                <button
+                  type="button"
+                  onClick={() => openEditChain(c)}
+                  className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                >
+                  <span className="sr-only">Edit {name}</span>
+                </button>
 
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Loading…
-          </div>
-        ) : chains.length ? (
-          <div ref={listRef} className="grid gap-4 lg:grid-cols-2">
-            {chains.map((c) => {
-              const id = String(c.id);
-              const missing = new Set(c.missingMacros);
-              return (
-                <div key={id} className="flex flex-col gap-4 rounded-2xl border border-border bg-card p-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-base font-semibold text-foreground">
-                        {c.name ?? "Untitled chain"}
-                      </h3>
-                      <p className="mt-0.5 text-xs text-muted-foreground">{chainSummary(c)}</p>
-                    </div>
-                    <Button size="sm" onClick={() => handleRun(id, c.name ?? "chain")} className="shrink-0">
-                      <Play className="size-4" /> Run
-                    </Button>
+                <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-secondary/50 text-muted-foreground">
+                    <Workflow className="size-4" />
                   </div>
 
-                  {c.missingMacros.length > 0 && (
-                    <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.06] p-2.5 text-xs text-destructive">
-                      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-                      <span>
-                        Missing {c.missingMacros.length === 1 ? "a macro" : "macros"}: {c.missingMacros.join(", ")}. Edit
-                        the chain to fix it.
-                      </span>
-                    </div>
-                  )}
-
-                  {(c.macro_names?.length ?? 0) > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {c.macro_names!.map((name, i) => (
-                        <span
-                          key={`${name}-${i}`}
-                          className={cn(
-                            "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
-                            missing.has(name)
-                              ? "border-destructive/40 bg-destructive/[0.06] text-destructive"
-                              : "border-border bg-secondary/50 text-muted-foreground",
-                          )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium text-foreground">{name}</span>
+                      {c.missingMacros.length > 0 && (
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 gap-1 border-destructive/40 font-normal text-destructive"
+                          title={`Missing: ${c.missingMacros.join(", ")}. Open the chain to fix it.`}
                         >
-                          <span className="tabular-nums opacity-60">{i + 1}</span>
-                          {name}
-                        </span>
-                      ))}
+                          <TriangleAlert className="size-3" />
+                          {c.missingMacros.length} missing
+                        </Badge>
+                      )}
                     </div>
-                  )}
+                    <p className="truncate text-xs text-muted-foreground">{chainSummary(c)}</p>
+                  </div>
 
-                  <Separator />
-
-                  <div className="flex flex-wrap gap-1">
-                    <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => openSchedule(id)}>
-                      <CalendarClock className="size-4" /> Schedule
-                    </Button>
-                    <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => openEditChain(c)}>
-                      <Pencil className="size-4" /> Edit
-                    </Button>
-                    <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => handleDuplicate(id)}>
-                      <Copy className="size-4" /> Duplicate
-                    </Button>
-                    <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => handleExport(id)}>
-                      <Download className="size-4" /> Export
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-auto text-muted-foreground hover:text-destructive"
-                      onClick={() => handleDelete(id)}
-                    >
-                      <Trash2 className="size-4" /> Delete
-                    </Button>
+                  <div className="pointer-events-auto flex shrink-0 items-center gap-1">
+                    {live ? (
+                      <Button variant="outline" size="sm" onClick={handleStop}>
+                        <Square className="size-4 fill-current" /> Stop
+                      </Button>
+                    ) : (
+                      <Button size="sm" onClick={() => handleRun(id, name)}>
+                        <Play className="size-4" /> Run
+                      </Button>
+                    )}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="sm" title={`More for ${name}`}>
+                          <MoreHorizontal className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-48">
+                        <DropdownMenuItem onSelect={() => openSchedule(id)}>
+                          <CalendarClock className="size-4" /> Schedule it
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => openEditChain(c)}>
+                          <Pencil className="size-4" /> Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void handleDuplicate(id)}>
+                          <Copy className="size-4" /> Duplicate
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void handleExport(id)}>
+                          <Download className="size-4" /> Export to a file
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={() => void handleDelete(id)}
+                          className="text-destructive focus:text-destructive"
+                        >
+                          <Trash2 className="size-4" /> Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 </div>
-              );
-            })}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="flex flex-col items-center gap-4 rounded-xl border border-border bg-card px-6 py-12 text-center">
+          <div className="flex size-12 items-center justify-center rounded-full bg-secondary text-muted-foreground">
+            <Workflow className="size-6" />
           </div>
-        ) : (
-          <div className="flex flex-col items-center gap-5 rounded-2xl border border-dashed border-border px-6 py-16 text-center">
-            <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
-              <Workflow className="size-7" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-foreground">No chains yet</h3>
-              <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-                A chain runs a few macros back to back — great for multi-step routines you’d rather not babysit. Pick
-                your macros, set the order, and let it go.
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <Button size="lg" onClick={openNewChain}>
-                <Plus className="size-4" /> Build your first chain
-              </Button>
-              <Button size="lg" variant="outline" onClick={handleImport}>
-                <Upload className="size-4" /> Import one
-              </Button>
-            </div>
+          <div>
+            <h3 className="text-base font-semibold text-foreground">No chains yet</h3>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+              A chain runs a few macros back to back, which is good for multi-step routines you’d rather not babysit. Pick your
+              macros, set the order, and let it go.
+            </p>
           </div>
-        )}
-      </section>
+          <div className="flex gap-2">
+            <Button onClick={openNewChain}>
+              <Plus className="size-4" /> Build your first chain
+            </Button>
+            <Button variant="outline" onClick={handleImport}>
+              <Upload className="size-4" /> Import one
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Editor */}
       <Sheet open={!!editor} onOpenChange={(o) => !o && setEditor(null)}>
@@ -641,7 +661,7 @@ export function Chains(_props: ViewProps) {
                     </div>
                   ) : (
                     <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
-                      No macros yet — add one below to start the sequence.
+                      No macros yet. Add one below to start the sequence.
                     </p>
                   )}
 
@@ -746,6 +766,6 @@ export function Chains(_props: ViewProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </section>
   );
 }

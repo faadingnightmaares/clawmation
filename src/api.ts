@@ -3,20 +3,20 @@
 // place and match the Rust structs exactly. New slices extend this file.
 //
 // Two conventions live side by side, and they differ by direction:
-//   • Arguments IN use camelCase keys — Tauri v2 auto-maps them onto the Rust
+//   • Arguments IN use camelCase keys: Tauri v2 auto-maps them onto the Rust
 //     command's snake_case params (e.g. `{ macroName }` → `macro_name`).
-//   • Data OUT keeps Rust's serde field names, which are snake_case — so the
+//   • Data OUT keeps Rust's serde field names, which are snake_case, so the
 //     return interfaces below are snake_case. Do not "tidy" a return field to
 //     camelCase; it must match the JSON the command actually emits.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** Arbitrary JSON object — used where a command takes or returns an open map. */
+/** Arbitrary JSON object, used where a command takes or returns an open map. */
 export type Json = Record<string, unknown>;
 
 /**
  * The near-universal command result. Mutating commands return this shape
- * (sometimes with extra fields — see the specific interfaces). The UI reads
+ * (sometimes with extra fields; see the specific interfaces). The UI reads
  * live state off the `get_status` heartbeat, not these payloads, so
  * fire-and-forget commands are typed as a bare `OpResult`.
  */
@@ -27,7 +27,7 @@ export interface OpResult {
 
 // ─── Status heartbeat ───
 
-/** One activity-log line — mirrors Rust `logbuf::LogEntry`. */
+/** One activity-log line. Mirrors Rust `logbuf::LogEntry`. */
 export interface LogEntry {
   t: string;
   level: string;
@@ -37,7 +37,7 @@ export interface LogEntry {
 export interface WindowStatus {
   found: boolean;
   title: string;
-  /** `"WxH"` when found, `"—"` otherwise. */
+  /** `"WxH"` when found, empty otherwise. */
   size: string;
 }
 
@@ -55,7 +55,7 @@ export interface StatusConfig {
   indicator_on_top: boolean;
 }
 
-/** The `get_status` heartbeat payload — mirrors Rust `models::status::Status`. */
+/** The `get_status` heartbeat payload. Mirrors Rust `models::status::Status`. */
 export interface Status {
   /** `"idle"`, `"recording"`, `"playing"`, or `"paused"`. */
   mode: string;
@@ -80,7 +80,7 @@ export function getStatus(): Promise<Status> {
 
 // ─── Config & data folders ───
 
-/** `get_config` payload — mirrors Rust `ConfigDto`. */
+/** `get_config` payload. Mirrors Rust `ConfigDto`. */
 export interface ConfigDto {
   capture_backend: string;
   hotkey_record: string;
@@ -108,7 +108,7 @@ export function updateConfig(patch: Json): Promise<ConfigSaveResult> {
 }
 
 /** Release the global shortcuts so a keystroke reaches the webview to be
- *  captured — they're exclusive, so an already-bound key would fire instead. */
+ *  captured; they're exclusive, so an already-bound key would fire instead. */
 export function hotkeysSuspend(): Promise<OpResult> {
   return invoke<OpResult>("hotkeys_suspend");
 }
@@ -141,7 +141,7 @@ export function openDataFolder(kind: string): Promise<OpResult> {
 
 // ─── Macros & templates ───
 
-/** One row in the macro list — mirrors Rust `MacroListItem`. */
+/** One row in the macro list. Mirrors Rust `MacroListItem`. */
 export interface MacroListItem {
   name: string;
   events: number;
@@ -217,7 +217,7 @@ export function duplicateMacro(name: string): Promise<SaveNamedResult> {
   return invoke<SaveNamedResult>("duplicate_macro", { name });
 }
 
-/** Result of `set_repeat` — the persisted loop settings. */
+/** Result of `set_repeat`: the persisted loop settings. */
 export interface SetRepeatResult {
   ok: boolean;
   loop?: boolean;
@@ -227,7 +227,7 @@ export interface SetRepeatResult {
 
 /**
  * Persist a macro's repeat setting. `0` loops forever, `1` plays once, `N`
- * repeats N times. Fire-and-forget from the UI — no toast, no heartbeat read.
+ * repeats N times. Fire-and-forget from the UI: no toast, no heartbeat read.
  */
 export function setRepeat(name: string, repeat: number): Promise<SetRepeatResult> {
   return invoke<SetRepeatResult>("set_repeat", { name, repeat });
@@ -309,7 +309,7 @@ export interface EmergencyStopResult {
   stopped: string[];
 }
 
-/** The global panic button — stops recording, playback, and vision at once. */
+/** The global panic button: stops recording, playback, and vision at once. */
 export function emergencyStop(): Promise<EmergencyStopResult> {
   return invoke<EmergencyStopResult>("emergency_stop");
 }
@@ -364,7 +364,7 @@ export interface GuardTestResult {
   confidence?: number;
   message?: string;
   preview?: string;
-  /// MIME type of `preview` — always `image/png`, since every preview is drawn
+  /// MIME type of `preview`. Always `image/png`, since every preview is drawn
   /// in Rust.
   preview_mime?: string;
   error?: string;
@@ -426,14 +426,14 @@ export function captureTemplate(): Promise<CaptureTemplateResult> {
 }
 
 /** Add an existing image file as a template. Returns `error: "cancelled"` when
- * the file dialog is dismissed — a case the editor silently ignores. */
+ * the file dialog is dismissed, a case the editor silently ignores. */
 export function addTemplateImage(): Promise<CaptureTemplateResult> {
   return invoke<CaptureTemplateResult>("add_template_image");
 }
 
 /** A surgical capture: the saved crop `path`, a base64 PNG `thumb` with the drawn
  * strokes rendered on it, the crop size, and the click strokes as crop-relative
- * offsets — `click_lines` is every stroke, `click_line`/`offset` mirror the first
+ * offsets; `click_lines` is every stroke, `click_line`/`offset` mirror the first
  * for the single-target fields. Returns `error: "cancelled"` when the overlay is
  * dismissed (Esc), which the editor ignores like `addTemplateImage`. */
 export interface SurgicalCaptureResult {
@@ -548,8 +548,8 @@ export function removeCheckpoint(name: string, index: number): Promise<OpResult>
 // `Api.macro_to_steps` / `steps_save` / `steps_run` / `steps_test`
 // (index.html:3211-3339).
 
-/** One AI macro step. Every field is always present — `macroToSteps` emits
- * complete objects and the editor's inserts default to complete objects — so
+/** One AI macro step. Every field is always present (`macroToSteps` emits
+ * complete objects and the editor's inserts default to complete objects), so
  * they read as required here, matching the Rust `Step`
  * (src-tauri/src/models/step.rs). */
 export interface Step {
@@ -594,7 +594,7 @@ export function stepsRun(steps: Step[]): Promise<OpResult> {
   return invoke<OpResult>("steps_run", { steps });
 }
 
-/** Dry-run one step's detection against a fresh frame — no clicking. `preview`
+/** Dry-run one step's detection against a fresh frame, without clicking. `preview`
  * is a base64 JPEG (no data-URI prefix); the caller prepends it. Ports
  * `Api.steps_test`. */
 export interface StepTestResult {
@@ -821,7 +821,7 @@ export interface UpdateInfo {
 }
 
 /** Ask the release endpoint whether a newer signed build exists. Rejects when
- *  the endpoint is unreachable or the manifest doesn't verify — a rejection is
+ *  the endpoint is unreachable or the manifest doesn't verify; a rejection is
  *  "couldn't check", never "up to date". */
 export function checkUpdate(): Promise<UpdateInfo> {
   return invoke<UpdateInfo>("check_update");
@@ -834,7 +834,7 @@ export function installUpdate(): Promise<void> {
   return invoke<void>("install_update");
 }
 
-/** `(bytes downloaded, total bytes)` — `total` is absent when the server sends
+/** `(bytes downloaded, total bytes)`. `total` is absent when the server sends
  *  no content length. Emitted only while `installUpdate` is running. */
 export type UpdateProgress = [number, number | null];
 

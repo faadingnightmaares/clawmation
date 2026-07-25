@@ -26,12 +26,12 @@ const REGION: [u8; 3] = [192, 168, 74];
 const MATCH: [u8; 3] = [95, 174, 95];
 const BEST: [u8; 3] = [255, 95, 95];
 
-/// The step editor's region box — cyan, deliberately distinct from the guard
+/// The step editor's region box: cyan, deliberately distinct from the guard
 /// box above so the two Test buttons are never confused
 /// (`_draw_step_preview`'s BGR `(235, 168, 74)`).
 const STEP_REGION: [u8; 3] = [74, 168, 235];
 
-/// The pickers' accent — `(74, 168, 192)` in the BGR the Python modules wrote it
+/// The pickers' accent, `(74, 168, 192)` in the BGR the Python modules wrote it
 /// in, which is the same colour as the region box above.
 const GOLD: [u8; 3] = REGION;
 
@@ -45,7 +45,7 @@ const MAX_RINGS: usize = 20;
 const MAX_PREVIEW_WIDTH: u32 = 1280;
 
 /// An RGB canvas being drawn on. Owns its pixels so the source frame is never
-/// mutated — the caller may still be reading it.
+/// mutated; the caller may still be reading it.
 struct Canvas {
     rgb: Vec<u8>,
     width: i32,
@@ -63,7 +63,7 @@ impl Canvas {
     }
 
     /// Convert and box-average down by `factor` in one pass. Averaging rather
-    /// than point-sampling because the preview is a screenshot of text and UI —
+    /// than point-sampling because the preview is a screenshot of text and UI:
     /// dropping 3 of every 4 pixels makes it crawl with aliasing.
     fn from_frame_scaled(frame: &Frame, factor: u32) -> Self {
         if factor <= 1 {
@@ -123,7 +123,7 @@ impl Canvas {
     }
 
     /// Circle outline via the midpoint algorithm, thickened by drawing
-    /// concentric radii — cv2's `circle(..., thickness)`.
+    /// concentric radii, cv2's `circle(..., thickness)`.
     fn circle(&mut self, cx: i32, cy: i32, radius: i32, color: [u8; 3], thickness: i32) {
         for r in (radius - thickness + 1).max(1)..=radius {
             let (mut x, mut y, mut err) = (r, 0, 0);
@@ -143,7 +143,7 @@ impl Canvas {
         }
     }
 
-    /// Filled disc — cv2's `circle(..., -1)`, the stroke endpoint markers.
+    /// Filled disc: cv2's `circle(..., -1)`, the stroke endpoint markers.
     fn disc(&mut self, cx: i32, cy: i32, radius: i32, color: [u8; 3]) {
         for dy in -radius..=radius {
             let run = ((radius * radius - dy * dy) as f64).sqrt() as i32;
@@ -222,7 +222,7 @@ impl Canvas {
             encoder.set_color(png::ColorType::Rgb);
             encoder.set_depth(png::BitDepth::Eight);
             // The preview is a transient screenshot shown once, so trade ratio
-            // for latency — the Test button should feel instant.
+            // for latency; the Test button should feel instant.
             encoder.set_compression(png::Compression::Fast);
             encoder.write_header()?.write_image_data(&self.rgb)?;
         }
@@ -233,7 +233,7 @@ impl Canvas {
 /// Draw `matches` onto `frame` and return the base64 PNG the guard editor embeds.
 ///
 /// `region` is the pixel rectangle to outline. An encoding failure yields an
-/// empty string, exactly as the sidecar returned `""` when `cv2.imencode` failed —
+/// empty string, exactly as the sidecar returned `""` when `cv2.imencode` failed;
 /// the editor already renders the verdict without an image.
 pub fn annotate(frame: &Frame, region: (i32, i32, i32, i32), matches: &[Detection]) -> String {
     draw(frame, region, REGION, matches, None)
@@ -292,7 +292,7 @@ fn preview_factor(width: u32) -> u32 {
     }
 }
 
-/// Write `frame` to `path` as a PNG — the template files the pickers save, which
+/// Write `frame` to `path` as a PNG: the template files the pickers save, which
 /// the detector later reads back through `vision::read_frame`. Replaces
 /// `cv2.imwrite`.
 pub fn save_png(path: &Path, frame: &Frame) -> std::io::Result<()> {
@@ -308,13 +308,13 @@ pub fn save_png(path: &Path, frame: &Frame) -> std::io::Result<()> {
 }
 
 /// A base64 PNG thumbnail of `frame`, scaled to `height` px tall with its aspect
-/// ratio kept — the picker toasts' preview image.
+/// ratio kept, the picker toasts' preview image.
 pub fn thumbnail(frame: &Frame, height: u32) -> String {
     encode(&scaled_thumb(frame, height).0)
 }
 
-/// The surgical thumbnail: the same scaled crop with every drawn stroke on it —
-/// a gold line, a white dot at the start, a gold dot at the end.
+/// The surgical thumbnail: the same scaled crop with every drawn stroke on it
+/// (a gold line, a white dot at the start, a gold dot at the end).
 pub fn stroke_thumbnail(frame: &Frame, height: u32, strokes: &[[i32; 4]]) -> String {
     let (mut thumb, xscale, yscale) = scaled_thumb(frame, height);
     let width = (3.0 * xscale.min(yscale)) as i32;

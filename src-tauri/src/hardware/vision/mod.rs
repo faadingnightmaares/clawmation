@@ -2,7 +2,7 @@
 //! run in the Python `clawmation_vision` sidecar.
 //!
 //! The submodules are transcriptions of the OpenCV primitives that sidecar
-//! called — [`image`] for colour conversion, morphology, contours and resizing,
+//! called: [`image`] for colour conversion, morphology, contours and resizing,
 //! [`clahe`] and [`canny`] for the two preprocessing passes, [`corr`] for
 //! `matchTemplate`'s `TM_CCOEFF_NORMED`, and [`template`] for the multi-scale
 //! robust matcher built on top of them. Thresholds users already tuned were
@@ -25,7 +25,7 @@
 //!   from the shipped build and every `method = "ocr"` guard failed on import.
 //! * AI-step templates are loaded on demand. The monolith only ever called
 //!   `load_template` for guards and checkpoints, so a step's `template` mode
-//!   found nothing and its `features` mode reported "template not loaded" —
+//!   found nothing and its `features` mode reported "template not loaded",
 //!   a documented bug the port had no reason to carry forward. `features` shares
 //!   the robust matcher, ORB having been dropped (see [`template`]).
 
@@ -64,8 +64,8 @@ pub struct Detection {
     pub roi_offset: [i64; 2],
 }
 
-/// Why a vision call failed. Detection itself never fails — nothing found is an
-/// empty vector, not an error — so these are all setup problems the user can act
+/// Why a vision call failed. Detection itself never fails (nothing found is an
+/// empty vector, not an error), so these are all setup problems the user can act
 /// on: a screen that would not capture, a template file that would not decode.
 #[derive(Debug)]
 pub enum VisionError {
@@ -101,7 +101,7 @@ pub fn is_full_region(r: [f64; 4]) -> bool {
 }
 
 /// The search area for a region, plus its origin in screen pixels. Borrows the
-/// frame whole when there is no region to crop to, as the Python did — a
+/// frame whole when there is no region to crop to, as the Python did: a
 /// full-screen "crop" is a wasted copy of several megabytes per poll.
 fn roi<'a>(
     frame: &'a Frame,
@@ -126,7 +126,7 @@ fn hsv_bounds(low: [i64; 3], high: [i64; 3]) -> ([u8; 3], [u8; 3]) {
     ([clamp(low[0]), clamp(low[1]), clamp(low[2])], [clamp(high[0]), clamp(high[1]), clamp(high[2])])
 }
 
-/// Decode an image file into a BGR [`Frame`] — `cv2.imread(path,
+/// Decode an image file into a BGR [`Frame`]: `cv2.imread(path,
 /// IMREAD_COLOR)`. Any alpha channel is dropped, as cv2 drops it. A `Frame` (and
 /// not a bare buffer) because the template importer hands the result straight to
 /// [`preview`](crate::hardware::preview) to re-encode and thumbnail. `::image` is
@@ -160,7 +160,7 @@ pub struct Detector {
     screen_w: i32,
     screen_h: i32,
     /// Keyed by template file path, so replacing a guard's picture loads the new
-    /// one instead of matching the old one until restart — which is what keying
+    /// one instead of matching the old one until restart, which is what keying
     /// by guard id did.
     templates: HashMap<String, Template>,
     matcher: Matcher,
@@ -176,7 +176,7 @@ impl Detector {
         }
     }
 
-    /// Re-point the detector at a screen size — `init`'s `screen_w`/`screen_h`,
+    /// Re-point the detector at a screen size: `init`'s `screen_w`/`screen_h`,
     /// which the config's target resolution can change between runs.
     pub fn set_screen(&mut self, screen_w: i64, screen_h: i64) {
         self.screen_w = screen_w as i32;
@@ -199,7 +199,7 @@ impl Detector {
         Ok(key)
     }
 
-    /// Drop a template so the next match re-reads it from disk — called when the
+    /// Drop a template so the next match re-reads it from disk, called when the
     /// picker overwrites a guard's picture.
     pub fn forget_template(&mut self, path: &Path) {
         let key = path.to_string_lossy().into_owned();
@@ -207,7 +207,7 @@ impl Detector {
         self.matcher.forget(&key);
     }
 
-    /// Every HSV blob in `region` big enough to count, largest first — the port
+    /// Every HSV blob in `region` big enough to count, largest first. The port
     /// of `PixelDetector.detect_color`.
     pub fn detect_color(
         &self,
@@ -246,13 +246,13 @@ impl Detector {
                 })
             })
             .collect();
-        // Biggest first. Stable, so equal-area blobs keep contour order — as
+        // Biggest first. Stable, so equal-area blobs keep contour order, as
         // Python's `sort(reverse=True)` did.
         out.sort_by(|a, b| (b.w * b.h).cmp(&(a.w * a.h)));
         out
     }
 
-    /// Find a template image in `region` — the three-tier robust match.
+    /// Find a template image in `region`: the three-tier robust match.
     pub fn match_robust(
         &mut self,
         frame: &Frame,
@@ -272,7 +272,7 @@ impl Detector {
         Ok(self.matcher.robust(&gray, ox, oy, tpl, &key, label, threshold))
     }
 
-    /// Run a guard's configured detection against a frame — the port of
+    /// Run a guard's configured detection against a frame: the port of
     /// `guard.py::detect_guard`. `Err` means the guard's template file could not
     /// be read; every other outcome, including "nothing there", is an empty
     /// vector so one bad guard never aborts a poll cycle.
@@ -339,8 +339,8 @@ impl Detector {
         self.detect_color(frame, region, lo, hi, min_area as f64, "checkpoint")
     }
 
-    /// One AI step's detection, with the status message the run log prints —
-    /// the port of `steps.py::ai_detect`.
+    /// One AI step's detection, with the status message the run log prints.
+    /// The port of `steps.py::ai_detect`.
     pub fn ai_detect(&mut self, frame: &Frame, step: &Step) -> (Vec<Detection>, String) {
         let region = Some(step.region);
         if step.detect_mode == "color" {
@@ -374,7 +374,7 @@ impl Detector {
 }
 
 /// A three-integer HSV bound out of a checkpoint config, falling back whole
-/// rather than per-element — a config with a malformed triple gets the default
+/// rather than per-element: a config with a malformed triple gets the default
 /// range, not a mix of the two.
 fn hsv_from(cfg: &Value, key: &str, fallback: [i64; 3]) -> [i64; 3] {
     match cfg.get(key).and_then(Value::as_array).filter(|a| a.len() == 3) {

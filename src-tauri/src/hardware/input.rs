@@ -1,4 +1,4 @@
-//! Input simulation — raw Win32 `SendInput` for 1:1 macro playback.
+//! Input simulation: raw Win32 `SendInput` for 1:1 macro playback.
 //!
 //! Faithful port of `anime_macro/input.py::InputController`. pyautogui-style
 //! libraries add per-call pauses and extra move-to-target steps that make replay
@@ -6,13 +6,13 @@
 //! `SendInput` with zero artificial delay. Timing is owned entirely by the
 //! player (absolute timestamps).
 //!
-//! Intentionally not ported (dead in the shipped Python app — see
+//! Intentionally not ported (dead in the shipped Python app; see
 //! MIGRATION-NOTES):
-//!   * the `humanize` jitter and `click_delay_ms` inter-click sleep — the
+//!   * the `humanize` jitter and `click_delay_ms` inter-click sleep: the
 //!     controller is always constructed with defaults, so neither ever fires and
 //!     every recorded click is a single click. The user-facing "humanize clicks"
 //!     option lives in the *guard* engine (bezier-move then click), not here.
-//!   * `double_click` / `right_click` / `hotkey` / `type_text` — no live caller.
+//!   * `double_click` / `right_click` / `hotkey` / `type_text`: no live caller.
 //!
 //! The Python 1-second `GetSystemMetrics` cache is also dropped: it existed to
 //! avoid ctypes marshalling overhead on every move; a direct syscall in Rust is
@@ -149,7 +149,7 @@ fn vk_lookup(k: &str) -> Option<u16> {
 /// Resolve a recorded key string to a virtual-key code, mirroring Python's
 /// `_resolve_vk`: exact map hit first, then a single character (letter →
 /// uppercase VK, digit → its ASCII code), then a `Key.`-prefixed pynput name.
-/// Anything unresolvable returns `None` (a no-op press) — this app's macros
+/// Anything unresolvable returns `None` (a no-op press); this app's macros
 /// never contain such keys.
 ///
 /// Exposed to the crate so the recorder's `key_name` can be verified as its
@@ -190,7 +190,7 @@ fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// A tiny SplitMix64 PRNG — enough to jitter the two Bézier control points so an
+/// A tiny SplitMix64 PRNG, enough to jitter the two Bézier control points so an
 /// autonomous path is never identical twice. The app carries no `rand`
 /// dependency and the exact distribution is irrelevant here (this is anti-cheat
 /// noise, not anything a user observes), so a hand-rolled mixer fits the
@@ -370,7 +370,7 @@ impl InputController {
     /// Instant absolute cursor move.
     ///
     /// Uses both `SendInput` (for apps that read the input queue) and
-    /// `SetCursorPos` — the latter is essential because many games and
+    /// `SetCursorPos`; the latter is essential because many games and
     /// DirectInput apps ignore `SendInput` mouse moves entirely, and without it
     /// the cursor doesn't move.
     pub fn move_to(&self, x: i32, y: i32) {
@@ -409,7 +409,7 @@ impl InputController {
     /// teleport to a target is a dead giveaway to anti-cheat heuristics, so the
     /// cursor travels a gently curved path with an ease-in/out velocity profile
     /// that reads as human. `duration <= 0` picks a distance-scaled duration.
-    /// Recorded-macro replay never calls this — it replays the user's exact
+    /// Recorded-macro replay never calls this; it replays the user's exact
     /// sampled path instead. Ported from `input.py::bezier_move_to`.
     pub fn bezier_move_to(&self, x: i32, y: i32, duration: f64) {
         // The current cursor position is the curve's start point.
@@ -422,7 +422,7 @@ impl InputController {
         let (dx, dy) = (tx - sx, ty - sy);
         let dist = (dx * dx + dy * dy).sqrt();
         if dist < 2.0 {
-            // Already there (or trivially close) — a plain move is fine.
+            // Already there (or trivially close), so a plain move is fine.
             self.move_to(x, y);
             return;
         }
@@ -505,7 +505,7 @@ impl InputController {
         }
     }
 
-    /// Type a string one character at a time — `InputController.type_text`. Each
+    /// Type a string one character at a time (`InputController.type_text`). Each
     /// char is a key press followed by a 20 ms pause (Python's default
     /// `interval=0.02`, always truthy, so it pauses after every char, the last
     /// included). The AI `type` step is the only caller, and it never overrides the
@@ -628,7 +628,7 @@ mod tests {
         // At t=0 the curve equals the first control value; at t=1, the last.
         assert_eq!(cubic_bezier(0.0, 5.0, 10.0, 20.0, 40.0), 5.0);
         assert_eq!(cubic_bezier(1.0, 5.0, 10.0, 20.0, 40.0), 40.0);
-        // Evenly spaced controls trace a straight ramp — linear at the midpoint.
+        // Evenly spaced controls trace a straight ramp, linear at the midpoint.
         assert!((cubic_bezier(0.5, 0.0, 1.0, 2.0, 3.0) - 1.5).abs() < 1e-9);
     }
 

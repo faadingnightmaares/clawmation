@@ -161,7 +161,7 @@ pub fn rename_macro(state: State<AppState>, old_name: String, new_name: String) 
     if result["ok"] == json!(true) {
         let safe = result["name"].as_str().unwrap_or_default().to_string();
         let old = old_name.trim();
-        // Keep the "last macro" pointer in sync — `Api._last_macro_name`.
+        // Keep the "last macro" pointer in sync: `Api._last_macro_name`.
         {
             let mut rt = state.core.runtime.lock().unwrap();
             if rt.last_macro == old {
@@ -183,7 +183,7 @@ pub fn duplicate_macro(state: State<AppState>, name: String) -> Value {
     result
 }
 
-/// `set_repeat` is silent — the repeat dial persists on every drag, so a log line
+/// `set_repeat` is silent: the repeat dial persists on every drag, so a log line
 /// per change would flood the activity feed (the source emits nothing here).
 #[tauri::command(async)]
 pub fn set_repeat(name: String, repeat: i64) -> Value {
@@ -244,7 +244,7 @@ fn delete_macro_in(macros_dir: &Path, stats: &PlayStats, name: &str) -> Value {
 }
 
 /// `bulk_delete`: also uses each name verbatim. A file that exists but cannot be
-/// removed is reported in `failed` and the batch continues — see MIGRATION-NOTES.
+/// removed is reported in `failed` and the batch continues. See MIGRATION-NOTES.
 fn bulk_delete_in(macros_dir: &Path, stats: &PlayStats, names: &[String]) -> Value {
     let mut deleted: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
@@ -390,7 +390,7 @@ fn set_notes_in(macros_dir: &Path, name: &str, notes: &str) -> Value {
     }
 }
 
-/// `set_repeat`: persist the loop setting — `0` infinite, `1` once, `N` N times —
+/// `set_repeat`: persist the loop setting (`0` infinite, `1` once, `N` N times),
 /// the same mapping `play_macro` applies to a `repeat` argument.
 fn set_repeat_in(macros_dir: &Path, name: &str, repeat: i64) -> Value {
     let stem = strip_json(name);
@@ -444,7 +444,7 @@ fn duplicate_macro_in(macros_dir: &Path, guards_dir: &Path, name: &str) -> Value
     if let Err(e) = macro_def.save_to(&macros_dir.join(format!("{new_name}.json"))) {
         return json!({ "ok": false, "error": e.to_string() });
     }
-    // `if guards: save_guards(...)` — only write a sidecar when the source has one.
+    // `if guards: save_guards(...)`. Only write a sidecar when the source has one.
     let guards = GuardFile::load(&guards_dir.join(format!("{stem}.json"))).guards;
     if !guards.is_empty() {
         let _ = GuardFile { guards }.save_to(&guards_dir.join(format!("{new_name}.json")));
@@ -454,7 +454,7 @@ fn duplicate_macro_in(macros_dir: &Path, guards_dir: &Path, name: &str) -> Value
 
 /// `rename_macro`: whitespace-trim both names (no `.json` strip), sanitize the new
 /// name to alphanumerics plus `_`/`-`/space, then move the macro file and its
-/// guard sidecar. A case-only change is treated as in-place — Windows paths are
+/// guard sidecar. A case-only change is treated as in-place; Windows paths are
 /// case-insensitive, matching the source's `pathlib` comparison.
 fn rename_macro_in(macros_dir: &Path, guards_dir: &Path, old_name: &str, new_name: &str) -> Value {
     let old_name = old_name.trim();

@@ -38,11 +38,11 @@ export function Home({ status, navigate }: ViewProps) {
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const subtitle =
     status?.mode === "recording"
-      ? "Recording right now — press your stop key when you’re done."
+      ? "Recording right now. Press your stop key when you’re done."
       : status?.mode === "playing"
         ? `Playing ${status.last_macro.trim() || "a macro"} right now.`
         : status?.mode === "paused"
-          ? "Paused for a moment — pick up whenever you like."
+          ? "Paused for a moment. Pick up whenever you like."
           : "Pick up where you left off, or start something new.";
 
   return (
@@ -63,7 +63,7 @@ export function Home({ status, navigate }: ViewProps) {
         <ActionCard
           icon={Eye}
           title="Watch the screen"
-          blurb="Let Clawmation keep an eye out and act on its own — no macro needed."
+          blurb="Let Clawmation keep an eye out and act on its own. No macro needed."
           onClick={() => navigate("vision")}
         />
       </div>

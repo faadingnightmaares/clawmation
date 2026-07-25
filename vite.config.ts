@@ -51,13 +51,15 @@ export default defineConfig(async () => ({
     },
   },
 
-  // Two HTML entry points: the app (`index.html`) and the transparent recording
-  // indicator overlay (`indicator.html`), each with its own module graph.
+  // Three HTML entry points: the app (`index.html`) and the two transparent
+  // overlays, the recording indicator (`indicator.html`) and the live detection
+  // boxes (`detections.html`), each with its own module graph.
   build: {
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         indicator: fileURLToPath(new URL("./indicator.html", import.meta.url)),
+        detections: fileURLToPath(new URL("./detections.html", import.meta.url)),
       },
     },
   },

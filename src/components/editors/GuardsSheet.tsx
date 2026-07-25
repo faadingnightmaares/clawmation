@@ -34,7 +34,7 @@ export function GuardsSheet({ macroName, open, onOpenChange, onChanged }: Editor
       const r = await guardList(macroName);
       const list = r.ok ? r.guards ?? [] : [];
       setGuards(list);
-      // Opening guards on a macro that has none can only mean adding one — land
+      // Opening guards on a macro that has none can only mean adding one, so land
       // in the editor instead of on an empty list with a button. Cancel goes back.
       if (!list.length) setEditing(newTriggerDraft());
     } catch {
@@ -109,7 +109,7 @@ export function GuardsSheet({ macroName, open, onOpenChange, onChanged }: Editor
             <SheetHeader className="px-6 pb-2 pr-12 pt-6">
               <SheetTitle>Safety guards</SheetTitle>
               <SheetDescription>
-                While “{macroName}” runs, a guard watches the screen — and when trouble shows up, it steps in and
+                While “{macroName}” runs, a guard watches the screen, and when trouble shows up, it steps in and
                 keeps your loop alive.
               </SheetDescription>
             </SheetHeader>
@@ -120,17 +120,19 @@ export function GuardsSheet({ macroName, open, onOpenChange, onChanged }: Editor
                   <Loader2 className="size-4 animate-spin" /> Loading…
                 </div>
               ) : guards.length ? (
-                guards.map((g) => (
-                  <TriggerRow
-                    key={String(g.id)}
-                    guard={g}
-                    testing={testingId === String(g.id)}
-                    onEdit={() => setEditing(draftFromGuard(g))}
-                    onTest={() => test(g)}
-                    onToggle={(en) => toggle(g, en)}
-                    onDelete={() => remove(g)}
-                  />
-                ))
+                <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+                  {guards.map((g) => (
+                    <TriggerRow
+                      key={String(g.id)}
+                      guard={g}
+                      testing={testingId === String(g.id)}
+                      onEdit={() => setEditing(draftFromGuard(g))}
+                      onTest={() => test(g)}
+                      onToggle={(en) => toggle(g, en)}
+                      onDelete={() => remove(g)}
+                    />
+                  ))}
+                </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 py-14 text-center">
                   <div className="flex size-12 items-center justify-center rounded-full bg-secondary text-muted-foreground">

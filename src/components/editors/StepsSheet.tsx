@@ -35,14 +35,14 @@ import {
 } from "@/components/ui/sheet";
 import type { EditorSheetProps } from "./GuardsSheet";
 
-// The step editor — a recording opened as a flat list of actions the user can
+// The step editor: a recording opened as a flat list of actions the user can
 // reorder, tweak, and slot detection steps between. It owns its own async seam
 // (convert / save / play / test / pick-colour) rather than taking callbacks, so
 // it drops straight into the macro list like the guard and checkpoint sheets.
 //
 // Detection steps match by COLOUR only: template / features are dead branches
 // for AI steps (`ai_detect` never loads a template), so the editor never
-// surfaces detect-mode, template, or confidence — they stay on the hidden
+// surfaces detect-mode, template, or confidence; they stay on the hidden
 // defaults below. Everything else the old panel could edit is kept.
 
 type StepIcon = ComponentType<{ className?: string }>;
@@ -65,7 +65,7 @@ const INSERT_OPTIONS: { type: string; label: string; Icon: StepIcon; detect?: bo
   { type: "key", label: "Key", Icon: Keyboard },
 ];
 
-/** A freshly inserted step — a complete `Step`, since the list `macroToSteps`
+/** A freshly inserted step: a complete `Step`, since the list `macroToSteps`
  * returns is already complete objects. Mirrors the Rust `Step` defaults
  * (src-tauri/src/models/step.rs); the backend serde-fills any omitted field to
  * these same values, so only the type-specific ones ever render. Detection
@@ -104,7 +104,7 @@ function makeStep(type: string): Step {
   return { ...base, ...(overlays[type] || {}) };
 }
 
-/** A colour step still on its full-range default — no colour picked, so it would
+/** A colour step still on its full-range default: no colour picked, so it would
  * match every pixel. Drives the "pick one" hint. */
 function hsvIsUnset(low: number[], high: number[]): boolean {
   return (
@@ -211,7 +211,7 @@ export function StepsSheet({ macroName, open, onOpenChange, onChanged }: EditorS
     setTestResult(null);
   };
 
-  // Bulk-edit every pause at once — the most common post-recording cleanup, since
+  // Bulk-edit every pause at once: the most common post-recording cleanup, since
   // recorded waits are noisy from human hesitation. The `?? "0.5"` / `?? "1"`
   // fallbacks preserve the source quirk that a bare "× factor" multiplies by 1.
   const bulkEditDelays = (mode: "set" | "multiply" | "cap", value: number) => {
@@ -277,7 +277,7 @@ export function StepsSheet({ macroName, open, onOpenChange, onChanged }: EditorS
     }
   };
 
-  // Sampling a colour also switches the step into colour mode — a step loaded in
+  // Sampling a colour also switches the step into colour mode: a step loaded in
   // the old template default would otherwise keep the picked colour but never act
   // on it, so the button would look like it did nothing.
   const pickColor = async (idx: number) => {
@@ -305,7 +305,7 @@ export function StepsSheet({ macroName, open, onOpenChange, onChanged }: EditorS
         <SheetHeader className="px-6 pb-4 pr-12 pt-6">
           <SheetTitle>Fine-tune actions</SheetTitle>
           <SheetDescription>
-            Edit each action in “{macroName}” one by one — reorder them, adjust the details, or drop in a step
+            Edit each action in “{macroName}” one by one: reorder them, adjust the details, or drop in a step
             that waits for a colour on screen.
           </SheetDescription>
         </SheetHeader>
@@ -561,7 +561,7 @@ export function StepsSheet({ macroName, open, onOpenChange, onChanged }: EditorS
                                     Colour set
                                   </span>
                                 ) : (
-                                  <span className="text-muted-foreground/70">no colour yet — pick one</span>
+                                  <span className="text-muted-foreground/70">no colour yet, pick one</span>
                                 )}
                                 {isWaitFor && (
                                   <span className="inline-flex items-center gap-1.5">

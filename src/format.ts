@@ -54,11 +54,11 @@ export function fmtHotkey(k: string): string {
 
 /**
  * Approximate the midpoint of an HSV range as a CSS colour for a swatch. OpenCV
- * hue is 0–179; saturation/value 0–255. Returns `transparent` when either bound
+ * hue is 0 to 179; saturation/value 0 to 255. Returns `transparent` when either bound
  * is missing. Mirrors the live `hsvToCss` (index.html:3570). The source defines
  * an earlier same-named method (index.html:2694, halved lightness + gold
  * fallback) that this later definition shadows on the class prototype, so 2694
- * never runs — this ports the one that actually does.
+ * never runs; this ports the one that actually does.
  */
 export function hsvToCss(low?: number[], high?: number[]): string {
   if (!low || !high) return "transparent";

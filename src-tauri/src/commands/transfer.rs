@@ -1,4 +1,4 @@
-//! Import / export / bundle commands — the native file-dialog flows.
+//! Import / export / bundle commands: the native file-dialog flows.
 //!
 //! 1:1 port of the pywebview `api.{export_chain, import_chain, export_macro,
 //! import_macro, bulk_export, export_bundle, import_bundle}` methods. Python
@@ -8,12 +8,12 @@
 //!
 //! Every command here MUST stay `#[tauri::command(async)]`. Tauri runs plain
 //! sync handlers on the main thread, and `blocking_*` posts the dialog to the
-//! main thread and then waits for it — from the main thread that is a
+//! main thread and then waits for it; from the main thread that is a
 //! self-deadlock that hangs the whole window, not just the call.
 //!
 //! The tkinter "dialog failed to initialize" branches (`"Folder dialog failed:
-//! …"`, `"File dialog failed: …"`) have no analogue here — a native dialog does
-//! not fail to open the way a headless `tk.Tk()` can — so a dismissed dialog is
+//! …"`, `"File dialog failed: …"`) have no analogue here: a native dialog does
+//! not fail to open the way a headless `tk.Tk()` can, so a dismissed dialog is
 //! the single `"cancelled"` path, matching Python's `if not path` result.
 
 use std::collections::{HashMap, HashSet};
@@ -30,7 +30,7 @@ use crate::models::macro_def::Macro;
 use crate::paths;
 use crate::state::AppState;
 
-/// `name[:-5] if name.endswith(".json") else name` — the stem Python keys files by.
+/// `name[:-5] if name.endswith(".json") else name`: the stem Python keys files by.
 fn strip_json(name: &str) -> &str {
     name.strip_suffix(".json").unwrap_or(name)
 }
@@ -96,7 +96,7 @@ pub fn import_chain(app: AppHandle, state: State<AppState>) -> Value {
     }
     // `Chain`'s Deserialize applies the same `delay_between or 1.0` / `repeat or 1`
     // coercion as Python's `from_dict`; `ChainManager::add` then assigns a fresh id
-    // and persists — exactly `data["id"] = new_id; _chains[new_id] = …; _save()`.
+    // and persists, exactly `data["id"] = new_id; _chains[new_id] = …; _save()`.
     let imported: Chain = match serde_json::from_value(data) {
         Ok(c) => c,
         Err(e) => return json!({ "ok": false, "error": e.to_string() }),
@@ -266,7 +266,7 @@ pub fn import_bundle(app: AppHandle, state: State<AppState>) -> Value {
         &paths::templates_dir(),
         &paths::guards_dir(),
     ) {
-        // `Ok(None)` is the "no macro.json" sentinel — its own error string, not
+        // `Ok(None)` is the "no macro.json" sentinel: its own error string, not
         // the generic prefixed one, matching Python's two distinct messages.
         Ok(Some(name)) => {
             state.emit("ok", format!("Imported bundle → '{name}'"));

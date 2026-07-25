@@ -1,45 +1,83 @@
-//! VisionAgent — the standalone autonomous vision loop behind the Vision panel.
+//! VisionAgent: the standalone autonomous vision loop behind the Vision panel.
 //!
 //! Mirrors `anime_macro/guards.py::VisionAgent`. Unlike [`super::guards`] (which
 //! pauses and resumes a *playing* macro), this runs on its own: it continuously
 //! scans for its triggers and, the moment one appears, performs its action and
-//! optionally runs a sequence of macros — a fully vision-driven bot.
+//! optionally runs a sequence of macros, a fully vision-driven bot.
 //!
 //! Like every engine here it is hardware-free. Detection, actuation, the UI
 //! event feed, and the macro runner are injected closures, so the loop runs and
-//! tests without real capture, input, or playback. There is deliberately no
-//! cooldown: a trigger fires every cycle it stays on screen (Python's comment,
-//! preserved), so the count reflects raw fire cycles.
+//! tests without real capture, input, or playback.
+//!
+//! Each trigger is scheduled on its own clock rather than the whole set sharing
+//! one fixed cadence. Python polled everything at a flat 20Hz, which is fine for
+//! a colour test and ruinous for a text one: reading the screen runs the OS
+//! recognizer, and asking for that twenty times a second pins a CPU. Two rules
+//! replace the fixed interval:
+//!
+//! * **Idle triggers pay for themselves.** After a pass that found nothing, a
+//!   trigger waits in proportion to what its own detection just cost, so the
+//!   watcher never spends more than [`IDLE_DUTY`] of a core hunting. Cheap
+//!   checks stay effectively as fast as before; expensive ones back off on
+//!   their own, on whatever machine they land on, with no tuning to guess at.
+//! * **A trigger that just fired runs at its own `cooldown`,** with no duty
+//!   floor at all. At the default of zero that means straight back round:
+//!   collecting a thing that keeps reappearing goes as fast as the hardware
+//!   allows, which is the whole point of the watcher.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::hardware::vision::Detection;
 use crate::models::guard::Guard;
 
-/// 20Hz — the capture backend tops out near 60fps, so polling faster just
-/// re-detects the same frame; 50ms catches any trigger imperceptibly fast
-/// (matches Python's `POLL_INTERVAL`).
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+use super::guards::{plan_action, stroke_points, Plan};
+use super::sleep_interruptible;
 
-/// The action a fired trigger performs on screen.
+/// The share of one core the watcher may spend while nothing is on screen.
+/// A pass costing `t` is followed by `t * (1/IDLE_DUTY - 1)` of quiet.
+const IDLE_DUTY: f64 = 0.2;
+
+/// Floor on that quiet time, the old fixed cadence. A detection cheap enough to
+/// want more than 20Hz is re-running on stale capture anyway, since the backend
+/// tops out near 60fps.
+const MIN_IDLE: Duration = Duration::from_millis(50);
+
+/// Ceiling on it, so even the priciest detector is retried inside a second and a
+/// half rather than disappearing for as long as the duty rule would like.
+const MAX_IDLE: Duration = Duration::from_millis(1500);
+
+/// How long to wait when there is nothing enabled to look at.
+const EMPTY_IDLE: Duration = Duration::from_millis(200);
+
+/// Dwell between the moves of a drag sweep, so a game registers it as a
+/// continuous drag rather than a teleport. Matches [`super::guards`].
+const STROKE_STEP: Duration = Duration::from_millis(8);
+
+/// The action a fired trigger performs on screen. The three cursor primitives
+/// exist for the same reason they do in [`super::guards`]: a trigger whose
+/// picture was marked with drawn strokes is a drag, not a click, and the sweep
+/// is driven from here so it stays testable without real input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisionAction {
     KeyPress(String),
     Click(i64, i64),
+    MoveTo(i64, i64),
+    MouseDown(String),
+    MouseUp(String),
 }
 
-/// `detect(enabled_triggers) -> {trigger_id: [detections]}` — one batched grab.
+/// `detect(enabled_triggers) -> {trigger_id: [detections]}`: one batched grab.
 pub type Detect = Box<dyn Fn(&[Guard]) -> HashMap<String, Vec<Detection>> + Send + Sync>;
-/// `act(action)` — perform the trigger's on-screen action.
+/// `act(action)`: perform the trigger's on-screen action.
 pub type Act = Box<dyn Fn(VisionAction) + Send + Sync>;
-/// `on_event(kind, message)` — feed a line to the Vision panel (`kind` is one of
+/// `on_event(kind, message)`: feed a line to the Vision panel (`kind` is one of
 /// `"start"`, `"act"`, `"stop"`).
 pub type OnEvent = Box<dyn Fn(&str, &str) + Send + Sync>;
-/// `run_macro(name, repeat) -> Result<(), reason>` — run one orchestrated macro.
+/// `run_macro(name, repeat) -> Result<(), reason>`: run one orchestrated macro.
 /// `repeat` of 0 means run forever, so a faithful implementation MUST be
 /// interruptible; the engine already breaks the step loop on `stop()`, but a
 /// single infinite step can only be cut short by the runner itself. `Err`
@@ -55,6 +93,9 @@ struct Inner {
     running: AtomicBool,
     /// Total fire cycles since `start`; read cross-thread by the UI, hence atomic.
     fired: AtomicI64,
+    /// Trigger id → when it is next due to be looked for. Entries for triggers
+    /// that have gone away are dropped each pass, so an edited list cannot leak.
+    due: Mutex<HashMap<String, Instant>>,
 }
 
 pub struct VisionAgent {
@@ -73,6 +114,7 @@ impl VisionAgent {
                 triggers: Mutex::new(Vec::new()),
                 running: AtomicBool::new(false),
                 fired: AtomicI64::new(0),
+                due: Mutex::new(HashMap::new()),
             }),
             thread: Mutex::new(None),
         }
@@ -91,13 +133,14 @@ impl VisionAgent {
         }
         let count = enabled.len();
         *self.inner.triggers.lock().unwrap() = enabled;
+        self.inner.due.lock().unwrap().clear();
         self.inner.fired.store(0, Ordering::SeqCst);
         self.inner.running.store(true, Ordering::SeqCst);
         let inner = Arc::clone(&self.inner);
         *thread = Some(thread::spawn(move || inner.run_loop()));
         (self.inner.on_event)(
             "start",
-            &format!("Vision running — watching for {count} trigger(s)"),
+            &format!("Vision running, watching for {count} trigger(s)"),
         );
     }
 
@@ -118,17 +161,29 @@ impl VisionAgent {
     }
 }
 
+/// The quiet time a pass costing `cost` has earned itself, per [`IDLE_DUTY`].
+fn idle_after(cost: Duration) -> Duration {
+    cost.mul_f64(1.0 / IDLE_DUTY - 1.0).clamp(MIN_IDLE, MAX_IDLE)
+}
+
 impl Inner {
     fn run_loop(self: Arc<Self>) {
         while self.running.load(Ordering::SeqCst) {
-            self.tick();
-            thread::sleep(POLL_INTERVAL);
+            let wait = self.tick();
+            if !wait.is_zero() {
+                sleep_interruptible(&self.running, wait);
+            }
         }
     }
 
-    /// One poll cycle: detect every enabled trigger in a single batch, then act
-    /// on each match in order.
-    fn tick(&self) {
+    /// One poll cycle: detect the triggers that are due in a single batch, act
+    /// on each match in order, reschedule everything that was looked at, and
+    /// report how long the caller should wait before asking again.
+    ///
+    /// A zero wait is the burst case: some trigger fired and its cooldown is
+    /// zero, so the next look is immediate. Detection itself paces the loop
+    /// there; it cannot spin, because a pass always costs a capture.
+    fn tick(&self) -> Duration {
         let enabled: Vec<Guard> = self
             .triggers
             .lock()
@@ -138,10 +193,38 @@ impl Inner {
             .cloned()
             .collect();
         if enabled.is_empty() {
-            return;
+            self.due.lock().unwrap().clear();
+            return EMPTY_IDLE;
         }
-        let detections = (self.detect)(&enabled);
-        for trigger in &enabled {
+
+        let now = Instant::now();
+        let (ready, soonest) = {
+            // Forget triggers that have gone away, then split the rest into the
+            // ones due now and the soonest of those that are not.
+            let mut due = self.due.lock().unwrap();
+            due.retain(|id, _| enabled.iter().any(|t| &t.id == id));
+            let mut ready = Vec::new();
+            let mut soonest: Option<Instant> = None;
+            for trigger in &enabled {
+                match due.get(&trigger.id) {
+                    Some(&at) if at > now => {
+                        soonest = Some(soonest.map_or(at, |s: Instant| s.min(at)));
+                    }
+                    _ => ready.push(trigger.clone()),
+                }
+            }
+            (ready, soonest)
+        };
+        if ready.is_empty() {
+            return soonest.map_or(MIN_IDLE, |at| at.saturating_duration_since(now));
+        }
+
+        let started = Instant::now();
+        let detections = (self.detect)(&ready);
+        let idle = idle_after(started.elapsed());
+
+        let mut next = Vec::with_capacity(ready.len());
+        for trigger in &ready {
             // Don't begin a new action after stop() was requested.
             if !self.running.load(Ordering::SeqCst) {
                 break;
@@ -150,25 +233,65 @@ impl Inner {
                 .get(&trigger.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            if let Some(best) = matched.first() {
-                self.act_on(trigger, best.x, best.y);
+            match matched.first() {
+                Some(best) => {
+                    self.act_on(trigger, best);
+                    // Measured after acting: a trigger that runs a macro should
+                    // wait its cooldown from the end of that, not the start.
+                    next.push((
+                        trigger.id.clone(),
+                        Duration::from_secs_f64(trigger.cooldown.max(0.0)),
+                    ));
+                }
+                None => next.push((trigger.id.clone(), idle)),
             }
         }
+
+        // Whoever comes up first sets the wait, including the triggers that
+        // were not due this pass and so were never looked at.
+        let settled = Instant::now();
+        let mut due = self.due.lock().unwrap();
+        for (id, gap) in next {
+            due.insert(id, settled + gap);
+        }
+        due.values()
+            .map(|&at| at.saturating_duration_since(settled))
+            .min()
+            .unwrap_or(MIN_IDLE)
     }
 
     /// Perform the trigger's action, then run its macro sequence (Python's
     /// `_act`). Each fire increments the count; a keyed trigger presses its key,
-    /// otherwise it clicks the match. Blank-named steps are skipped and a failing
-    /// macro reports its reason to the feed without aborting the rest.
-    fn act_on(&self, trigger: &Guard, x: i64, y: i64) {
+    /// otherwise it follows the same geometric plan a guard would. Blank-named
+    /// steps are skipped and a failing macro reports its reason to the feed
+    /// without aborting the rest.
+    ///
+    /// The plan matters more here than it does for guards, because the Watch
+    /// surface is the only one that offers "snap and mark click": the picture is
+    /// the whole element and the marked point is where inside it to press. Acting
+    /// on the match centre instead lands wherever the middle of that picture
+    /// happens to be, which for anything but a plain rectangular button is not
+    /// the target at all.
+    fn act_on(&self, trigger: &Guard, best: &Detection) {
         self.fired.fetch_add(1, Ordering::SeqCst);
 
         if trigger.action == "key" && !trigger.key.is_empty() {
             (self.act)(VisionAction::KeyPress(trigger.key.clone()));
             (self.on_event)("act", &format!("'{}' -> pressed {}", trigger.name, trigger.key));
         } else {
-            (self.act)(VisionAction::Click(x, y));
-            (self.on_event)("act", &format!("'{}' -> clicked ({x}, {y})", trigger.name));
+            match plan_action(trigger, best) {
+                Plan::Click(x, y) => {
+                    (self.act)(VisionAction::Click(x, y));
+                    (self.on_event)("act", &format!("'{}' -> clicked ({x}, {y})", trigger.name));
+                }
+                Plan::Drag { tlx, tly, strokes } => {
+                    self.sweep(tlx, tly, &strokes);
+                    (self.on_event)(
+                        "act",
+                        &format!("'{}' -> dragged {} stroke(s)", trigger.name, strokes.len()),
+                    );
+                }
+            }
         }
 
         if trigger.macro_sequence.is_empty() {
@@ -206,6 +329,31 @@ impl Inner {
             }
         }
     }
+
+    /// Drag along each stroke: press at the start, sweep pixel by pixel, release.
+    /// The release always runs, even if `stop()` cuts the sweep short, so a held
+    /// button is never stranded.
+    fn sweep(&self, tlx: i64, tly: i64, strokes: &[Vec<i64>]) {
+        for stroke in strokes {
+            let pts = stroke_points(stroke, tlx, tly);
+            if pts.is_empty() {
+                continue;
+            }
+            let (startx, starty) = pts[0];
+            let (endx, endy) = *pts.last().unwrap();
+            (self.act)(VisionAction::MoveTo(startx, starty));
+            (self.act)(VisionAction::MouseDown("left".to_string()));
+            for &(px, py) in &pts[1..] {
+                if !self.running.load(Ordering::SeqCst) {
+                    break;
+                }
+                (self.act)(VisionAction::MoveTo(px, py));
+                thread::sleep(STROKE_STEP);
+            }
+            (self.act)(VisionAction::MoveTo(endx, endy));
+            (self.act)(VisionAction::MouseUp("left".to_string()));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -217,8 +365,8 @@ impl VisionAgent {
         self.inner.running.store(true, Ordering::SeqCst);
     }
 
-    fn test_tick(&self) {
-        self.inner.tick();
+    fn test_tick(&self) -> Duration {
+        self.inner.tick()
     }
 }
 
@@ -273,10 +421,13 @@ mod tests {
         make(id, dets, Box::new(|_: &str, _: i64| Ok(())))
     }
 
+    /// A watch trigger at the Watch view's own default: no cooldown, so it fires
+    /// every cycle the thing is on screen.
     fn base_trigger(id: &str) -> Guard {
         Guard {
             id: id.into(),
             name: "Watcher".into(),
+            cooldown: 0.0,
             ..Default::default()
         }
     }
@@ -291,6 +442,53 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec![("act".into(), "'Watcher' -> clicked (7, 9)".into())]
+        );
+    }
+
+    /// A match with real extent, so the top-left the surgical offsets are
+    /// measured from is somewhere other than the centre.
+    fn sized_detection(x: i64, y: i64, w: i64, h: i64) -> Detection {
+        Detection {
+            w,
+            h,
+            ..detection(x, y)
+        }
+    }
+
+    #[test]
+    fn a_marked_click_point_is_where_it_clicks() {
+        // "Snap and mark click" only exists on the Watch surface, so this is the
+        // one engine that has to honour it. Centre of the 40x20 match is (100,
+        // 200), top-left (80, 190), and the mark was 4 px in and 3 px down.
+        let (agent, actions, _) = harness("t", vec![sized_detection(100, 200, 40, 20)]);
+        let mut t = base_trigger("t");
+        t.click_offset = vec![4, 3];
+        agent.test_prime(vec![t]);
+        agent.test_tick();
+        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(84, 193)]);
+    }
+
+    #[test]
+    fn a_marked_stroke_drags_across_the_match() {
+        let (agent, actions, events) = harness("t", vec![sized_detection(100, 200, 40, 20)]);
+        let mut t = base_trigger("t");
+        t.click_lines = vec![vec![0, 0, 2, 0]];
+        agent.test_prime(vec![t]);
+        agent.test_tick();
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![
+                VisionAction::MoveTo(80, 190),
+                VisionAction::MouseDown("left".into()),
+                VisionAction::MoveTo(81, 190),
+                VisionAction::MoveTo(82, 190),
+                VisionAction::MoveTo(82, 190),
+                VisionAction::MouseUp("left".into()),
+            ]
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![("act".into(), "'Watcher' -> dragged 1 stroke(s)".into())]
         );
     }
 
@@ -314,15 +512,45 @@ mod tests {
 
     #[test]
     fn no_cooldown_fires_every_tick() {
+        // And asks for no wait at all between them: "collect it as fast as the
+        // hardware allows" is what a zero cooldown means.
         let (agent, actions, _) = harness("t", vec![detection(1, 1)]);
         agent.test_prime(vec![base_trigger("t")]);
-        agent.test_tick();
+        assert_eq!(agent.test_tick(), Duration::ZERO);
         agent.test_tick();
         assert_eq!(
             *actions.lock().unwrap(),
             vec![VisionAction::Click(1, 1), VisionAction::Click(1, 1)]
         );
         assert_eq!(agent.fired_count(), 2);
+    }
+
+    #[test]
+    fn a_cooldown_holds_a_trigger_back() {
+        let (agent, actions, _) = harness("t", vec![detection(1, 1)]);
+        let mut t = base_trigger("t");
+        t.cooldown = 30.0;
+        agent.test_prime(vec![t]);
+        let wait = agent.test_tick();
+        // Fired once, and the next look is a cooldown away rather than now.
+        agent.test_tick();
+        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(1, 1)]);
+        assert!(wait > Duration::from_secs(25), "asked to wait {wait:?}");
+    }
+
+    #[test]
+    fn a_trigger_that_finds_nothing_backs_off_by_what_it_cost() {
+        // The floor applies to a free detection; a slow one is charged the duty
+        // rate, and neither is ever asked to disappear for longer than the cap.
+        assert_eq!(idle_after(Duration::ZERO), MIN_IDLE);
+        assert_eq!(idle_after(Duration::from_millis(100)), Duration::from_millis(400));
+        assert_eq!(idle_after(Duration::from_secs(9)), MAX_IDLE);
+
+        let (agent, actions, _) = harness("other", vec![detection(1, 1)]);
+        agent.test_prime(vec![base_trigger("t")]);
+        let wait = agent.test_tick();
+        assert!(actions.lock().unwrap().is_empty());
+        assert!(wait >= MIN_IDLE, "asked to wait {wait:?}");
     }
 
     #[test]
@@ -397,7 +625,7 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec![
-                ("start".into(), "Vision running — watching for 1 trigger(s)".into()),
+                ("start".into(), "Vision running, watching for 1 trigger(s)".into()),
                 ("stop".into(), "Vision stopped".into()),
             ]
         );

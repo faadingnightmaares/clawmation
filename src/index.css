@@ -1,5 +1,5 @@
 /* `source(none)` + an explicit whitelist, because Tailwind's default scan root
-   is the Vite root — which in debug builds is also the app's data root. A
+   is the Vite root, which in debug builds is also the app's data root. A
    scanned file is a file whose every write full-reloads the window, and the app
    writes settings, stats, macros and snapshots there while it runs. */
 @import "tailwindcss" source(none);
@@ -57,7 +57,7 @@
 /*
   The three brand hues kept across a full redesign: parchment #faf8f5, ink #1a1816,
   gold #c2a370. Light mode keeps parchment as ground; dark mode inverts the value
-  structure — warm ink becomes the ground, parchment the text, gold the lone accent.
+  structure: warm ink becomes the ground, parchment the text, gold the lone accent.
   Gold (--primary / --ring) is spent sparingly: the one action verb per surface,
   focus, and the live/run state. Warm red (--destructive) is Stop + Delete only.
 */
@@ -163,7 +163,7 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* A single barely-there warm radial for depth on the dark ground — no gradients
+  /* A single barely-there warm radial for depth on the dark ground. No gradients
      as decoration, no glassmorphism. Fixed so it doesn't scroll with content. */
   .dark body {
     background-image: radial-gradient(

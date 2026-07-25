@@ -11,20 +11,20 @@ interface ViewSwitchProps {
 }
 
 /**
- * The switch carrying every place you actually work — Home, Macros, Watch,
+ * The switch carrying every place you actually work: Home, Macros, Watch,
  * Autopilot. One physical thumb slides between the segments: it stretches
  * across the gap on the way and settles into the target, so the eye tracks a
  * moving object instead of boxes swapping highlight.
  *
  * Settings is the one view not in here, and while it shows, no segment is
- * current — the thumb hides rather than lying about where you are.
+ * current: the thumb hides rather than lying about where you are.
  */
 export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const thumbRef = useRef<HTMLSpanElement>(null);
   const glowRef = useRef<HTMLSpanElement>(null);
   const btnRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  /** Where the thumb was last sent — the start point of the next trip. */
+  /** Where the thumb was last sent: the start point of the next trip. */
   const placed = useRef<{ x: number; w: number } | null>(null);
 
   const index = PRIMARY_VIEWS.findIndex((v) => v.id === view);
@@ -96,7 +96,7 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
 
   useEffect(() => place(true), [place]);
 
-  // Labels can reflow — font swap, a longer word after a locale change — so the
+  // Labels can reflow (font swap, a longer word after a locale change), so the
   // thumb re-measures instead of trusting the width it was born with.
   useEffect(() => {
     const track = trackRef.current;
@@ -157,7 +157,7 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
             )}
           >
             <v.Icon className="size-4" />
-            {/* Four labels don't fit a narrow window — below `md` the icons carry
+            {/* Four labels don't fit a narrow window: below `md` the icons carry
                 it alone, and the thumb re-measures through the ResizeObserver. */}
             <span className="hidden md:inline">{v.label}</span>
           </button>

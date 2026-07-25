@@ -72,7 +72,7 @@ const HOTKEYS: { key: HotkeyKey; label: string }[] = [
 
 const prettyAccel = (accel: string) => accelCaps(accel).join(" + ");
 
-/** Preferences, plus the Guide as a second tab — it is reading material rather
+/** Preferences, plus the Guide as a second tab. It is reading material rather
  *  than a place you work, so it lives here instead of taking a slot in the bar. */
 export function Settings(props: ViewProps) {
   const [tab, setTab] = useState("preferences");
@@ -91,7 +91,7 @@ export function Settings(props: ViewProps) {
   useEffect(() => {
     let alive = true;
     void (async () => {
-      // A plain browser has no Tauri seam, so each call can reject — allSettled
+      // A plain browser has no Tauri seam, so each call can reject; allSettled
       // lets one failure fall back to defaults without sinking the others.
       const [cfg, dp, ver] = await Promise.allSettled([getConfig(), getDataPaths(), getVersion()]);
       if (!alive) return;
@@ -135,7 +135,7 @@ export function Settings(props: ViewProps) {
       return;
     }
     if (accel && res.unbound?.includes(accel)) {
-      notify("error", `Windows wouldn’t hand over ${prettyAccel(accel)} — another app has it.`);
+      notify("error", `Windows wouldn’t hand over ${prettyAccel(accel)}. Another app has it.`);
     } else {
       notify("success", accel ? `Shortcut set to ${prettyAccel(accel)}.` : "Shortcut removed.");
     }
@@ -169,7 +169,7 @@ export function Settings(props: ViewProps) {
   };
 
   // `installUpdate` restarts the app on success, so the only way out of this
-  // function is a failure — there is no success branch to write.
+  // function is a failure; there is no success branch to write.
   const runInstall = async () => {
     setInstalling(true);
     setProgress(null);
@@ -193,7 +193,7 @@ export function Settings(props: ViewProps) {
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">Settings</h1>
         <p className="text-sm text-muted-foreground">
-          Shortcuts, alerts and where your things live — plus the guide, whenever you want a
+          Shortcuts, alerts and where your things live, plus the guide, whenever you want a
           refresher.
         </p>
       </header>
@@ -231,7 +231,7 @@ export function Settings(props: ViewProps) {
               <Section
                 icon={Keyboard}
                 title="Shortcuts"
-                hint="Keys you can press anywhere to run things hands-free. Click one, then press the keys — Esc backs out, Backspace unbinds."
+                hint="Keys you can press anywhere to run things hands-free. Click one, then press the keys. Esc backs out, Backspace unbinds."
               >
                 <div className="grid gap-4 sm:grid-cols-3">
                   {HOTKEYS.map((hk) => (

@@ -10,7 +10,7 @@ running copies will accept.
 Updates are signed with [minisign](https://jedisct1.github.io/minisign/); Tauri
 refuses any download whose signature doesn't verify against the `pubkey` in
 `src-tauri/tauri.conf.json`. The matching private key is **not** in this
-repository and must never be — anyone holding it can push code to every install.
+repository and must never be; anyone holding it can push code to every install.
 
 The current key lives at `~/.tauri/clawmation.key` and has **no password**.
 That is fine for a laptop you control and wrong for anything shared. To replace
@@ -40,8 +40,8 @@ git tag v1.0.1 && git push origin v1.0.1
 ```
 
 `.github/workflows/release.yml` runs the three test suites, builds, signs,
-generates `latest.json`, and opens a **draft** release. Edit the notes — the app
-shows them verbatim in its update prompt — and publish. Installed copies see the
+generates `latest.json`, and opens a **draft** release. Edit the notes (the app
+shows them verbatim in its update prompt), then publish. Installed copies see the
 update from that moment.
 
 The rest of this file is what that workflow does, for when you need to do it by
@@ -49,7 +49,7 @@ hand or work out why it didn't.
 
 ## Cutting a release by hand
 
-1. Bump the version in **three** places, which must agree —
+1. Bump the version in **three** places, which must agree:
    `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `package.json`. The
    updater compares the manifest's version against the one baked into the
    running app, so a stale `tauri.conf.json` means the update is offered forever
@@ -58,7 +58,7 @@ hand or work out why it didn't.
 2. Build with **both** signing variables in the environment. Without the key the
    bundler still produces installers but no `.sig` files, and an unsigned update
    is one the app will not install. Without the password variable the signer
-   prompts for one on stdin — which a scripted or backgrounded build never
+   prompts for one on stdin, which a scripted or backgrounded build never
    answers, so it bundles the installers and then hangs there silently. Set it
    to the empty string when the key has no password:
 
@@ -74,15 +74,15 @@ hand or work out why it didn't.
    $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content ~/.tauri/clawmation.key -Raw).Trim(); $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""; npm run tauri build
    ```
 
-   A signed build ends with a second summary — "Finished 2 updater signatures
-   at:" — after the bundle list. If you only see the bundle list, nothing was
+   A signed build ends with a second summary ("Finished 2 updater signatures
+   at:") after the bundle list. If you only see the bundle list, nothing was
    signed.
 
 3. Collect the artifacts from `src-tauri/target/release/bundle/`:
 
-   - `nsis/clawmation_<version>_x64-setup.exe` — the installer people download,
+   - `nsis/clawmation_<version>_x64-setup.exe`: the installer people download,
      and the same file the updater downloads.
-   - `nsis/clawmation_<version>_x64-setup.exe.sig` — its signature.
+   - `nsis/clawmation_<version>_x64-setup.exe.sig`: its signature.
 
    Tauri v2 signs the installer itself; there is no `.nsis.zip` unless
    `createUpdaterArtifacts` is set to `"v1Compatible"`. The MSI is signed too,
@@ -105,7 +105,7 @@ hand or work out why it didn't.
    ```
 
    `signature` is the file's text, not a path. `version` must not carry a `v`
-   prefix — it is compared as semver against the running build.
+   prefix; it is compared as semver against the running build.
 
 5. Publish a GitHub release tagged `v<version>` with `latest.json`, the
    `-setup.exe`, and its `.sig` attached.
@@ -119,7 +119,7 @@ https://github.com/a7mda/clawmation/releases/latest/download/latest.json
 ```
 
 **Check that owner and repository name before the first release.** A wrong URL
-404s, and a 404 is indistinguishable from "no update" — the app will quietly
+404s, and a 404 is indistinguishable from "no update": the app will quietly
 report that everyone is up to date forever. Tauri also expands `{{current_version}}`,
 `{{target}}`, and `{{arch}}` in endpoint URLs if you'd rather serve a manifest
 per platform.

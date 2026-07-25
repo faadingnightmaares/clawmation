@@ -1,4 +1,4 @@
-//! Chain execution engine — run several macros back-to-back.
+//! Chain execution engine: run several macros back-to-back.
 //!
 //! Mirrors `anime_macro/chains.py::ChainManager`. A chain runs on a dedicated
 //! background thread that plays each macro in order, waiting for the app to
@@ -48,7 +48,7 @@ struct Inner {
 }
 
 /// Outcome of [`ChainManager::duplicate`]: the new chain's `id` and `name`, plus
-/// the source chain's name — the left side of the `Api.duplicate_chain` emit.
+/// the source chain's name, the left side of the `Api.duplicate_chain` emit.
 pub struct Duplicated {
     pub id: String,
     pub name: String,

@@ -1,4 +1,4 @@
-//! Data models — byte-compatible ports of the Python persistence schemas.
+//! Data models: byte-compatible ports of the Python persistence schemas.
 
 pub mod chain;
 pub mod config;

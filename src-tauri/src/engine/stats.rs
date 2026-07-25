@@ -1,4 +1,4 @@
-//! Play statistics engine — a thread-safe wrapper over `config/stats.json`.
+//! Play statistics engine: a thread-safe wrapper over `config/stats.json`.
 //!
 //! Mirrors `anime_macro/stats.py::PlayStats`. Tracks per-macro play counts and a
 //! newest-first execution history (capped at 100). All mutations persist
@@ -72,7 +72,7 @@ impl PlayStats {
         self.data.lock().unwrap().stats.values().map(|s| s.count).sum()
     }
 
-    /// Every macro's stats keyed by name — the analogue of Python's
+    /// Every macro's stats keyed by name, the analogue of Python's
     /// `PlayStats.all()`, consumed by `get_stats_summary`.
     pub fn all(&self) -> BTreeMap<String, MacroStat> {
         self.data.lock().unwrap().stats.clone()

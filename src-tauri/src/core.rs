@@ -1,4 +1,4 @@
-//! The wiring hub — `Core` — that binds the leaf hardware Arcs to the permanent
+//! The wiring hub (`Core`) that binds the leaf hardware Arcs to the permanent
 //! guard engine and carries the playback logic `Api` kept as loose methods.
 //!
 //! `Core` is the Rust analogue of the mutable state `Api.__init__` builds: the
@@ -9,17 +9,19 @@
 //! handle.
 //!
 //! Acyclicity is deliberate: the guard engine's four callbacks capture only
-//! *leaf* Arcs (vision, player, controller, log) — never `Core` — so guards can
+//! *leaf* Arcs (vision, player, controller, log), never `Core`, so guards can
 //! drive the same player a macro plays through without forming a reference
 //! cycle. The chains/scheduler callbacks (built in `state.rs`) capture `Core`
 //! clones, keeping the whole graph a DAG rooted at `AppState`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::engine::guards::{Action, Actuate, Detect, GuardEngine, OnFire, PlayerState};
@@ -91,18 +93,67 @@ fn text_roi(frame: &Frame, x1: i32, y1: i32, x2: i32, y2: i32) -> Option<(Frame,
     frame.crop(x, y, w, h).map(|c| (c, (x as i64, y as i64)))
 }
 
+/// One box for the live detection overlay: what a trigger just found, in the
+/// shape something can be drawn from.
+///
+/// [`Detection`] carries a *centre*, which is what a click needs and the wrong
+/// end of a rectangle to draw from, and a template file name, which is not what
+/// the user called the trigger. Both are converted here, once, so the overlay
+/// page is only ever handed numbers it can use directly.
+#[derive(Debug, Clone, Serialize)]
+pub struct Sighting {
+    /// The trigger's name, as the user typed it.
+    pub label: String,
+    /// Top-left corner and size, in capture pixels.
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    pub confidence: f64,
+}
+
+/// The most recent detection pass from one source, held for the overlay to read.
+struct Sightings {
+    /// The frame these coordinates are in. The overlay scales by it rather than
+    /// assuming the capture matched the monitor, because the configured capture
+    /// resolution is free to disagree with the screen it is drawn back onto.
+    frame: (i64, i64),
+    at: Instant,
+    items: Vec<Sighting>,
+}
+
+/// One sighting as the overlay reads it: its own age, because the sources run at
+/// their own rates and a box has to fade on the clock of the pass that found it.
+#[derive(Serialize)]
+struct Aged<'a> {
+    #[serde(flatten)]
+    sighting: &'a Sighting,
+    age_ms: u64,
+}
+
+/// How long a source's last pass keeps contributing boxes. Past this the overlay
+/// would be drawing what a detector saw before it stopped running: a guard
+/// engine that has shut down leaves its last pass behind, and it should go.
+const SIGHTING_TTL_MS: u128 = 1_000;
+
 /// The vision stack: one screen capture and one [`Detector`], both lazily
-/// created and shared by every consumer — the Rust seat of Python's
+/// created and shared by every consumer, the Rust seat of Python's
 /// `_get_capture`/`_get_detector`, which the sidecar had turned into a
 /// subprocess with its own copy of each.
 ///
 /// The two mutexes are deliberately never held at once. A caller grabs a frame,
 /// releases the capture, then detects, so a full-screen scale sweep cannot block
-/// the status heartbeat's FPS read — the property the cached [`Vision::fps`]
+/// the status heartbeat's FPS read, the property the cached [`Vision::fps`]
 /// used to exist to buy back from the sidecar's single io lock.
 pub struct Vision {
     detector: Mutex<Detector>,
     capture: Mutex<Option<ScreenCapture>>,
+    /// Set once the capture is open. Read *before* the capture mutex so that
+    /// [`Vision::ensure_ready`] on an already-open capture returns without
+    /// queueing behind an in-flight [`Vision::grab`]: a grab can sit in the
+    /// backend for the length of a frame timeout, and a start button that waits
+    /// on that reads as a hang.
+    ready: AtomicBool,
     /// The backend the capture actually opened, which may not be the one asked
     /// for (dxcam falls back to GDI).
     resolved: Mutex<Option<String>>,
@@ -115,6 +166,11 @@ pub struct Vision {
     /// Guard templates already reported as unreadable, so a broken picture logs
     /// once rather than on every poll cycle for the length of a run.
     template_warned: Mutex<HashSet<String>>,
+    /// What each detection path last saw, for the on-screen overlay to draw,
+    /// keyed by the path. Kept apart rather than merged on the way in: the guard
+    /// loop polls at 5Hz and a running step polls at its own rate, so a shared
+    /// slot would have each one wiping the other's boxes several times a second.
+    sightings: Mutex<HashMap<&'static str, Sightings>>,
 }
 
 impl Vision {
@@ -125,11 +181,13 @@ impl Vision {
             // that somehow raced ahead finds nothing rather than misreading.
             detector: Mutex::new(Detector::new(0, 0)),
             capture: Mutex::new(None),
+            ready: AtomicBool::new(false),
             resolved: Mutex::new(None),
             fps: Mutex::new(0.0),
             log,
             ocr_warned: Mutex::new(false),
             template_warned: Mutex::new(HashSet::new()),
+            sightings: Mutex::new(HashMap::new()),
         }
     }
 
@@ -138,13 +196,18 @@ impl Vision {
     /// once. Idempotent, and infallible: `ScreenCapture::new` falls back to GDI
     /// rather than failing, so there is nothing here for a caller to handle.
     pub fn ensure_ready(&self, screen_w: i64, screen_h: i64, backend: &str) {
+        if self.ready.load(Ordering::SeqCst) {
+            return;
+        }
         let mut slot = self.capture.lock().unwrap();
         if slot.is_some() {
+            self.ready.store(true, Ordering::SeqCst);
             return;
         }
         let cap = ScreenCapture::new(backend, None);
         let resolved = cap.backend().to_string();
         *slot = Some(cap);
+        self.ready.store(true, Ordering::SeqCst);
         drop(slot);
 
         self.detector.lock().unwrap().set_screen(screen_w, screen_h);
@@ -163,6 +226,7 @@ impl Vision {
             let cap = slot.get_or_insert_with(|| ScreenCapture::new("dxcam", None));
             (cap.grab(), round1(cap.fps()), cap.backend().to_string())
         };
+        self.ready.store(true, Ordering::SeqCst);
         *self.fps.lock().unwrap() = fps;
         let mut resolved = self.resolved.lock().unwrap();
         if resolved.is_none() {
@@ -171,14 +235,22 @@ impl Vision {
         frame
     }
 
-    /// One grab, every guard — the guard poll loop's detect callback. Preserves
+    /// One grab, every guard: the guard poll loop's detect callback. Preserves
     /// the poll cycle's temporal consistency (every guard in a cycle sees the
     /// same instant) that `_detect_guards` had by grabbing once per RPC. Only
     /// non-empty results are inserted; the engine treats a missing key as no
     /// detection.
-    pub fn detect_guards_faithful(&self, guards: &[Guard]) -> HashMap<String, Vec<Detection>> {
+    ///
+    /// `source` names the loop asking (the playback guard engine or the standing
+    /// watcher), so that when both are running their overlay boxes sit in their
+    /// own slots instead of overwriting each other every poll.
+    pub fn detect_guards_faithful(
+        &self,
+        source: &'static str,
+        guards: &[Guard],
+    ) -> HashMap<String, Vec<Detection>> {
         // Text guards are read by the platform OCR engine, not the pixel
-        // detector — the sidecar's EasyOCR path was excluded from the shipped
+        // detector; the sidecar's EasyOCR path was excluded from the shipped
         // build, so every `method = "ocr"` guard used to fail on import.
         let (text, pixel): (Vec<&Guard>, Vec<&Guard>) =
             guards.iter().partition(|g| is_text_guard(g));
@@ -206,10 +278,95 @@ impl Vision {
         if !text.is_empty() {
             map.extend(self.detect_text_guards(&frame, &text));
         }
+        self.record_sightings(source, &frame, guards, &map);
         map
     }
 
-    /// Report a guard whose picture will not decode — once per guard and file,
+    /// Publish the pass for the live overlay.
+    ///
+    /// Recorded even when the pass found nothing: an empty pass is how the boxes
+    /// come off the screen the instant the thing stops being there, instead of
+    /// hanging around until they age out.
+    fn record_sightings(
+        &self,
+        source: &'static str,
+        frame: &Frame,
+        guards: &[Guard],
+        hits: &HashMap<String, Vec<Detection>>,
+    ) {
+        let mut items = Vec::new();
+        for guard in guards {
+            let Some(dets) = hits.get(&guard.id) else { continue };
+            items.extend(dets.iter().map(|d| Sighting {
+                label: guard.name.clone(),
+                x: d.x - d.w / 2,
+                y: d.y - d.h / 2,
+                w: d.w,
+                h: d.h,
+                confidence: round3(d.confidence),
+            }));
+        }
+        self.publish(source, frame, items);
+    }
+
+    /// Publish what a running step just found, under the step's own name.
+    ///
+    /// The checkpoint and AI-step detectors are the other half of "what the macro
+    /// is looking at": a `wait_for` can sit on the same target for its whole
+    /// timeout, and that is exactly the stretch where seeing the box matters.
+    fn record_step(&self, frame: &Frame, label: &str, dets: &[Detection]) {
+        let items = dets
+            .iter()
+            .map(|d| Sighting {
+                label: label.to_string(),
+                x: d.x - d.w / 2,
+                y: d.y - d.h / 2,
+                w: d.w,
+                h: d.h,
+                confidence: round3(d.confidence),
+            })
+            .collect();
+        self.publish("steps", frame, items);
+    }
+
+    fn publish(&self, source: &'static str, frame: &Frame, items: Vec<Sighting>) {
+        self.sightings.lock().unwrap().insert(
+            source,
+            Sightings {
+                frame: (frame.width as i64, frame.height as i64),
+                at: Instant::now(),
+                items,
+            },
+        );
+    }
+
+    /// Every live source's boxes, each carrying its own age: everything the
+    /// overlay page draws from.
+    ///
+    /// Age rather than a timestamp: the two ends share no clock worth trusting,
+    /// and the page only ever asks how stale a box is so it knows how far to fade
+    /// it. The frame size comes from the freshest source, since a pass that just
+    /// landed is the one whose capture settings are current.
+    pub fn sightings(&self) -> Value {
+        let slots = self.sightings.lock().unwrap();
+        let mut screen = (0, 0);
+        let mut newest = u128::MAX;
+        let mut items = Vec::new();
+        for s in slots.values() {
+            let age = s.at.elapsed().as_millis();
+            if age > SIGHTING_TTL_MS || s.items.is_empty() {
+                continue;
+            }
+            if age < newest {
+                newest = age;
+                screen = s.frame;
+            }
+            items.extend(s.items.iter().map(|sighting| Aged { sighting, age_ms: age as u64 }));
+        }
+        json!({ "screen": [screen.0, screen.1], "items": items })
+    }
+
+    /// Report a guard whose picture will not decode, once per guard and file,
     /// because a poll loop would otherwise repeat it several times a second for
     /// the whole run.
     fn warn_template(&self, guard: &Guard, err: &VisionError) {
@@ -224,10 +381,13 @@ impl Vision {
     /// Read every text guard out of the cycle's frame.
     ///
     /// One grab serves all of them: each guard's percentage region is cropped
-    /// out of the same frame, so N text guards cost no extra capture. Failure is
-    /// per-guard and silent-but-logged, matching `detect_guard`'s "never raises,
-    /// returns []" contract — a guard that cannot be read must not abort the
-    /// poll cycle.
+    /// out of the same frame, so N text guards cost no extra capture. Guards
+    /// watching the *same* area are also recognized together: running the OS
+    /// recognizer is the single most expensive thing the watcher does, and two
+    /// triggers both scanning the whole screen used to pay for it twice a pass.
+    /// Failure is per-region and silent-but-logged, matching `detect_guard`'s
+    /// "never raises, returns []" contract: a guard that cannot be read must
+    /// not abort the poll cycle.
     fn detect_text_guards(&self, frame: &Frame, guards: &[&Guard]) -> HashMap<String, Vec<Detection>> {
         let mut out = HashMap::new();
         if !ocr::available() {
@@ -246,38 +406,60 @@ impl Vision {
             return out;
         }
 
-        for guard in guards {
+        // Bucket by watch area first. The key is the stored percentage corners
+        // bit-for-bit, so the common case (several triggers all left on
+        // "anywhere") collapses to a single recognition pass.
+        let mut groups: Vec<([u64; 4], Vec<&Guard>)> = Vec::new();
+        for &guard in guards {
             // Same early-out as `guard.py`: an empty needle matches nothing.
             if guard.ocr_text.is_empty() {
                 continue;
             }
+            let key = guard.region.map(f64::to_bits);
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, members)) => members.push(guard),
+                None => groups.push((key, vec![guard])),
+            }
+        }
+
+        for (_, members) in &groups {
+            let head = members[0];
             let (x1, y1, x2, y2) =
-                region_pixels(guard.region, frame.width as i32, frame.height as i32);
-            let full = is_full_region(guard.region);
-            let (roi, origin) = if full {
-                (frame.clone(), (0, 0))
+                region_pixels(head.region, frame.width as i32, frame.height as i32);
+            // The whole-screen case reads the captured frame in place; only a
+            // drawn region pays for a crop.
+            let cropped;
+            let (roi, origin) = if is_full_region(head.region) {
+                (frame, (0, 0))
             } else {
                 match text_roi(frame, x1, y1, x2, y2) {
-                    Some(c) => c,
+                    Some((c, o)) => {
+                        cropped = c;
+                        (&cropped, o)
+                    }
                     None => continue,
                 }
             };
-            match ocr::find_text(&roi, &guard.ocr_text, origin) {
-                Ok(dets) if !dets.is_empty() => {
-                    out.insert(guard.id.clone(), dets);
-                }
-                Ok(_) => {}
+            let lines = match ocr::read_lines(roi) {
+                Ok(lines) => lines,
                 Err(e) => {
                     if let Ok(mut log) = self.log.lock() {
-                        log.push("error", format!("Text trigger '{}' failed: {e}", guard.name));
+                        log.push("error", format!("Text trigger '{}' failed: {e}", head.name));
                     }
+                    continue;
+                }
+            };
+            for guard in members {
+                let dets = ocr::match_lines(&lines, &guard.ocr_text, origin);
+                if !dets.is_empty() {
+                    out.insert(guard.id.clone(), dets);
                 }
             }
         }
         out
     }
 
-    /// One poll of a running checkpoint — the play loop's per-poll detect
+    /// One poll of a running checkpoint: the play loop's per-poll detect
     /// callback. `play_macro` opens the capture before playback, so this only
     /// ever grabs. A frame that will not capture yields no detections and the
     /// checkpoint times out, as it did when the sidecar went away mid-play.
@@ -285,23 +467,28 @@ impl Vision {
         let Some(frame) = self.grab() else {
             return Vec::new();
         };
-        self.detector.lock().unwrap().detect_checkpoint(&frame, cfg)
+        let hits = self.detector.lock().unwrap().detect_checkpoint(&frame, cfg);
+        let label = cfg.get("name").and_then(Value::as_str).unwrap_or("Checkpoint");
+        self.record_step(&frame, label, &hits);
+        hits
     }
 
-    /// One AI-step detection against a fresh frame — the executor's `find_click`/
+    /// One AI-step detection against a fresh frame: the executor's `find_click`/
     /// `wait_for` detect callback. Returns the matches and the message the run log
     /// prints. A capture failure yields `(none, "")`, degrading a `find_click` to
-    /// "nothing found" — Python instead crashed the run thread on a `None` frame,
+    /// "nothing found"; Python instead crashed the run thread on a `None` frame,
     /// leaking the mode, so this is the cleaner resolution of the same case.
     pub fn ai_detect(&self, step: &Step) -> (Vec<crate::engine::ai::Match>, String) {
         let Some(frame) = self.grab() else {
             return (Vec::new(), String::new());
         };
         let (hits, message) = self.detector.lock().unwrap().ai_detect(&frame, step);
+        let label = if step.label.is_empty() { &step.step_type } else { &step.label };
+        self.record_step(&frame, label, &hits);
         (hits.iter().map(to_match).collect(), message)
     }
 
-    /// Dry-run one guard for the editor's Test button — the port of
+    /// Dry-run one guard for the editor's Test button, the port of
     /// `Api.guard_test`. Text guards take the OCR path (see
     /// [`Vision::guard_test_text`]); both assemble the same result dict, so the
     /// editor renders either without knowing which engine answered.
@@ -350,7 +537,7 @@ impl Vision {
         };
         if !ocr::available() {
             return fail(
-                "No Windows OCR language pack installed — add one in \
+                "No Windows OCR language pack installed. Add one in \
                  Settings › Time & language › Language."
                     .to_string(),
             );
@@ -394,7 +581,7 @@ impl Vision {
         })
     }
 
-    /// Dry-run one AI step for the step editor's Test button — the port of
+    /// Dry-run one AI step for the step editor's Test button, the port of
     /// `Api.ai_test_step`. The step is parsed *before* the frame is grabbed, so a
     /// malformed step reports "Bad step: …" even when capture would also fail;
     /// that is the monolith's order, and it differs from `guard_test`'s.
@@ -429,7 +616,7 @@ impl Vision {
     }
 
     /// Import an image file the user picks into `templates_dir` as a template
-    /// PNG — `_add_template_image`, minus the sidecar and its tkinter dialog.
+    /// PNG (`_add_template_image`), minus the sidecar and its tkinter dialog.
     pub fn add_template_image(&self, app: &tauri::AppHandle, templates_dir: &Path) -> Value {
         use tauri_plugin_dialog::DialogExt;
 
@@ -453,7 +640,7 @@ impl Vision {
         self.resolved.lock().unwrap().clone()
     }
 
-    /// The last cached capture FPS — a pure read, safe from the heartbeat.
+    /// The last cached capture FPS: a pure read, safe from the heartbeat.
     pub fn capture_fps_cached(&self) -> f64 {
         *self.fps.lock().unwrap()
     }
@@ -464,7 +651,7 @@ fn to_match(d: &Detection) -> crate::engine::ai::Match {
     crate::engine::ai::Match { x: d.x, y: d.y, confidence: d.confidence }
 }
 
-/// The dry-run verdict for one step — `steps.py::test_step`, without the preview
+/// The dry-run verdict for one step (`steps.py::test_step`), without the preview
 /// the caller layers on. Every arm reports what the step *would* do; only
 /// `find_click`/`wait_for` consult `matches`.
 fn step_verdict(st: &Step, matches: &[Detection], message: &str) -> Value {
@@ -476,13 +663,13 @@ fn step_verdict(st: &Step, matches: &[Detection], message: &str) -> Value {
         "find_click" | "wait_for" => match matches.first() {
             Some(best) => json!({
                 "ok": true,
-                "message": format!("would click ({}, {}) — {message}", best.x, best.y),
+                "message": format!("would click ({}, {}): {message}", best.x, best.y),
                 "found_x": best.x,
                 "found_y": best.y,
                 "matched": matches.len(),
                 "confidence": round3(best.confidence),
             }),
-            None => plain(false, format!("nothing found — {message}")),
+            None => plain(false, format!("nothing found: {message}")),
         },
         "click" => json!({
             "ok": true,
@@ -491,7 +678,7 @@ fn step_verdict(st: &Step, matches: &[Detection], message: &str) -> Value {
         }),
         "key" => plain(true, format!("would press '{}'", st.key)),
         "type" => plain(true, format!("would type '{}'", st.text)),
-        // Python's `{:+d}` — the sign is always shown, so `-3` reads as a scroll
+        // Python's `{:+d}`: the sign is always shown, so `-3` reads as a scroll
         // down and `+3` as a scroll up.
         "scroll" => plain(true, format!("would scroll {:+}", st.scroll_amount)),
         "delay" => plain(true, format!("would wait {}s", py_float(st.delay))),
@@ -499,7 +686,7 @@ fn step_verdict(st: &Step, matches: &[Detection], message: &str) -> Value {
     }
 }
 
-/// The wiring hub. Clone is cheap — every field is an `Arc`.
+/// The wiring hub. Clone is cheap; every field is an `Arc`.
 #[derive(Clone)]
 pub struct Core {
     pub config: Arc<Mutex<MacroConfig>>,
@@ -523,6 +710,10 @@ pub struct Core {
     /// `setup()` too, so a `sync` before the window exists no-ops. Driven by
     /// `set_mode`, mirroring Python's `_sync_indicator`.
     pub indicator: Arc<crate::shell::indicator::Indicator>,
+    /// The fullscreen overlay that draws a box round everything the triggers are
+    /// finding. Armed by whichever detection loop is running, so it is up exactly
+    /// when there is something to see.
+    pub detections: Arc<crate::shell::detections::Detections>,
 }
 
 impl Core {
@@ -537,13 +728,14 @@ impl Core {
         let vision = Arc::new(Vision::new(log.clone()));
         let notifier = Arc::new(Notifier::new());
         let indicator = Arc::new(crate::shell::indicator::Indicator::new());
+        let detections = Arc::new(crate::shell::detections::Detections::new());
 
         // Guard-engine callbacks capture leaf Arcs only (never `Core`) so a guard
         // pause/resume/click drives the same player and controller a macro plays
         // through, with no reference cycle.
         let detect: Detect = {
             let vision = vision.clone();
-            Box::new(move |guards: &[Guard]| vision.detect_guards_faithful(guards))
+            Box::new(move |guards: &[Guard]| vision.detect_guards_faithful("guards", guards))
         };
         let player_state: PlayerState = {
             let player = player.clone();
@@ -560,7 +752,7 @@ impl Core {
                 if let Ok(mut log) = log.lock() {
                     log.push(
                         "warn",
-                        format!("Guard '{}' fired \u{2014} handling, then resuming", g.name),
+                        format!("Guard '{}' fired: handling, then resuming", g.name),
                     );
                 }
             })
@@ -579,6 +771,7 @@ impl Core {
             guard_engine,
             notifier,
             indicator,
+            detections,
         }
     }
 
@@ -591,7 +784,7 @@ impl Core {
     }
 
     /// Record the mode and the instant it began, sync the recording-indicator
-    /// overlay, then fire the completion toast — `Api._set_mode`. Every mode
+    /// overlay, then fire the completion toast (`Api._set_mode`). Every mode
     /// transition funnels through here, so any playing→idle edge (natural finish,
     /// manual stop, emergency stop, or a step run ending) shows "Playback
     /// Complete" when `notify_on_complete` is set, exactly as the source does, and
@@ -604,7 +797,7 @@ impl Core {
             rt.mode_since = Some(Instant::now());
             (prev, rt.last_macro.clone())
         };
-        // Show/hide the pixel-cat overlay — `_set_mode`'s `_sync_indicator()`, right
+        // Show/hide the pixel-cat overlay: `_set_mode`'s `_sync_indicator()`, right
         // after the mode flips and before the completion toast.
         self.indicator.sync(mode);
         if prev_mode == "playing"
@@ -613,7 +806,7 @@ impl Core {
         {
             let name = if last_macro.is_empty() { "macro" } else { &last_macro };
             self.notifier.notify(
-                "Clawmation \u{2014} Playback Complete",
+                "Clawmation: Playback Complete",
                 &format!("'{name}' finished"),
             );
         }
@@ -621,7 +814,7 @@ impl Core {
 
     // ── Global hotkeys (TinyTask-style) ──────────────────────────────────────
 
-    /// Toggle recording from the global hotkey — `Api.hotkey_record`. (Python
+    /// Toggle recording from the global hotkey, `Api.hotkey_record`. (Python
     /// wraps this in a `try/except`, but that only guards the `keyboard` hook
     /// against a thrown exception; `start_record`/`stop_record` return values
     /// here rather than raising, so the error branch is unreachable and unported.)
@@ -636,7 +829,7 @@ impl Core {
         }
     }
 
-    /// Play the most recent macro from the global hotkey — `Api.hotkey_play`.
+    /// Play the most recent macro from the global hotkey, `Api.hotkey_play`.
     /// Uses the last-played macro, falling back to the newest on disk, and plays
     /// it with its saved loop settings (`repeat=None`).
     pub fn hotkey_play(&self) {
@@ -658,7 +851,7 @@ impl Core {
         self.play_macro(&name, None, 1.0);
     }
 
-    /// Stem of the newest `*.json` in the macros dir — `Api._most_recent_macro_name`.
+    /// Stem of the newest `*.json` in the macros dir (`Api._most_recent_macro_name`).
     fn most_recent_macro_name(&self) -> String {
         let mut files: Vec<(PathBuf, SystemTime)> = match std::fs::read_dir(paths::macros_dir()) {
             Ok(entries) => entries
@@ -684,7 +877,7 @@ impl Core {
     }
 
     /// Primary screen size, falling back to the configured resolution when Win32
-    /// reports nothing — `Api._get_screen_resolution`.
+    /// reports nothing (`Api._get_screen_resolution`).
     pub fn resolve_screen(&self) -> (u32, u32) {
         let (w, h) = crate::hardware::screen_size();
         if w > 0 && h > 0 {
@@ -694,7 +887,7 @@ impl Core {
         }
     }
 
-    /// Keys held out of the recording — the record/play/stop hotkeys, lowercased
+    /// Keys held out of the recording: the record/play/stop hotkeys, lowercased
     /// (`Api._hotkey_ignore_set`), so pressing a hotkey to stop isn't captured.
     fn hotkey_ignore_set(&self) -> HashSet<String> {
         let c = self.config.lock().unwrap();
@@ -707,7 +900,7 @@ impl Core {
         .collect()
     }
 
-    /// Begin recording — `Api.start_record`. Refuses unless idle, then arms a
+    /// Begin recording, `Api.start_record`. Refuses unless idle, then arms a
     /// fresh recorder at the live screen resolution.
     pub fn start_record(&self) -> Value {
         {
@@ -726,11 +919,11 @@ impl Core {
         }
         self.set_mode("recording");
         let hk = self.config.lock().unwrap().hotkey_record.to_uppercase();
-        self.emit("rec", format!("Recording started \u{2014} press {hk} or Stop to finish"));
+        self.emit("rec", format!("Recording started. Press {hk} or Stop to finish"));
         json!({ "ok": true })
     }
 
-    /// Stop recording, save the macro as `macro_<unix>`, and report it —
+    /// Stop recording, save the macro as `macro_<unix>`, and report it:
     /// `Api.stop_record`.
     pub fn stop_record(&self) -> Value {
         let mode = self.runtime.lock().unwrap().mode.clone();
@@ -774,7 +967,7 @@ impl Core {
         })
     }
 
-    /// Toggle pause during recording — `Api.pause_record`. Paused time is excluded
+    /// Toggle pause during recording, `Api.pause_record`. Paused time is excluded
     /// from event timestamps by the recorder, so playback stays seamless.
     pub fn pause_record(&self) -> Value {
         let mode = self.runtime.lock().unwrap().mode.clone();
@@ -791,7 +984,7 @@ impl Core {
         json!({ "ok": true, "paused": paused })
     }
 
-    /// Play a macro — `Api.play_macro`. `repeat=None` uses the macro's saved loop
+    /// Play a macro, `Api.play_macro`. `repeat=None` uses the macro's saved loop
     /// settings; `0`/`""`/`∞` loop forever; `N` plays N times. Returns the same
     /// `{ok, name, events}` / `{ok:false, error}` shapes as the source.
     pub fn play_macro(&self, name: &str, repeat: Option<Value>, speed: f64) -> Value {
@@ -837,7 +1030,7 @@ impl Core {
         // final status are filled in on completion by `watch_playback`.
         self.play_stats.record_play(&macro_name, 0.0, "running");
 
-        // Eager capture open — Python's `cap = self._get_capture()` runs before
+        // Eager capture open: Python's `cap = self._get_capture()` runs before
         // the mode flip and the "Playing" log, so "Capture ready" lands there and
         // a live detector backs any checkpoints. `start_guards` then no-ops.
         let target = self.resolve_screen();
@@ -855,7 +1048,7 @@ impl Core {
             ),
         );
 
-        // play_macro wires a live detector — Python builds `MacroPlayer` with a
+        // play_macro wires a live detector: Python builds `MacroPlayer` with a
         // detector + frame_provider here, so checkpoints RUN. The vision-agent
         // runner builds a bare player and passes None, skipping them.
         let checkpoint: CheckpointDetect = {
@@ -863,6 +1056,10 @@ impl Core {
             Box::new(move |cfg: &Value| vision.detect_checkpoint(cfg))
         };
         self.player.play(macro_def, target, speed, Some(checkpoint));
+        // Armed for the whole run, not just for guards: the checkpoints wired
+        // above detect too, and they are the ones a macro built around a picture
+        // spends its time waiting on.
+        self.detections.set("play", true);
         self.start_guards(&macro_name);
 
         let core = self.clone();
@@ -871,7 +1068,7 @@ impl Core {
         json!({ "ok": true, "name": macro_name, "events": events })
     }
 
-    /// Attach and start the guard engine for a macro that has enabled guards —
+    /// Attach and start the guard engine for a macro that has enabled guards:
     /// `Api._start_guards`. Opens the capture first (logging `Capture ready`),
     /// then `N guard(s) active during playback`.
     fn start_guards(&self, macro_name: &str) {
@@ -891,20 +1088,25 @@ impl Core {
         let count = enabled.len();
         self.guard_engine.set_humanize(humanize);
         self.guard_engine.start(enabled);
+        self.detections.set("guards", true);
         self.emit("ok", format!("{count} guard(s) active during playback"));
     }
 
     fn stop_guards(&self) {
         self.guard_engine.stop();
+        self.detections.set("guards", false);
     }
 
-    /// Wait out the playback thread, then reset to idle and record completion —
+    /// Wait out the playback thread, then reset to idle and record completion:
     /// `Api._watch_playback`. The `mode == "playing"` guard means a concurrent
     /// `stop_playback` (which sets idle first) wins, so exactly one of
     /// `Playback finished` / `Playback stopped` is logged.
     fn watch_playback(&self) {
         self.player.wait();
         self.stop_guards();
+        // Runs on every exit (finished, stopped, or panicked out of the player),
+        // so this is the one place the overlay has to come down.
+        self.detections.set("play", false);
         let (playing, duration, last) = {
             let rt = self.runtime.lock().unwrap();
             let playing = rt.mode == "playing";
@@ -923,7 +1125,7 @@ impl Core {
         }
     }
 
-    /// Stop the current playback — `Api.stop_playback`.
+    /// Stop the current playback (`Api.stop_playback`).
     pub fn stop_playback(&self) -> Value {
         let playing = self.runtime.lock().unwrap().mode == "playing";
         if playing {
@@ -937,7 +1139,7 @@ impl Core {
         }
     }
 
-    /// Run an edited step list in a background thread — `Api.steps_run`. The
+    /// Run an edited step list in a background thread, `Api.steps_run`. The
     /// frontend's Run button passes only the steps (never loop settings), so this
     /// always plays them once. Refuses unless idle, then flips to `playing` and
     /// drives the executor off-thread. Returns `{ok:true}` immediately (the
@@ -963,7 +1165,7 @@ impl Core {
         let core = self.clone();
         thread::spawn(move || {
             // Python opens the capture *inside* this thread (after the "Running N
-            // steps" emit), unlike play_macro's eager pre-flip open — so any
+            // steps" emit), unlike play_macro's eager pre-flip open, so any
             // "Capture ready" log lands after "Running N steps".
             let (w, h) = core.resolve_screen();
             let backend = core.config.lock().unwrap().capture_backend.clone();
@@ -978,7 +1180,9 @@ impl Core {
                 Box::new(move |action| execute_ai_action(&controller, action))
             };
 
+            core.detections.set("steps", true);
             let summary = crate::engine::ai::run(&step_objs, false, 1, &detect, &actuate);
+            core.detections.set("steps", false);
             core.set_mode("idle");
             let ok = summary["ok"].as_bool().unwrap_or(false);
             let status = if ok { "finished" } else { "stopped (step failed)" };
@@ -993,7 +1197,7 @@ impl Core {
         json!({ "ok": true })
     }
 
-    /// Dry-run one step against a fresh frame for the editor's Test button —
+    /// Dry-run one step against a fresh frame for the editor's Test button:
     /// `Api.steps_test`, which delegates to `ai_test_step`.
     pub fn steps_test(&self, step: Value) -> Value {
         let (w, h) = self.resolve_screen();
@@ -1018,7 +1222,7 @@ fn execute_action(player: &MacroPlayer, controller: &InputController, action: Ac
 }
 
 /// Apply one AI-step [`Action`](crate::engine::ai::Action) to the input
-/// controller — the executor's actuate callback, mirroring `AIExecutor`'s direct
+/// controller, the executor's actuate callback, mirroring `AIExecutor`'s direct
 /// `controller.*` calls. `Sleep` clamps negative/NaN to zero so
 /// `Duration::from_secs_f64` can't panic in the run thread (which would leak the
 /// mode); Python's `time.sleep` raised on a negative delay instead.
@@ -1076,11 +1280,55 @@ fn py_int(v: &Value) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_full_region, is_text_guard, py_int, region_pixels, resolve_repeat, text_roi};
+    use super::{
+        is_full_region, is_text_guard, py_int, region_pixels, resolve_repeat, text_roi, Sighting,
+        Vision, SIGHTING_TTL_MS,
+    };
     use crate::hardware::capture::Frame;
+    use crate::logbuf::LogBuffer;
     use crate::models::guard::Guard;
     use crate::models::macro_def::Macro;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_overlay_sees_every_live_source_and_no_dead_ones() {
+        let vision = Vision::new(Arc::new(Mutex::new(LogBuffer::default())));
+        let frame = Frame { bgr: Vec::new(), width: 1920, height: 1080 };
+        let seen = |label: &str| Sighting {
+            label: label.to_string(),
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+            confidence: 0.9,
+        };
+
+        vision.publish("guards", &frame, vec![seen("Health low")]);
+        vision.publish("steps", &frame, vec![seen("Claim reward")]);
+
+        let out = vision.sightings();
+        assert_eq!(out["screen"], json!([1920, 1080]));
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "both sources draw at once");
+        assert!(items.iter().all(|i| i["age_ms"].is_u64()), "each box fades on its own clock");
+
+        // A loop that has stopped leaves its last pass behind. It must stop
+        // contributing rather than hang on screen for the rest of the session.
+        vision.sightings.lock().unwrap().get_mut("guards").unwrap().at =
+            Instant::now() - Duration::from_millis(SIGHTING_TTL_MS as u64 + 500);
+        let out = vision.sightings();
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "Claim reward");
+
+        // And a pass that found nothing takes its boxes off immediately.
+        vision.publish("steps", &frame, Vec::new());
+        let out = vision.sightings();
+        assert!(out["items"].as_array().unwrap().is_empty());
+        assert_eq!(out["screen"], json!([0, 0]), "nothing live, nothing to scale by");
+    }
 
     #[test]
     fn region_pixels_matches_python_to_pixels() {

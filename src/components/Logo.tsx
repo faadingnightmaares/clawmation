@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-/** The cat mark + wordmark — the one ownable signature. Serif retired: the
+/** The cat mark + wordmark, the one ownable signature. Serif retired: the
  *  wordmark is Inter now, set tight. */
 export function Logo({ className }: { className?: string }) {
   return (

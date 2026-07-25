@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { animate, stagger } from "animejs";
 
-/** True when the OS asks for less motion — every animation here must have a
+/** True when the OS asks for less motion. Every animation here must have a
  *  still fallback that lands on the same final state. */
 export const reducedMotion = () =>
   typeof window !== "undefined" &&

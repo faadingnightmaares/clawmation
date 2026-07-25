@@ -1,4 +1,4 @@
-//! Hardware layer — the OS-touching primitives the engines drive.
+//! Hardware layer: the OS-touching primitives the engines drive.
 //!
 //! Where `engine/` is deliberately hardware-free (managers with injected
 //! callbacks), these modules call straight into Win32, mirroring the Python
@@ -14,12 +14,13 @@ pub mod picker;
 pub mod player;
 pub mod preview;
 pub mod recorder;
+pub mod shield;
 pub mod snap;
 pub mod vision;
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
-/// Primary-display pixel size via Win32 `GetSystemMetrics` — the raw half of
+/// Primary-display pixel size via Win32 `GetSystemMetrics`, the raw half of
 /// Python's `_get_screen_resolution` (the caller supplies the config fallback).
 pub fn screen_size() -> (u32, u32) {
     let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };

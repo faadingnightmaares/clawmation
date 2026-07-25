@@ -17,7 +17,7 @@ interface HotkeyFieldProps {
 }
 
 /**
- * Press-to-set shortcut field: click it, press the keys, done — no typing the
+ * Press-to-set shortcut field: click it, press the keys, done. No typing the
  * name of a key. Escape backs out, Backspace unbinds.
  *
  * While it listens, the global shortcuts are released (`hotkeys_suspend`),
@@ -40,7 +40,7 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
     void hotkeysSuspend().catch(() => {});
 
     const onKey = (e: KeyboardEvent) => {
-      // Swallow the keystroke before anything else in the app sees it — Alt+1..7
+      // Swallow the keystroke before anything else in the app sees it: Alt+1..7
       // navigation, form submits, browser defaults.
       e.preventDefault();
       e.stopPropagation();
@@ -58,7 +58,7 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
       }
       const accel = accelFromEvent(e);
       if (!accel) {
-        notify("info", "That key can’t be used as a shortcut — try another.");
+        notify("info", "That key can’t be used as a shortcut. Try another.");
         return;
       }
       onCaptureRef.current(accel);

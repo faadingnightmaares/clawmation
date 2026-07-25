@@ -32,7 +32,7 @@ pub fn get_status(state: State<AppState>) -> Status {
     };
 
     // Play counters are live off the player only while playing; the recorded
-    // count and paused flag come off the live recorder only while recording —
+    // count and paused flag come off the live recorder only while recording,
     // exactly as `Api.get_status` reads them from the player/recorder objects.
     let (play_iteration, play_total_reps) = if mode == "playing" {
         (core.player.iteration() as i64, core.player.total_reps() as i64)
@@ -64,7 +64,7 @@ pub fn get_status(state: State<AppState>) -> Status {
         window: WindowStatus {
             found: false,
             title: String::new(),
-            size: "\u{2014}".to_string(), // em dash, matching the Python placeholder
+            size: String::new(),
         },
         capture: CaptureStatus {
             backend: capture_backend,

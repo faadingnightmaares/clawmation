@@ -55,12 +55,12 @@ export default function App() {
 
   // The backend checks for a release once at launch and announces the result
   // here. Settings › About owns the install itself, so the toast just points at
-  // it — an update never interrupts a run.
+  // it; an update never interrupts a run.
   useEffect(() => {
     let alive = true;
     let unlisten: (() => void) | undefined;
     void onUpdateAvailable((info) => {
-      notifyAction(`Clawmation ${info.latest} is out — you’re on ${info.current}.`, "Show me", () =>
+      notifyAction(`Clawmation ${info.latest} is out; you’re on ${info.current}.`, "Show me", () =>
         setView("settings"),
       );
     })

@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { animate } from "animejs";
+import { useCallback, useEffect, useState } from "react";
 import { Eye, Loader2, Plus, ScanEye, Square } from "lucide-react";
 
 import {
@@ -10,11 +9,12 @@ import {
   visionStatus,
   visionStop,
   type Guard,
+  type VisionLogEntry,
 } from "@/api";
 import { useStaggerIn } from "@/lib/anime";
 import { notify, notifyUndo } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import { draftFromGuard, guardFromDraft, newTriggerDraft, type TriggerDraft } from "@/lib/triggers";
+import { draftFromGuard, guardFromDraft, newWatchDraft, type TriggerDraft } from "@/lib/triggers";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -32,12 +32,12 @@ export function Watch(_props: ViewProps) {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [fired, setFired] = useState(0);
+  const [log, setLog] = useState<VisionLogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<TriggerDraft | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
 
   const listRef = useStaggerIn<HTMLDivElement>(triggers.length);
-  const heroRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -54,12 +54,15 @@ export function Watch(_props: ViewProps) {
   const refreshStatus = useCallback(async () => {
     try {
       const s = await visionStatus();
+      // `ok: false` means the backend was mid-stop and said "ask again"; keep
+      // showing what we have rather than blanking the view for a beat.
       if (s.ok) {
         setRunning(s.running);
         setFired(s.fired);
+        setLog(s.log ?? []);
       }
     } catch {
-      /* backend not reachable (e.g. plain browser) — leave last known state */
+      /* backend not reachable (e.g. plain browser); leave last known state */
     }
   }, []);
 
@@ -70,12 +73,6 @@ export function Watch(_props: ViewProps) {
     return () => clearInterval(id);
   }, [load, refreshStatus]);
 
-  useEffect(() => {
-    if (heroRef.current) {
-      animate(heroRef.current, { opacity: [0, 1], translateY: [12, 0], duration: 480, ease: "out(3)" });
-    }
-  }, []);
-
   const enabledCount = triggers.filter((t) => t.enabled !== false).length;
 
   const persist = async (next: Guard[]) => {
@@ -85,7 +82,7 @@ export function Watch(_props: ViewProps) {
 
   // Saving while nothing is running arms the watcher in the same click. Otherwise
   // the trigger is saved, the sheet closes, and the user still has to find the
-  // hero button and press Start — which is what they wanted all along.
+  // Start button and press it, which is what they wanted all along.
   const saveTrigger = async (guard: Guard) => {
     const exists = triggers.some((t) => String(t.id) === String(guard.id));
     const next = exists ? triggers.map((t) => (String(t.id) === String(guard.id) ? guard : t)) : [...triggers, guard];
@@ -138,6 +135,9 @@ export function Watch(_props: ViewProps) {
       notify("error", String(e));
     } finally {
       setBusy(false);
+      // The backend is the authority on whether it actually came up: a start
+      // that failed halfway must not leave the header claiming it is watching.
+      void refreshStatus();
     }
   };
 
@@ -153,126 +153,121 @@ export function Watch(_props: ViewProps) {
       notify("error", String(e));
     } finally {
       setBusy(false);
+      void refreshStatus();
     }
   };
 
+  const add = () => setEditing(newWatchDraft());
   const editingIsNew = editing ? !triggers.some((t) => String(t.id) === editing.id) : false;
 
   return (
-    <div className="space-y-8">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Watch</h1>
-        <p className="text-sm text-muted-foreground">
-          Let Clawmation keep an eye on the screen and react on its own — no macro required.
-        </p>
-      </header>
+    <div className="flex flex-col gap-6">
+      {/* ── Header: the state of the watcher, and the one verb that changes it ── */}
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Watch</h1>
+          <p className="max-w-xl text-sm text-muted-foreground">
+            {running
+              ? `Keeping an eye out for ${enabledCount} ${enabledCount === 1 ? "thing" : "things"}. Leave it running. It acts the moment one shows up.`
+              : triggers.length === 0
+                ? "Point Clawmation at something on screen (a button, an icon, a word) and it acts the moment that thing appears. No macro required."
+                : `${enabledCount} ${enabledCount === 1 ? "thing" : "things"} ready. Press Start and leave the rest to me.`}
+          </p>
+        </div>
 
-      {/* Hero — the on/off heart of the view */}
-      <div
-        ref={heroRef}
-        className={cn(
-          "relative overflow-hidden rounded-2xl border p-8",
-          running ? "border-primary/40 bg-primary/[0.07]" : "border-border bg-card",
-        )}
-      >
-        <div className="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-4">
-            <div
-              className={cn(
-                "flex size-14 shrink-0 items-center justify-center rounded-full",
-                running ? "bg-primary/15 text-primary" : "bg-secondary text-muted-foreground",
-              )}
-            >
-              {running ? <ScanEye className="size-7" /> : <Eye className="size-7" />}
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-semibold text-foreground">
-                  {running ? "Keeping watch" : "Ready when you are"}
-                </h2>
-                {running && (
-                  <span className="relative flex size-2.5">
-                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-70" />
-                    <span className="relative inline-flex size-2.5 rounded-full bg-primary" />
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 max-w-md text-sm text-muted-foreground">
-                {running
-                  ? fired > 0
-                    ? `Stepped in ${fired} ${fired === 1 ? "time" : "times"} so far.`
-                    : "Watching every second. I’ll act the moment I spot something."
-                  : enabledCount > 0
-                    ? `${enabledCount} ${enabledCount === 1 ? "thing" : "things"} ready to watch for.`
-                    : "Add something to watch for to get started."}
+        {running ? (
+          <div className="flex items-center gap-3 rounded-xl border border-primary/40 bg-primary/5 px-3 py-2">
+            <span className="relative flex size-2.5">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-70" />
+              <span className="relative inline-flex size-2.5 rounded-full bg-primary" />
+            </span>
+            <div className="leading-tight">
+              <p className="font-mono text-lg font-semibold tabular-nums text-foreground">{fired}</p>
+              <p className="text-xs text-muted-foreground">
+                {fired === 1 ? "time it stepped in" : "times it stepped in"}
               </p>
             </div>
-          </div>
-
-          {running ? (
-            <Button size="lg" variant="secondary" onClick={stop} disabled={busy}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4" />}
-              Stop watching
+            <Button variant="ghost" size="icon" onClick={add} title="Add something to watch for">
+              <Plus className="size-5" />
             </Button>
-          ) : (
+            <Button variant="outline" size="sm" onClick={stop} disabled={busy}>
+              {busy ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4 fill-current" />}
+              Stop
+            </Button>
+          </div>
+        ) : triggers.length > 0 ? (
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="icon" onClick={add} title="Add something to watch for">
+              <Plus className="size-5" />
+            </Button>
             <Button size="lg" onClick={start} disabled={busy || enabledCount === 0}>
               {busy ? <Loader2 className="size-4 animate-spin" /> : <Eye className="size-4" />}
               Start watching
             </Button>
-          )}
-        </div>
-      </div>
+          </div>
+        ) : null}
+      </header>
 
-      {/* Triggers */}
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
+      {/* ── The things being watched for ─────────────────────────────────── */}
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" /> Loading…
+        </div>
+      ) : triggers.length ? (
+        <div ref={listRef} className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+          {triggers.map((t) => (
+            <TriggerRow
+              key={String(t.id)}
+              guard={t}
+              testing={testingId === String(t.id)}
+              onEdit={() => setEditing(draftFromGuard(t))}
+              onTest={() => test(t)}
+              onToggle={(en) => toggle(t, en)}
+              onDelete={() => remove(t)}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
+          <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
+            <ScanEye className="size-7" />
+          </div>
           <div>
-            <h3 className="text-sm font-semibold text-foreground">Things to watch for</h3>
-            <p className="text-xs text-muted-foreground">Each one watches the screen and acts on its own.</p>
+            <h2 className="text-lg font-semibold text-foreground">Nothing to watch for yet</h2>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+              A trigger is one thing on screen plus what to do about it: spot the button, click the button.
+            </p>
           </div>
-          {triggers.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => setEditing(newTriggerDraft())}>
-              <Plus className="size-4" /> Add
-            </Button>
-          )}
+          <ol className="mx-auto flex max-w-md flex-col gap-2 text-left text-sm text-muted-foreground">
+            <NumStep n={1}>Show me what to look for: a colour, a picture of a button, or some words.</NumStep>
+            <NumStep n={2}>Say what to do when it appears: click it, or press a key.</NumStep>
+            <NumStep n={3}>Press Start and leave it running while you do something else.</NumStep>
+          </ol>
+          <Button size="lg" onClick={add}>
+            <Plus className="size-4" /> Add the first thing to watch for
+          </Button>
         </div>
+      )}
 
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Loading…
-          </div>
-        ) : triggers.length ? (
-          <div ref={listRef} className="space-y-2">
-            {triggers.map((t) => (
-              <TriggerRow
-                key={String(t.id)}
-                guard={t}
-                testing={testingId === String(t.id)}
-                onEdit={() => setEditing(draftFromGuard(t))}
-                onTest={() => test(t)}
-                onToggle={(en) => toggle(t, en)}
-                onDelete={() => remove(t)}
-              />
+      {/* ── What it has actually done, so "is this working?" has an answer ── */}
+      {running && log.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium text-foreground">Just now</h2>
+          <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+            {log.slice(0, 6).map((e, i) => (
+              <li key={`${i}-${e.msg}`} className="flex items-center gap-3 px-4 py-2">
+                <span
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    e.kind === "act" ? "bg-primary" : "bg-muted-foreground/40",
+                  )}
+                />
+                <span className="truncate text-sm text-muted-foreground">{humanEvent(e.msg)}</span>
+              </li>
             ))}
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-5 rounded-2xl border border-dashed border-border px-6 py-16 text-center">
-            <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
-              <ScanEye className="size-7" />
-            </div>
-            <div>
-              <h4 className="text-lg font-semibold text-foreground">Nothing to watch for yet</h4>
-              <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-                Point Clawmation at something on screen — a button, an icon, a word — and tell it what to do when it
-                appears. It’ll handle the rest while you’re away.
-              </p>
-            </div>
-            <Button size="lg" onClick={() => setEditing(newTriggerDraft())}>
-              <Plus className="size-4" /> Add the first thing to watch for
-            </Button>
-          </div>
-        )}
-      </section>
+          </ul>
+        </section>
+      )}
 
       {/* Editor */}
       <Sheet open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
@@ -295,5 +290,30 @@ export function Watch(_props: ViewProps) {
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+/** The agent writes its feed for a log file: `'Name' -> clicked (x, y)`. This
+ *  is the one place that shape is spoken aloud, so it is translated here rather
+ *  than in the engine, and anything unrecognised passes through untouched. */
+function humanEvent(msg: string): string {
+  const m = /^'(.*)' -> (.*)$/.exec(msg);
+  if (!m) return msg;
+  const [, name, what] = m;
+  if (what.startsWith("clicked")) return `Clicked “${name}”.`;
+  if (what.startsWith("dragged")) return `Dragged across “${name}”.`;
+  if (what.startsWith("pressed ")) return `Pressed ${what.slice(8)} for “${name}”.`;
+  if (what.startsWith("running ")) return `“${name}” appeared: ${what}.`;
+  return `“${name}”: ${what}`;
+}
+
+function NumStep({ n, children }: { n: number; children: React.ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary">
+        {n}
+      </span>
+      {children}
+    </li>
   );
 }

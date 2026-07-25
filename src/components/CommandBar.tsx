@@ -33,11 +33,11 @@ function modeLook(mode: string): ModeLook | null {
     case "paused":
       return { label: "Paused", dot: "bg-primary", text: "text-primary" };
     default:
-      return null; // idle says nothing — an empty bar is the resting state
+      return null; // idle says nothing: an empty bar is the resting state
   }
 }
 
-/** The live status pill — a pulsing dot the user can read from across the room,
+/** The live status pill: a pulsing dot the user can read from across the room,
  *  plus a rep counter while a macro loops. Absent while idle. */
 function RunState({ status }: { status: Status | null }) {
   const look = modeLook(status?.mode ?? "idle");
@@ -85,7 +85,7 @@ export function CommandBar({ status, view, navigate }: CommandBarProps) {
     try {
       if (mode === "recording") {
         const res = await stopRecord();
-        if (res?.ok) notify("success", `Saved ${res.name} — ${res.events} events`);
+        if (res?.ok) notify("success", `Saved ${res.name} with ${res.events} events`);
         else notify("error", res?.error || "Stop failed");
         return;
       }
@@ -96,7 +96,7 @@ export function CommandBar({ status, view, navigate }: CommandBarProps) {
     }
   };
 
-  // This header *is* the title bar — the window is undecorated, so the bare
+  // This header *is* the title bar: the window is undecorated, so the bare
   // stretches of it carry `data-tauri-drag-region` and move the window. Only
   // elements without the attribute are clickable, so controls work as usual.
   // That is also why the gap after the switcher stays empty: it is the grip.

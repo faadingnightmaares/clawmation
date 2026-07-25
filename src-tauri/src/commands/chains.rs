@@ -1,4 +1,4 @@
-//! Chain commands — CRUD, run/stop, duplicate, validate, and duration.
+//! Chain commands: CRUD, run/stop, duplicate, validate, and duration.
 //!
 //! Thin wrappers over [`ChainManager`](crate::engine::chains::ChainManager) on
 //! [`AppState`]. `run_chain` reuses [`crate::state::run_chain`] (shared with the

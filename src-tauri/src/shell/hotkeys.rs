@@ -1,4 +1,4 @@
-//! Global record/play/stop hotkeys — the port of `Api._register_hotkeys` and its
+//! Global record/play/stop hotkeys: the port of `Api._register_hotkeys` and its
 //! three `keyboard.on_press_key` hooks.
 //!
 //! A single handler is wired into the global-shortcut plugin at build time; it
@@ -8,8 +8,8 @@
 //! Python's `keyboard.unhook_all()`.
 //!
 //! One behavioral departure worth naming for the open-source README: Tauri's
-//! global shortcut is *exclusive* — it consumes the key so the focused app never
-//! sees it — whereas Python's `keyboard.on_press_key` hook was non-exclusive and
+//! global shortcut is *exclusive* (it consumes the key so the focused app never
+//! sees it), whereas Python's `keyboard.on_press_key` hook was non-exclusive and
 //! passed the key through. A hotkey that collides with the target game's own
 //! binding is therefore swallowed here.
 
@@ -35,11 +35,11 @@ struct Bindings {
     stop: Option<Shortcut>,
 }
 
-/// (Re)register the record/play/stop global shortcuts from the live config —
+/// (Re)register the record/play/stop global shortcuts from the live config:
 /// `Api._register_hotkeys`. Clears any existing registration first, then parses
 /// each configured key (upper-cased, e.g. `f9` → `F9`) and stores the ones that
 /// took. A key that fails to parse or register is left unbound, matching
-/// Python's best-effort `except Exception` around the whole block — but it is
+/// Python's best-effort `except Exception` around the whole block, but it is
 /// also *returned*, so the settings UI can say so instead of handing the user a
 /// shortcut that will never fire. A blank key is unbound on purpose, not a
 /// failure.
@@ -85,7 +85,7 @@ fn register_one(app: &AppHandle, key: &str) -> Option<Shortcut> {
     Some(shortcut)
 }
 
-/// Dispatch a fired shortcut to the matching hotkey action — the handler wired
+/// Dispatch a fired shortcut to the matching hotkey action, the handler wired
 /// into the global-shortcut plugin. Only key-press edges act, since Python hooks
 /// `on_press_key`.
 pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {

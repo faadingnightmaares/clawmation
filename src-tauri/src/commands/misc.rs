@@ -86,7 +86,7 @@ async fn look_for_update(app: &AppHandle) -> tauri_plugin_updater::Result<Update
 /// [`check_update`]: it costs one request, and it means an install can never act
 /// on a manifest that was fetched before the app sat idle for an hour.
 ///
-/// On success this never returns — `restart()` exits the process — so the
+/// On success this never returns (`restart()` exits the process), so the
 /// frontend's await simply stops. Everything before that point is recoverable
 /// and reports as `Err`.
 #[tauri::command]
@@ -117,7 +117,7 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     app.restart();
 }
 
-/// Check once, in the background, shortly after launch — the "auto" half of auto
+/// Check once, in the background, shortly after launch: the "auto" half of auto
 /// update. A failure is silent: the app is fully usable offline, and the About
 /// card's button is there for anyone who wants a verdict.
 pub fn check_in_background(app: &AppHandle) {

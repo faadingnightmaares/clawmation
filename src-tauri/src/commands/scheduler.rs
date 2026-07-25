@@ -1,4 +1,4 @@
-//! Scheduler commands — create, list, toggle, and remove schedules.
+//! Scheduler commands: create, list, toggle, and remove schedules.
 //!
 //! Thin wrappers over [`MacroScheduler`](crate::engine::scheduler::MacroScheduler)
 //! on [`AppState`]. A schedule targets a macro (the default) or a chain

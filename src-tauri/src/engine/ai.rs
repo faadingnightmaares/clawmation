@@ -1,10 +1,10 @@
-//! AI step executor — the run loop and single-step execution behind the per-macro
+//! AI step executor: the run loop and single-step execution behind the per-macro
 //! step editor. Mirrors `anime_macro/ai_macro.py::AIExecutor`.
 //!
 //! Detection is injected (in production it grabs a fresh frame and runs the
 //! detector) and so is actuation (the input controller), so the
-//! orchestration that lives here — the loop, `find_click`'s stop-on-miss,
-//! `wait_for`'s poll/deadline, and the summary shape — is exercised by
+//! orchestration that lives here (the loop, `find_click`'s stop-on-miss,
+//! `wait_for`'s poll/deadline, and the summary shape) is exercised by
 //! hardware-free tests through mock closures. Only enabled steps run; a failed
 //! `find_click` stops the whole run, remaining iterations included.
 //!
@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use crate::models::step::Step;
 use crate::util::py_float;
 
-/// One detection hit — the `(x, y, confidence)` of a match, which is all the
+/// One detection hit: the `(x, y, confidence)` of a match, which is all the
 /// executor's messages and result fields need (`Detection.{x,y,confidence}`).
 #[derive(Debug, Clone)]
 pub struct Match {
@@ -48,7 +48,7 @@ pub type Detect = Box<dyn Fn(&Step) -> (Vec<Match>, String) + Send + Sync>;
 /// Perform one [`Action`]. Production drives the controller; tests record the call.
 pub type Actuate = Box<dyn Fn(Action) + Send + Sync>;
 
-/// The outcome of one executed step — mirrors `ai_macro.StepResult`, spread into
+/// The outcome of one executed step. Mirrors `ai_macro.StepResult`, spread into
 /// each run-summary result entry.
 struct StepResult {
     ok: bool,
@@ -60,7 +60,7 @@ struct StepResult {
     elapsed: f64,
 }
 
-/// Execute one step through the injected seams — Python's `_execute_step`. The
+/// Execute one step through the injected seams (Python's `_execute_step`). The
 /// action steps (`click`/`key`/`type`/`scroll`/`delay`) actuate and report their
 /// intent; `find_click`/`wait_for` detect and act on a hit.
 fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &AtomicBool) -> StepResult {
@@ -123,7 +123,7 @@ fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &Atomi
         "delay" => {
             // Clamp negative/NaN so `Duration::from_secs_f64` in the actuator can't
             // panic (a panic in the run thread would leak the mode). Python's
-            // `time.sleep(-x)` raised instead — an error path either way — and the
+            // `time.sleep(-x)` raised instead (an error path either way), and the
             // message still reports the raw value via `str(float)`.
             actuate(Action::Sleep(step.delay));
             StepResult {
@@ -165,7 +165,7 @@ fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &Atomi
         "wait_for" => {
             // Python: `deadline = perf_counter() + step.timeout`. A negative/NaN
             // timeout would panic `Duration::from_secs_f64`, so clamp the span to
-            // zero — the deadline is then already past and the loop reports the
+            // zero; the deadline is then already past and the loop reports the
             // timeout immediately, matching Python's past-deadline `while`. The
             // message keeps the raw value.
             let deadline = t0 + Duration::from_secs_f64(step.timeout.max(0.0));
@@ -207,7 +207,7 @@ fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &Atomi
 }
 
 /// Execute an AI macro's steps → the summary dict (`ok`, `iterations`,
-/// `steps_run`, `steps_passed`, `results`) — Python's `AIExecutor.run`. Only
+/// `steps_run`, `steps_passed`, `results`). Python's `AIExecutor.run`. Only
 /// enabled steps run; a failed `find_click` stops the whole run (all remaining
 /// iterations); `loop_enabled`/`loop_count` drive the outer repeat.
 pub fn run(
@@ -350,7 +350,7 @@ mod tests {
         let detect = detect_returning(vec![], "0 color match(es)");
         let summary = run(&steps, false, 1, &detect, &actuate);
 
-        // The trailing click never runs — nothing was actuated.
+        // The trailing click never runs; nothing was actuated.
         assert!(log.lock().unwrap().is_empty());
         assert_eq!(summary["ok"], false);
         assert_eq!(summary["steps_run"], 1);

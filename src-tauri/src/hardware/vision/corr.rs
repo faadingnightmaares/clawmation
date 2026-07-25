@@ -3,7 +3,7 @@
 //! The whole correlation is done in exact integer arithmetic: pixels and
 //! template weights are bytes, every product fits in `i32`, and only the final
 //! normalising divisions are floating point. That is stricter than OpenCV, which
-//! correlates through a 32-bit FFT — the scores here are the ones the algebra
+//! correlates through a 32-bit FFT: the scores here are the ones the algebra
 //! says they should be, so a threshold the user tuned against cv2 stays valid
 //! instead of drifting by a round-off.
 //!
@@ -41,7 +41,7 @@ pub struct Scores {
 }
 
 impl Scores {
-    /// Every position scoring at or above `threshold`, in row-major order — the
+    /// Every position scoring at or above `threshold`, in row-major order, the
     /// same order `np.where` hands back.
     pub fn above(&self, threshold: f32) -> Vec<(usize, usize, f32)> {
         let mut hits = Vec::new();
@@ -57,7 +57,7 @@ impl Scores {
     }
 
     /// The highest-scoring position, `cv2.minMaxLoc`'s `maxLoc`. Ties go to the
-    /// first in row-major order — OpenCV compares with a strict `>`, and
+    /// first in row-major order: OpenCV compares with a strict `>`, and
     /// `Iterator::max_by` would keep the last instead. It matters: a scale sweep
     /// over a flat or repeating region ties constantly, and the coarse peak it
     /// picks decides where the native refine looks.
@@ -102,7 +102,7 @@ impl Searched {
 
         let t_sum: f64 = ker.iter().map(|&v| f64::from(v)).sum();
         let t_sum2: f64 = ker.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
-        // Σ(T - mean)², i.e. `templSdv² * area` — OpenCV's `templNorm` before it
+        // Σ(T - mean)², i.e. `templSdv² * area`, OpenCV's `templNorm` before it
         // takes the square root.
         let t_var = t_sum2 - t_sum * t_sum / area;
         if t_var < f64::EPSILON {
@@ -196,7 +196,7 @@ fn normalise(num: f64, diff2: f64, wnd2: f64, t_norm: f64) -> f32 {
 /// Valid-region cross-correlation: `out[y][x] = Σ ker[j][i] · img[y + j][x + i]`.
 ///
 /// Row products are accumulated in `i32`, which is exact as long as no single
-/// product exceeds `255²` — true for every plane this module feeds it: pixels
+/// product exceeds `255²`, true for every plane this module feeds it: pixels
 /// against template bytes, and squared pixels against a 0/1 mask.
 fn correlate(img: &[i32], iw: usize, ih: usize, ker: &[i32], kw: usize, kh: usize) -> Vec<i64> {
     debug_assert!(kw <= iw && kh <= ih);

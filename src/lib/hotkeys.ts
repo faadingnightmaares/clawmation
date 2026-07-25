@@ -3,7 +3,7 @@
 // Rust upper-cases the stored string and feeds it to `Shortcut::from_str`
 // (global-hotkey's parser). A name outside that parser's vocabulary registers
 // nothing and reports nothing, so capture only ever emits names it accepts and
-// refuses everything else — a rejected keystroke is better than a shortcut that
+// refuses everything else; a rejected keystroke is better than a shortcut that
 // silently never fires.
 
 /** Physical `KeyboardEvent.code`s that only ever act as modifiers. */
@@ -81,7 +81,7 @@ export function isModifierOnly(code: string): boolean {
 }
 
 /**
- * The shortcut a keystroke means, e.g. `ctrl+shift+r` or `f6` — or null while
+ * The shortcut a keystroke means, e.g. `ctrl+shift+r` or `f6`, or null while
  * only modifiers are down, and for keys the backend parser doesn't know.
  * Modifier order is fixed so the same chord always stores the same string.
  */

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Clawmation Detections</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+      }
+      /* Fills the window, which `shell/detections.rs` sized to the whole monitor.
+         The script backs it with a device-pixel-ratio surface so 1px strokes stay
+         1px on a scaled display. */
+      #boxes {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="boxes"></canvas>
+    <script type="module" src="/src/detections/detections.ts"></script>
+  </body>
+</html>

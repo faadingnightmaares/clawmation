@@ -1,4 +1,4 @@
-//! Vision checkpoint CRUD — insert, remove, and list `CHECKPOINT` events inside a
+//! Vision checkpoint CRUD: insert, remove, and list `CHECKPOINT` events inside a
 //! recorded macro (`ui_app.py::{add_checkpoint, remove_checkpoint, list_checkpoints}`).
 //!
 //! Same wrapper/`*_in` split as `macros.rs`: the thin `#[tauri::command]` resolves
@@ -26,7 +26,7 @@ pub fn add_checkpoint(state: State<AppState>, name: String, index: i64, checkpoi
     if result["ok"] == json!(true) {
         let stem = strip_json(&name);
         // The returned index is the source's `index` after the `< 0 → append`
-        // rewrite, so the log line reports whatever step number it settled on —
+        // rewrite, so the log line reports whatever step number it settled on,
         // including one past the end when the caller asked to append.
         let idx = result["index"].as_i64().unwrap_or(index);
         state.emit("ok", format!("Checkpoint added to '{stem}' at step {idx}"));
@@ -49,7 +49,7 @@ pub fn list_checkpoints(name: String) -> Value {
 /// `add_checkpoint`: insert a `CHECKPOINT` event whose timestamp is interpolated
 /// from its neighbours. A negative `index` appends; `min(index, n)` clamps the
 /// insertion point, but the *returned* index is the un-clamped value, so an
-/// out-of-range request reports (and inserts at the end under) that number — a
+/// out-of-range request reports (and inserts at the end under) that number, a
 /// faithful quirk of the source.
 fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, checkpoint: Value) -> Value {
     let stem = strip_json(name);
@@ -68,7 +68,7 @@ fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, checkpoint: Valu
         index = n;
     }
     // Interpolate the timestamp between the surrounding events. `round4` matches
-    // Python's `to_dict` rounding on save — the model serializes the timestamp
+    // Python's `to_dict` rounding on save; the model serializes the timestamp
     // verbatim, so a fresh event must be pre-rounded to stay byte-identical.
     let ts = if macro_def.events.is_empty() {
         0.0
@@ -267,7 +267,7 @@ mod tests {
         let path = make_macro(&macros, name, 2);
         add_checkpoint_in(&macros, name, 1, json!({ "mode": "wait_for" }));
 
-        // Hand-insert an empty-config checkpoint at the end — list must skip it.
+        // Hand-insert an empty-config checkpoint at the end; list must skip it.
         let mut m = Macro::load(&path).unwrap();
         m.events.push(MacroEvent {
             event_type: InputEventType::Checkpoint,
