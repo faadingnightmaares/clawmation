@@ -1,10 +1,8 @@
 # Clawmation — Design System
 
-The design contract for the redesign. Read this before touching any view. It is
-the "warm dark instrument" north star: a calm appliance a non-technical gamer
-leaves running, not a cockpit of dials. Kept honest by two independent critiques
-(an internal fresh-eyes agent and a senior review) that both landed on the same
-verdict — see "Why the first four attempts were rejected."
+The design contract. Read this before touching any view. It is the "warm dark
+instrument" north star: a calm appliance a non-technical gamer leaves running,
+not a cockpit of dials.
 
 ---
 
@@ -19,34 +17,32 @@ in five seconds, no grid of dials.**
 
 ---
 
-## Why the first four attempts were rejected
+## What the earlier design got wrong
 
-Four redesigns were rejected with escalating words: "same layout," "just keep
-color tune," "FULL redesign," "its just fucked up — redesign everything." The
-mistake was reading "keep color tune" as *keep the whole parchment-serif look*
-and only changing the words inside it. Two independent reviews converged on the
-diagnosis:
+The app went through several rejected redesigns before this one, all of which
+restyled *inside* a frame that was itself the problem. Worth knowing, because the
+same two traps are easy to fall back into:
 
-- **Skin was dead-center AI cliché** — warm cream ground + serif display + a gold
-  "eyebrow" hairline over every title + trailing-period headlines ("Watch and
-  react.") + dashed-border empty states. The recognizable 2025–26 generated look.
-- **Skeleton was the most conventional desktop shell there is** — left icon-rail +
-  top status bar + stacked cream cards. Restyling *inside* that frame is exactly
-  what "same layout" meant.
-- **Bones were genuinely good** — plain copy, no telemetry, one action per row.
-  Those survive; they get re-housed, not redone.
+- **The skin was a generated-UI cliché** — warm cream ground, serif display
+  headings, a gold "eyebrow" hairline over every title, trailing-period headlines
+  ("Watch and react."), dashed-border empty states. Individually defensible;
+  together, instantly recognisable as machine-made.
+- **The skeleton was the most conventional desktop shell there is** — left
+  icon-rail, top status bar, stacked cream cards. Changing colours inside that
+  frame changes nothing that matters.
 
-**"Keep color tune" means keep the three hues, not the parchment ground.**
+What survived unchanged: plain copy, no telemetry, one action per row. Those got
+re-housed, not redone.
 
 ---
 
 ## The one locked constraint
 
-**Keep the three brand hues. Redesign everything else** — value structure,
-typography, skeleton, density, copy. The unlock that broke the four-way tie:
-**invert the value structure.** Warm ink becomes the dominant ground; parchment
-becomes the text; gold moves to the single live accent. Same three colors,
-completely different skin.
+**Keep the three brand hues. Everything else is open** — value structure,
+typography, skeleton, density, copy. The move that made it work was inverting the
+value structure: warm ink became the dominant ground, parchment became the text,
+and gold moved to the single live accent. Same three colours, completely
+different skin.
 
 ### The three hues (kept) and the dark ramp derived from them
 | Role | Value | Note |
@@ -70,7 +66,7 @@ glassmorphism, no neon-on-dark (all AI-"bold" traps, explicitly rejected).
 
 ---
 
-## The skeleton (the part that was rejected — re-architected)
+## The skeleton
 
 - **No left nav-rail.** A slim **top command bar**: cat mark + "Clawmation"
   wordmark · a compact segmented switcher · run-state at the right.
@@ -135,26 +131,16 @@ surface as that sentence, not a detection-settings form.
 
 ---
 
-## Status: done vs. pending
+## Where it lives in the code
 
-### Rendered proof (the new direction, verified by eye)
-- **Macros** rebuilt end-to-end in the new language, both states rendered and
-  inspected: **populated** (top command bar, hairline rows, Run + `⋯` with the
-  plain-language overflow menu, running trust-anchor) and **empty** (cat, one
-  line, one button — the over-explaining three-step dashed box is gone).
+All seven surfaces are built in this language. `src/components/CommandBar.tsx` is
+the top bar and run-state anchor, `src/nav.ts` decides which surfaces ride the
+switcher and which fold into More, `src/views/` are the pages, `src/index.css`
+holds the token ramp above, and `src/components/ui/` is shadcn/ui with the tokens
+applied — restyle there rather than per-view, so a change lands everywhere.
 
-### Pending the user's nod on the direction, then ported to real code
-- **Port Macros** into `MacrosView.tsx` + `theme.css` + the shell (`App.tsx`,
-  `TopBar`, `Sidebar` → command bar). Keep every handler and feature; run the
-  detector, `tsc`, and vitest.
-- **Watch (Vision)** in the same language: the "When ⟨this⟩ appears, ⟨do that⟩"
-  sentence editor, "Pick it on screen," hidden method, Loose · Normal · Strict.
-- **Chains / Guards / Guide / Settings** move under **More**; propagate the
-  command-bar shell and row grammar only after Macros + Watch are validated.
-
-### Preserved fixes carried forward
-- Overflow menu vertical placement must flip up / clamp when a low row would push
-  the menu past the viewport bottom (horizontal placement already clamps).
+One recurring detail worth not re-breaking: a row's overflow menu must flip up
+when the row sits low enough that the menu would run past the viewport bottom.
 
 ---
 

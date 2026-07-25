@@ -63,6 +63,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
         .manage(HotkeyBindings::default())
         .setup(|app| {
@@ -85,6 +86,9 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("Clawmation: recording indicator unavailable: {e}"),
             }
+            // Look for a new release once, off the startup path. Nothing waits on
+            // it and a failure is silent — an offline machine must still start.
+            commands::misc::check_in_background(&handle);
             // Closing the main window quits the app, as in Python (`window_close`
             // ends `webview.start()`). The always-open indicator would otherwise
             // outlive it and keep the process running headless, so tear it down when
@@ -177,6 +181,7 @@ pub fn run() {
             commands::stats::get_run_history,
             commands::misc::get_version,
             commands::misc::check_update,
+            commands::misc::install_update,
             commands::window::window_minimize_to_tray,
         ])
         .run(tauri::generate_context!())

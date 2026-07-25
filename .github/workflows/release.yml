@@ -1,0 +1,60 @@
+name: Release
+
+# Tag a commit `v1.0.1` and push it; this builds the installers, signs the update
+# artifact, writes `latest.json`, and publishes a draft release. Review the draft
+# and publish it — installed copies start seeing the update the moment you do.
+#
+# Requires one repository secret, `TAURI_SIGNING_PRIVATE_KEY`: the contents of
+# the minisign private key whose public half is in `src-tauri/tauri.conf.json`.
+# Add `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too if that key has a password.
+# See docs/RELEASING.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    # Windows-only by design: the whole hardware layer is Win32 (see README).
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # The suites the README asks contributors to run, so a tag can't ship
+      # something that was never green.
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Clawmation ${{ github.ref_name }}
+          releaseBody: |
+            The app shows these notes verbatim in its update prompt, so write
+            them for the person deciding whether to restart right now.
+          releaseDraft: true
+          # Writes latest.json alongside the installers — the manifest the
+          # updater endpoint in tauri.conf.json points at.
+          includeUpdaterJson: true

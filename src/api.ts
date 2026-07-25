@@ -9,6 +9,7 @@
 //     return interfaces below are snake_case. Do not "tidy" a return field to
 //     camelCase; it must match the JSON the command actually emits.
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Arbitrary JSON object — used where a command takes or returns an open map. */
 export type Json = Record<string, unknown>;
@@ -815,10 +816,37 @@ export interface UpdateInfo {
   update_available: boolean;
   current: string;
   latest: string;
+  /** Release notes from the update manifest, when it carries any. */
+  notes?: string | null;
 }
 
+/** Ask the release endpoint whether a newer signed build exists. Rejects when
+ *  the endpoint is unreachable or the manifest doesn't verify — a rejection is
+ *  "couldn't check", never "up to date". */
 export function checkUpdate(): Promise<UpdateInfo> {
   return invoke<UpdateInfo>("check_update");
+}
+
+/** Download the newer build, run the installer, and restart into it. On success
+ *  the process exits mid-call, so this promise simply never settles; it only
+ *  rejects, with the reason the update could not be applied. */
+export function installUpdate(): Promise<void> {
+  return invoke<void>("install_update");
+}
+
+/** `(bytes downloaded, total bytes)` — `total` is absent when the server sends
+ *  no content length. Emitted only while `installUpdate` is running. */
+export type UpdateProgress = [number, number | null];
+
+/** Subscribe to download progress. Resolves to the unsubscribe function. */
+export function onUpdateProgress(fn: (p: UpdateProgress) => void): Promise<UnlistenFn> {
+  return listen<UpdateProgress>("update-progress", (e) => fn(e.payload));
+}
+
+/** Fires when the startup check found a newer build, so the window can mention
+ *  it without the user having asked. */
+export function onUpdateAvailable(fn: (info: UpdateInfo) => void): Promise<UnlistenFn> {
+  return listen<UpdateInfo>("update-available", (e) => fn(e.payload));
 }
 
 // ─── Window / app shell ───

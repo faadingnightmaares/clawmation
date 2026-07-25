@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { onUpdateAvailable } from "@/api";
+import { notifyAction } from "@/lib/toast";
 import { useStatus } from "@/useStatus";
 import { NAV, type ViewId } from "@/nav";
 import { CommandBar } from "@/components/CommandBar";
@@ -55,6 +57,28 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // The backend checks for a release once at launch and announces the result
+  // here. Settings › About owns the install itself, so the toast just points at
+  // it — an update never interrupts a run.
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void onUpdateAvailable((info) => {
+      notifyAction(`Clawmation ${info.latest} is out — you’re on ${info.current}.`, "Show me", () =>
+        setView("settings"),
+      );
+    })
+      .then((off) => {
+        if (alive) unlisten = off;
+        else off();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
   }, []);
 
   return (

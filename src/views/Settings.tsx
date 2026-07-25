@@ -6,11 +6,14 @@ import {
   getConfig,
   getDataPaths,
   getVersion,
+  installUpdate,
+  onUpdateProgress,
   openDataFolder,
   updateConfig,
   type ConfigDto,
   type ConfigSaveResult,
   type DataPaths,
+  type UpdateInfo,
 } from "@/api";
 import { useStaggerIn } from "@/lib/anime";
 import { accelCaps } from "@/lib/hotkeys";
@@ -19,9 +22,20 @@ import { HotkeyField } from "@/components/HotkeyField";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import type { ViewProps } from "./types";
 
 type HotkeyKey = "hotkey_record" | "hotkey_play" | "hotkey_stop";
@@ -52,6 +66,10 @@ export function Settings(_props: ViewProps) {
   const [version, setVersion] = useState("");
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
+  const [available, setAvailable] = useState<UpdateInfo | null>(null);
+  const [installing, setInstalling] = useState(false);
+  /** Percent downloaded, or `null` while the size is still unknown. */
+  const [progress, setProgress] = useState<number | null>(null);
 
   const listRef = useStaggerIn<HTMLDivElement>(loading);
 
@@ -126,12 +144,32 @@ export function Settings(_props: ViewProps) {
     setChecking(true);
     try {
       const r = await checkUpdate();
-      if (r.update_available) notify("info", `Update available: ${r.latest} (you have ${r.current})`);
+      if (r.update_available) setAvailable(r);
       else notify("success", "You’re up to date.");
     } catch {
       notify("error", "Couldn’t check for updates right now.");
     } finally {
       setChecking(false);
+    }
+  };
+
+  // `installUpdate` restarts the app on success, so the only way out of this
+  // function is a failure — there is no success branch to write.
+  const runInstall = async () => {
+    setInstalling(true);
+    setProgress(null);
+    let unlisten: (() => void) | undefined;
+    try {
+      unlisten = await onUpdateProgress(([done, total]) => {
+        if (total) setProgress(Math.min(100, Math.round((done / total) * 100)));
+      });
+      await installUpdate();
+    } catch {
+      notify("error", "The update couldn’t be installed. Try again in a moment.");
+      setInstalling(false);
+      setAvailable(null);
+    } finally {
+      unlisten?.();
     }
   };
 
@@ -256,6 +294,45 @@ export function Settings(_props: ViewProps) {
           </Section>
         </div>
       )}
+
+      {/* Closing mid-download would leave the installer running unattended, so
+          the dialog only dismisses while the user still has a choice. */}
+      <AlertDialog
+        open={!!available}
+        onOpenChange={(o) => !o && !installing && setAvailable(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clawmation {available?.latest} is ready</AlertDialogTitle>
+            <AlertDialogDescription>
+              You’re on {available?.current}. Installing takes a moment and restarts the app, so
+              finish anything that’s running first.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {available?.notes && (
+            <p className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+              {available.notes}
+            </p>
+          )}
+
+          {installing ? (
+            <div className="space-y-2 py-2">
+              <Progress value={progress ?? 0} />
+              <p className="text-xs text-muted-foreground">
+                {progress === null ? "Downloading…" : `Downloading… ${progress}%`}
+              </p>
+            </div>
+          ) : (
+            <AlertDialogFooter>
+              <AlertDialogCancel>Not now</AlertDialogCancel>
+              <AlertDialogAction onClick={(e) => (e.preventDefault(), void runInstall())}>
+                Install and restart
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          )}
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

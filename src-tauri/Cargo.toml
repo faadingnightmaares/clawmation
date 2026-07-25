@@ -1,6 +1,9 @@
 [package]
 name = "clawmation"
-version = "0.1.0"
+# The single source of truth for the app's version: `commands/misc.rs` reads it
+# through `CARGO_PKG_VERSION`, `tauri.conf.json` repeats it for the bundler, and
+# the updater compares the manifest's version against it. Bump all three together.
+version = "1.0.0"
 description = "Macro recorder and player for Windows games, with screen-watching guards"
 authors = ["a7mda"]
 license = "MIT"
@@ -72,6 +75,10 @@ tauri-plugin-single-instance = "2.4.3"
 # Persists window size/position/maximized across sessions — the drop-in for
 # Python's `_load_window_state` / `_save_window_state`.
 tauri-plugin-window-state = "2.4.1"
+# Signed in-app updates (`commands/misc.rs`). Driven entirely from Rust, so the
+# frontend keeps invoking plain commands and the JS bindings/capability
+# permissions the plugin ships are not needed. See docs/RELEASING.md.
+tauri-plugin-updater = "2"
 
 # Raw Win32 bindings for input synthesis. `windows-sys` exposes the API as plain
 # integer-alias types and C structs (not the `windows` crate's newtype wrappers),

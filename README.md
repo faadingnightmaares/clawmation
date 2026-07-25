@@ -19,9 +19,10 @@ long AFK grinds is the part that watches the screen:
   running. Good for AFK checks, invite popups, and reward screens.
 - **Chains** play several macros back to back, optionally on a schedule.
 
-Everything runs locally. There is no account, no telemetry, and no network call at
-runtime — the app captures your screen because that is the whole point, and none of
-what it captures leaves the machine.
+Everything runs locally. There is no account and no telemetry — the app captures your
+screen because that is the whole point, and none of what it captures ever leaves the
+machine. The one network call it makes is the update check, which asks a release
+manifest for a version number and nothing else.
 
 ## Requirements
 
@@ -57,6 +58,11 @@ To produce installers (MSI and NSIS, in `src-tauri/target/release/bundle/`):
 npm run tauri build
 ```
 
+The app updates itself: it checks a signed release manifest at launch and offers the
+new version from Settings › About. Publishing a build the installed copies will
+accept — including the signing key you need to hold to do it — is
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Tests
 
 ```bash
@@ -89,7 +95,7 @@ nothing and reports success.
 | `src-tauri/src/hardware/` | Everything that touches the OS: capture, input synthesis, recording, OCR, the picker overlays, and `vision/`. |
 | `src-tauri/src/models/` | Serde types for the on-disk formats. These define the file compatibility contract. |
 | `src-tauri/src/shell/` | Tray icon, global hotkeys, and the recording-indicator window. |
-| `docs/` | Design contract and the notes behind the deliberate oddities in the port. |
+| `docs/` | Design contract, the release process, and the notes behind the deliberate oddities in the port. |
 
 ## Vision without OpenCV
 

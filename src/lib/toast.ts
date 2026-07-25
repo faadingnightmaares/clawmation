@@ -20,6 +20,17 @@ export function notify(kind: ToastKind, text: string) {
 }
 
 /**
+ * Tell the user about something they didn't ask for, with somewhere to go about
+ * it. Longer-lived than a plain toast, since the moment isn't one they chose.
+ */
+export function notifyAction(text: string, label: string, onClick: () => void) {
+  return toast.info(text, {
+    duration: 12000,
+    action: { label, onClick },
+  });
+}
+
+/**
  * Report a destructive action that already happened, with a way back. The undo
  * rides the toast instead of a confirm dialog on the way in: deleting stays one
  * click, and only the rare mistake costs a second one.

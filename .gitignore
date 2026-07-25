@@ -23,6 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 
+# Update-signing keys. The real one lives outside the repo (see docs/RELEASING.md);
+# this is here so a stray copy can never be committed.
+*.key
+!*.key.pub
+
 # Runtime data. A debug build resolves its data root to this folder (see
 # src-tauri/src/paths.rs), so every setting saved, macro recorded, template
 # captured and snapshot taken during `tauri dev` lands here. It is one
