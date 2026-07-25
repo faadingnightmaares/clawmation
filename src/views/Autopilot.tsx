@@ -1,17 +1,19 @@
+import { useState } from "react";
+import { Shield, Workflow } from "lucide-react";
+
+import { SplitView } from "@/components/SplitView";
 import { Chains } from "./Chains";
 import { Guards } from "./Guards";
 import type { ViewProps } from "./types";
 
 /**
- * Guards and chains, on one page. They used to be two tabs, which made them look
- * like two ideas you had to choose between. They are both answers to "keep
- * running while I'm not here", and you set them up in the same sitting. Chains
- * come first because they are the thing you start; guards are what protect it.
- *
- * Both halves are mounted the whole time, so the Chains poll now backs off while
- * nothing is running rather than relying on being unmounted.
+ * Guards and chains, one page with a rail of its own. Chains come first
+ * because they are the thing you start; protection is what keeps a run safe
+ * once it is going. Both halves stay mounted behind the rail, so switching
+ * to the other one doesn't pause the Chains poll or drop anything mid-edit.
  */
 export function Autopilot(props: ViewProps) {
+  const [pane, setPane] = useState<"chains" | "protection">("chains");
   return (
     <div className="flex flex-col gap-8">
       <header className="space-y-1">
@@ -22,8 +24,22 @@ export function Autopilot(props: ViewProps) {
         </p>
       </header>
 
-      <Chains {...props} />
-      <Guards {...props} />
+      <SplitView
+        label="Autopilot sections"
+        items={[
+          { id: "chains", label: "Chains", Icon: Workflow },
+          { id: "protection", label: "Protection", Icon: Shield },
+        ]}
+        active={pane}
+        onSelect={(id) => setPane(id)}
+      >
+        <div className={pane === "chains" ? undefined : "hidden"}>
+          <Chains {...props} />
+        </div>
+        <div className={pane === "protection" ? undefined : "hidden"}>
+          <Guards {...props} />
+        </div>
+      </SplitView>
     </div>
   );
 }
