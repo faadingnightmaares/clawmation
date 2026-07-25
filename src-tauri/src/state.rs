@@ -17,8 +17,6 @@ use crate::engine::vision_agent::VisionAgent;
 use crate::models::config::MacroConfig;
 use crate::paths;
 
-pub use crate::core::Runtime;
-
 #[derive(Clone)]
 pub struct AppState {
     pub core: Core,

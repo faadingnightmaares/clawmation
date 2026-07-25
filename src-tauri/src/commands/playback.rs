@@ -10,7 +10,7 @@ use tauri::State;
 
 use crate::state::AppState;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn play_macro(
     state: State<AppState>,
     name: String,
@@ -21,12 +21,12 @@ pub fn play_macro(
     state.core.play_macro(&name, repeat, speed.unwrap_or(1.0))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_playback(state: State<AppState>) -> Value {
     state.core.stop_playback()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn emergency_stop(state: State<AppState>) -> Value {
     emergency_stop_impl(state.inner())
 }

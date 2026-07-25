@@ -42,6 +42,12 @@ pub fn round2(v: f64) -> f64 {
     format!("{v:.2}").parse().expect("a fixed-precision float always reparses")
 }
 
+/// The same trick at three decimals — `round(x, 3)`, which is the precision both
+/// Test buttons report a match confidence at.
+pub fn round3(v: f64) -> f64 {
+    format!("{v:.3}").parse().expect("a fixed-precision float always reparses")
+}
+
 /// Format a float like Python's `str(float)`: integer-valued floats keep one
 /// decimal (`2.0`, not Rust's `2`); everything else uses the shortest round trip.
 /// Python interpolates step delays/timeouts and playback speed through `str`, so

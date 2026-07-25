@@ -11,7 +11,7 @@ use tauri::State;
 use crate::paths;
 use crate::state::AppState;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_stats_summary(state: State<AppState>) -> Value {
     let all_stats = state.core.play_stats.all();
     let total_plays: i64 = all_stats.values().map(|s| s.count).sum();
@@ -39,7 +39,7 @@ pub fn get_stats_summary(state: State<AppState>) -> Value {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_run_history(state: State<AppState>, limit: Option<usize>) -> Value {
     json!(state.core.play_stats.history(limit.unwrap_or(30)))
 }

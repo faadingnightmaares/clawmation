@@ -21,7 +21,7 @@ pub struct ConfigDto {
     pub notify_on_complete: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_config(state: State<AppState>) -> ConfigDto {
     let c = state.core.config.lock().unwrap();
     ConfigDto {
@@ -36,7 +36,7 @@ pub fn get_config(state: State<AppState>) -> ConfigDto {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_config(app: AppHandle, state: State<AppState>, patch: Value) -> Value {
     // `Api.update_config`: note which hotkeys the patch touches before applying,
     // so the global shortcuts can be re-registered if any changed.
@@ -71,11 +71,33 @@ pub fn update_config(app: AppHandle, state: State<AppState>, patch: Value) -> Va
     }
     drop(guard);
 
-    if hotkeys_changed {
-        crate::shell::hotkeys::register_from_config(&app);
-    }
+    // A shortcut can parse and still be refused — Windows hands a global hotkey
+    // to whoever asked first — so the keys that did not take ride back with the
+    // result instead of failing silently.
+    let unbound = if hotkeys_changed {
+        crate::shell::hotkeys::register_from_config(&app)
+    } else {
+        Vec::new()
+    };
     state.emit("ok", "Settings saved");
+    json!({ "ok": true, "unbound": unbound })
+}
+
+/// Release the global shortcuts while the settings UI listens for a keystroke.
+/// Without this, capturing a key that is already bound would fire that binding
+/// instead — global shortcuts are exclusive and never reach the webview.
+#[tauri::command(async)]
+pub fn hotkeys_suspend(app: AppHandle) -> Value {
+    crate::shell::hotkeys::suspend(&app);
     json!({ "ok": true })
+}
+
+/// Re-arm the global shortcuts after a capture ends, reporting any that the OS
+/// refused.
+#[tauri::command(async)]
+pub fn hotkeys_resume(app: AppHandle) -> Value {
+    let unbound = crate::shell::hotkeys::register_from_config(&app);
+    json!({ "ok": true, "unbound": unbound })
 }
 
 #[derive(Debug, Serialize)]
@@ -91,7 +113,7 @@ pub struct DataPaths {
     pub snapshot_count: i64,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_data_paths() -> DataPaths {
     DataPaths {
         ok: true,
@@ -106,7 +128,7 @@ pub fn get_data_paths() -> DataPaths {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_data_folder(kind: String) -> Value {
     let dir = match kind.as_str() {
         "root" => paths::root(),

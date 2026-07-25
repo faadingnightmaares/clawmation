@@ -20,7 +20,7 @@ fn strip_json(name: &str) -> &str {
     name.strip_suffix(".json").unwrap_or(name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_checkpoint(state: State<AppState>, name: String, index: i64, checkpoint: Value) -> Value {
     let result = add_checkpoint_in(&paths::macros_dir(), &name, index, checkpoint);
     if result["ok"] == json!(true) {
@@ -34,12 +34,12 @@ pub fn add_checkpoint(state: State<AppState>, name: String, index: i64, checkpoi
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_checkpoint(name: String, index: i64) -> Value {
     remove_checkpoint_in(&paths::macros_dir(), &name, index)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_checkpoints(name: String) -> Value {
     list_checkpoints_in(&paths::macros_dir(), &name)
 }

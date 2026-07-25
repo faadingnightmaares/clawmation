@@ -10,8 +10,9 @@
 use std::path::Path;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{State, Window};
 
+use crate::commands::window::with_window_hidden;
 use crate::models::macro_def::Macro;
 use crate::models::step::{macro_to_steps as convert, AIMacro, Step};
 use crate::paths;
@@ -22,12 +23,12 @@ fn ai_dir() -> std::path::PathBuf {
     paths::macros_dir().join("ai")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn macro_to_steps(macro_name: String) -> Value {
     macro_to_steps_in(&paths::macros_dir(), &macro_name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn steps_save(state: State<AppState>, macro_name: String, steps: Vec<Value>) -> Value {
     let result = steps_save_in(&ai_dir(), &macro_name, steps);
     if result["ok"] == json!(true) {
@@ -41,14 +42,16 @@ pub fn steps_save(state: State<AppState>, macro_name: String, steps: Vec<Value>)
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn steps_run(state: State<AppState>, steps: Vec<Value>) -> Value {
     state.core.steps_run(steps)
 }
 
-#[tauri::command]
-pub fn steps_test(state: State<AppState>, step: Value) -> Value {
-    state.core.steps_test(step)
+/// Same reason as `guard_test`: the step editor is in front of whatever the step
+/// is written to find, so it goes away for the length of the grab.
+#[tauri::command(async)]
+pub fn steps_test(state: State<AppState>, window: Window, step: Value) -> Value {
+    with_window_hidden(&window, || state.core.steps_test(step))
 }
 
 // ── Pure implementations (unit-tested against a temp dir) ────────────────────

@@ -8,7 +8,7 @@ use crate::paths;
 use crate::state::AppState;
 use crate::util::round1;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_status(state: State<AppState>) -> Status {
     let core = &state.core;
     let config = core.config.lock().unwrap().clone();
@@ -48,7 +48,7 @@ pub fn get_status(state: State<AppState>) -> Status {
         (stored_recorded, false)
     };
 
-    // Resolved backend once the sidecar is up; the configured name until then.
+    // Resolved backend once capture has opened; the configured name until then.
     let capture_backend = core
         .vision
         .resolved_backend()

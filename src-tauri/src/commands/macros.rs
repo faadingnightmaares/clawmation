@@ -46,7 +46,7 @@ pub struct TemplateItem {
     pub category: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_macros() -> Vec<MacroListItem> {
     let dir = paths::macros_dir();
     let stats = StatsFile::load(&paths::config_dir().join("stats.json"));
@@ -94,7 +94,7 @@ pub fn list_macros() -> Vec<MacroListItem> {
 
 // ── Deletion ────────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_macro(state: State<AppState>, name: String) -> Value {
     let result = delete_macro_in(&paths::macros_dir(), &state.core.play_stats, &name);
     if result["ok"] == json!(true) {
@@ -103,7 +103,7 @@ pub fn delete_macro(state: State<AppState>, name: String) -> Value {
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn bulk_delete(state: State<AppState>, names: Vec<String>) -> Value {
     let result = bulk_delete_in(&paths::macros_dir(), &state.core.play_stats, &names);
     if let Some(count) = result["deleted"]
@@ -118,7 +118,7 @@ pub fn bulk_delete(state: State<AppState>, names: Vec<String>) -> Value {
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_as_template(state: State<AppState>, name: String, template_name: String) -> Value {
     let result = save_as_template_in(&paths::macros_dir(), &name, &template_name);
     if result["ok"] == json!(true) {
@@ -127,12 +127,12 @@ pub fn save_as_template(state: State<AppState>, name: String, template_name: Str
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_templates() -> Vec<TemplateItem> {
     list_templates_in(&paths::macros_dir())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_from_template(state: State<AppState>, template_name: String, new_name: String) -> Value {
     let result = create_from_template_in(&paths::macros_dir(), &template_name, &new_name);
     if result["ok"] == json!(true) {
@@ -144,7 +144,7 @@ pub fn create_from_template(state: State<AppState>, template_name: String, new_n
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_template(state: State<AppState>, template_name: String) -> Value {
     let result = delete_template_in(&paths::macros_dir(), &template_name);
     if result["ok"] == json!(true) {
@@ -155,7 +155,7 @@ pub fn delete_template(state: State<AppState>, template_name: String) -> Value {
 
 // ── Editing (rename, duplicate, repeat, category, notes) ─────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_macro(state: State<AppState>, old_name: String, new_name: String) -> Value {
     let result = rename_macro_in(&paths::macros_dir(), &paths::guards_dir(), &old_name, &new_name);
     if result["ok"] == json!(true) {
@@ -173,7 +173,7 @@ pub fn rename_macro(state: State<AppState>, old_name: String, new_name: String) 
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn duplicate_macro(state: State<AppState>, name: String) -> Value {
     let result = duplicate_macro_in(&paths::macros_dir(), &paths::guards_dir(), &name);
     if result["ok"] == json!(true) {
@@ -185,12 +185,12 @@ pub fn duplicate_macro(state: State<AppState>, name: String) -> Value {
 
 /// `set_repeat` is silent — the repeat dial persists on every drag, so a log line
 /// per change would flood the activity feed (the source emits nothing here).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_repeat(name: String, repeat: i64) -> Value {
     set_repeat_in(&paths::macros_dir(), &name, repeat)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_category(state: State<AppState>, name: String, category: String) -> Value {
     let result = set_category_in(&paths::macros_dir(), &name, &category);
     if result["ok"] == json!(true) {
@@ -205,7 +205,7 @@ pub fn set_category(state: State<AppState>, name: String, category: String) -> V
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_notes(state: State<AppState>, name: String, notes: String) -> Value {
     let result = set_notes_in(&paths::macros_dir(), &name, &notes);
     if result["ok"] == json!(true) {

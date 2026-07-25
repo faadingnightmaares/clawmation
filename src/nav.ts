@@ -1,14 +1,17 @@
 import {
-  SquaresFour,
-  List,
+  House,
+  ListVideo,
   ShieldCheck,
   Eye,
-  FlowArrow,
-  BookOpenText,
-  Gear,
-  type Icon,
-} from "@phosphor-icons/react";
+  Workflow,
+  BookOpen,
+  Settings,
+  type LucideIcon,
+} from "lucide-react";
 
+// The routing contract kept from the backend era: these ids are what every view
+// and handler switch on. NOTE the "Guards" surface's id is `ai` and the "Watch"
+// surface's id is `vision` — historical names kept for fidelity with the Rust side.
 export type ViewId =
   | "dashboard"
   | "macros"
@@ -18,21 +21,31 @@ export type ViewId =
   | "guide"
   | "settings";
 
-export interface NavItem {
+export interface NavMeta {
   id: ViewId;
+  /** What the user sees — plain words, not the internal id. */
   label: string;
-  Icon: Icon;
+  Icon: LucideIcon;
+  /** `primary` rides the command-bar switcher; `more` lives in the More menu. */
+  group: "primary" | "more";
 }
 
-// Sidebar order also defines the Alt+1..7 shortcuts (index + 1). NOTE: the
-// "Guards" item's internal view id is `ai` — a historical name kept for
-// fidelity, not `guards`.
-export const NAV_ITEMS: NavItem[] = [
-  { id: "dashboard", label: "Dashboard", Icon: SquaresFour },
-  { id: "macros", label: "Macros", Icon: List },
-  { id: "ai", label: "Guards", Icon: ShieldCheck },
-  { id: "vision", label: "Vision", Icon: Eye },
-  { id: "chains", label: "Chains", Icon: FlowArrow },
-  { id: "guide", label: "Guide", Icon: BookOpenText },
-  { id: "settings", label: "Settings", Icon: Gear },
+// Order also defines the Alt+1..7 shortcuts (index + 1), unchanged from before so
+// muscle memory carries over. Two primary surfaces (Macros, Watch) sit in the bar;
+// the rest fold into More so the very first click isn't a wall of seven nouns.
+export const NAV: NavMeta[] = [
+  { id: "dashboard", label: "Home", Icon: House, group: "more" },
+  { id: "macros", label: "Macros", Icon: ListVideo, group: "primary" },
+  { id: "ai", label: "Guards", Icon: ShieldCheck, group: "more" },
+  { id: "vision", label: "Watch", Icon: Eye, group: "primary" },
+  { id: "chains", label: "Chains", Icon: Workflow, group: "more" },
+  { id: "guide", label: "Guide", Icon: BookOpen, group: "more" },
+  { id: "settings", label: "Settings", Icon: Settings, group: "more" },
 ];
+
+export const PRIMARY_VIEWS = NAV.filter((n) => n.group === "primary");
+export const MORE_VIEWS = NAV.filter((n) => n.group === "more");
+
+export const NAV_BY_ID = Object.fromEntries(
+  NAV.map((n) => [n.id, n]),
+) as Record<ViewId, NavMeta>;

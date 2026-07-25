@@ -13,12 +13,12 @@ use tauri::State;
 
 use crate::state::AppState;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_schedules(state: State<AppState>) -> Value {
     json!(state.scheduler.list())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_schedule(
     state: State<AppState>,
     macro_name: String,
@@ -43,17 +43,17 @@ pub fn add_schedule(
     json!({ "ok": true, "schedule": sched })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_schedule(state: State<AppState>, schedule_id: String) -> Value {
     json!({ "ok": state.scheduler.remove(&schedule_id) })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_schedule_enabled(state: State<AppState>, schedule_id: String, enabled: bool) -> Value {
     json!({ "ok": state.scheduler.set_enabled(&schedule_id, enabled) })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn schedule_chain(
     state: State<AppState>,
     chain_id: String,

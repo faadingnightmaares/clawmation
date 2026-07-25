@@ -1,8 +1,10 @@
 [package]
 name = "clawmation"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Macro recorder and player for Windows games, with screen-watching guards"
+authors = ["a7mda"]
+license = "MIT"
+readme = "../README.md"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -30,6 +32,25 @@ tauri-plugin-dialog = "2"
 # `.clawbundle` export/import is a zip of macro.json + guards.json + templates/,
 # the direct port of Python's `zipfile.ZipFile(...)` bundle format.
 zip = "2"
+# Encodes the Test-button previews and saved template files
+# (`hardware/preview.rs`); already in the tree via tauri, so this is free.
+png = "0.17"
+# Base64 for those previews' data URIs.
+base64 = "0.22"
+# Decodes template files in `hardware/vision`. Pure Rust and no system library,
+# which is the whole point: the alternative was the `opencv` crate, and that puts
+# an OpenCV/vcpkg install between a contributor and their first build. Only the
+# formats the template picker accepts are enabled.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "bmp",
+    "webp",
+] }
+# Row-parallel correlation in `hardware/vision/corr.rs`. A full-screen scale
+# sweep is the one genuinely compute-bound thing the app does, and it is
+# embarrassingly parallel over output rows.
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` makes float parsing correctly-rounded, so every timestamp and
 # duration loads to the exact same f64 the Python app wrote — re-saved macros stay
@@ -81,5 +102,23 @@ windows = { version = "0.59", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    # `hardware/ocr.rs` — the platform OCR engine, replacing the sidecar's
+    # EasyOCR path. `Media_Ocr` is the recognizer; `Graphics_Imaging` builds the
+    # `SoftwareBitmap` it reads; `Security_Cryptography` wraps our BGRA bytes as
+    # the `IBuffer` that bitmap is copied from; `Foundation` supplies the
+    # `IAsyncOperation` blocking `.get()`. `Storage_Streams` gates `IBuffer`
+    # itself, and `Foundation_Collections` gates the `IVectorView` of OCR lines.
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Security_Cryptography",
+    "Storage_Streams",
+    # `hardware/overlay.rs` — the fullscreen GDI overlay the screen pickers draw
+    # on. `LibraryLoader` supplies the `HINSTANCE` the window class registers
+    # against; `Input_KeyboardAndMouse` supplies `GetKeyState`, which is how the
+    # Shift modifier is read (`WM_KEYDOWN` carries the key, never the modifiers).
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 

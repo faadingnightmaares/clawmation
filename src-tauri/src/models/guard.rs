@@ -33,7 +33,9 @@ pub struct Guard {
     pub method: String,
     pub hsv_low: [i64; 3],
     pub hsv_high: [i64; 3],
-    /// Region as percentages `[x, y, w, h]` of the frame.
+    /// Region as percentage *corners* `[x1, y1, x2, y2]` of the frame — the
+    /// order `config.py::Region` takes and `extract_roi` slices as
+    /// `frame[y1:y2, x1:x2]`. Not `[x, y, w, h]`.
     pub region: [f64; 4],
     pub min_area: i64,
     pub template_path: String,

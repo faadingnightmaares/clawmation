@@ -9,17 +9,17 @@ use tauri::State;
 
 use crate::state::AppState;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_record(state: State<AppState>) -> Value {
     state.core.start_record()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_record(state: State<AppState>) -> Value {
     state.core.stop_record()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pause_record(state: State<AppState>) -> Value {
     state.core.pause_record()
 }

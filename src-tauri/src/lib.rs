@@ -23,6 +23,7 @@ use models::config::MacroConfig;
 use shell::hotkeys::HotkeyBindings;
 use state::AppState;
 use tauri::Manager;
+use tauri_plugin_window_state::StateFlags;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -49,8 +50,14 @@ pub fn run() {
         // Exclude the indicator overlay from window-state persistence: it must
         // always come up hidden and repositioned top-right, never restored to a
         // saved spot, size, or visibility. (Python's overlay persisted nothing.)
+        //
+        // DECORATIONS is dropped from the saved flags: the main window is
+        // undecorated and draws its own title bar, and a state file written
+        // before that change would otherwise restore the native caption on top
+        // of ours at every launch.
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::all() & !StateFlags::DECORATIONS)
                 .with_denylist(&[shell::indicator::LABEL])
                 .build(),
         )
@@ -64,7 +71,7 @@ pub fn run() {
             // `launch_ui`'s `_register_hotkeys()` / `_start_tray()` startup calls.
             let handle = app.handle().clone();
             app.state::<AppState>().core.notifier.attach(handle.clone());
-            shell::hotkeys::register_from_config(&handle);
+            let _ = shell::hotkeys::register_from_config(&handle);
             shell::tray::build(&handle)?;
             // Build the transparent pixel-cat overlay (hidden until record/play).
             // Like Python's `_start_indicator` try/except, a failure is logged and
@@ -101,6 +108,8 @@ pub fn run() {
             commands::status::get_status,
             commands::config::get_config,
             commands::config::update_config,
+            commands::config::hotkeys_suspend,
+            commands::config::hotkeys_resume,
             commands::config::get_data_paths,
             commands::config::open_data_folder,
             commands::macros::list_macros,

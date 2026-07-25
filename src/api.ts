@@ -95,9 +95,26 @@ export function getConfig(): Promise<ConfigDto> {
   return invoke<ConfigDto>("get_config");
 }
 
+/** A config write, plus any shortcut the OS refused to hand over (another app
+ *  already owns it). Empty unless the patch touched a `hotkey_*` key. */
+export interface ConfigSaveResult extends OpResult {
+  unbound?: string[];
+}
+
 /** Merge a partial config patch over the stored config; unknown keys round-trip. */
-export function updateConfig(patch: Json): Promise<OpResult> {
-  return invoke<OpResult>("update_config", { patch });
+export function updateConfig(patch: Json): Promise<ConfigSaveResult> {
+  return invoke<ConfigSaveResult>("update_config", { patch });
+}
+
+/** Release the global shortcuts so a keystroke reaches the webview to be
+ *  captured — they're exclusive, so an already-bound key would fire instead. */
+export function hotkeysSuspend(): Promise<OpResult> {
+  return invoke<OpResult>("hotkeys_suspend");
+}
+
+/** Re-arm the global shortcuts after a capture ends. */
+export function hotkeysResume(): Promise<ConfigSaveResult> {
+  return invoke<ConfigSaveResult>("hotkeys_resume");
 }
 
 export interface DataPaths {
@@ -336,8 +353,8 @@ export function guardSave(macroName: string, guards?: Guard[]): Promise<OpResult
   return invoke<OpResult>("guard_save", { macroName, guards });
 }
 
-/** The guard editor's Test result: a match summary plus a base64 JPEG `preview`
- * (region box, match rings, best-match crosshair) drawn by the vision sidecar. */
+/** The guard editor's Test result: a match summary plus a base64 `preview`
+ * (region box, match rings, best-match crosshair). */
 export interface GuardTestResult {
   ok: boolean;
   matched?: number;
@@ -346,6 +363,9 @@ export interface GuardTestResult {
   confidence?: number;
   message?: string;
   preview?: string;
+  /// MIME type of `preview` — always `image/png`, since every preview is drawn
+  /// in Rust.
+  preview_mime?: string;
   error?: string;
 }
 
@@ -522,16 +542,15 @@ export function removeCheckpoint(name: string, index: number): Promise<OpResult>
 
 // ─── AI steps (recorded macro → editable action list) ───
 // Convert a recording into a flat, editable list of steps, then edit / test /
-// run / save it back as an "AI macro". Rust owns the orchestration (run loop,
-// action execution, wait_for polling, conversion, load/save); the Python sidecar
-// only detects per step. Ports of `Api.macro_to_steps` / `steps_save` /
-// `steps_run` / `steps_test` (index.html:3211-3339).
+// run / save it back as an "AI macro". Rust owns the whole thing: the run loop,
+// action execution, wait_for polling, conversion, and load/save. Ports of
+// `Api.macro_to_steps` / `steps_save` / `steps_run` / `steps_test`
+// (index.html:3211-3339).
 
 /** One AI macro step. Every field is always present — `macroToSteps` emits
  * complete objects and the editor's inserts default to complete objects — so
  * they read as required here, matching the Rust `Step`
- * (src-tauri/src/models/step.rs) and the sidecar `Step` dataclass
- * (sidecar/clawmation_vision/steps.py). */
+ * (src-tauri/src/models/step.rs). */
 export interface Step {
   id: string;
   type: string;

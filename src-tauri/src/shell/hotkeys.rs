@@ -38,9 +38,12 @@ struct Bindings {
 /// (Re)register the record/play/stop global shortcuts from the live config —
 /// `Api._register_hotkeys`. Clears any existing registration first, then parses
 /// each configured key (upper-cased, e.g. `f9` → `F9`) and stores the ones that
-/// took. A key that fails to parse or register is simply left unbound, matching
-/// Python's best-effort `except Exception` around the whole block.
-pub fn register_from_config(app: &AppHandle) {
+/// took. A key that fails to parse or register is left unbound, matching
+/// Python's best-effort `except Exception` around the whole block — but it is
+/// also *returned*, so the settings UI can say so instead of handing the user a
+/// shortcut that will never fire. A blank key is unbound on purpose, not a
+/// failure.
+pub fn register_from_config(app: &AppHandle) -> Vec<String> {
     let _ = app.global_shortcut().unregister_all();
 
     let (rec, play, stop) = {
@@ -58,6 +61,22 @@ pub fn register_from_config(app: &AppHandle) {
     b.record = register_one(app, &rec);
     b.play = register_one(app, &play);
     b.stop = register_one(app, &stop);
+
+    [(&rec, &b.record), (&play, &b.play), (&stop, &b.stop)]
+        .into_iter()
+        .filter(|(key, slot)| !key.trim().is_empty() && slot.is_none())
+        .map(|(key, _)| key.to_lowercase())
+        .collect()
+}
+
+/// Drop every global shortcut until [`register_from_config`] runs again. The
+/// settings UI calls this while it is listening for a keystroke: Tauri's global
+/// shortcuts are exclusive, so pressing an already-bound key would fire its
+/// action instead of reaching the webview to be captured.
+pub fn suspend(app: &AppHandle) {
+    let _ = app.global_shortcut().unregister_all();
+    let bindings = app.state::<HotkeyBindings>();
+    *bindings.inner.lock().unwrap() = Bindings::default();
 }
 
 fn register_one(app: &AppHandle, key: &str) -> Option<Shortcut> {

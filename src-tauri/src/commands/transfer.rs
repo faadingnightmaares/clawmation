@@ -4,9 +4,12 @@
 //! import_macro, bulk_export, export_bundle, import_bundle}` methods. Python
 //! opened a `tkinter.filedialog` modal synchronously inside each method and
 //! returned `{ok, path|name, …}`; we keep that exact shape by driving
-//! `tauri-plugin-dialog`'s `blocking_*` dialogs from the synchronous command.
-//! Tauri runs sync command handlers off the main thread, so blocking there is
-//! the supported pattern and the frontend contract is unchanged.
+//! `tauri-plugin-dialog`'s `blocking_*` dialogs from the command body.
+//!
+//! Every command here MUST stay `#[tauri::command(async)]`. Tauri runs plain
+//! sync handlers on the main thread, and `blocking_*` posts the dialog to the
+//! main thread and then waits for it — from the main thread that is a
+//! self-deadlock that hangs the whole window, not just the call.
 //!
 //! The tkinter "dialog failed to initialize" branches (`"Folder dialog failed:
 //! …"`, `"File dialog failed: …"`) have no analogue here — a native dialog does
@@ -40,7 +43,7 @@ fn picked(result: Option<FilePath>) -> Option<PathBuf> {
 
 // ── Chains ────────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_chain(app: AppHandle, state: State<AppState>, chain_id: String) -> Value {
     let Some(chain) = state.chains.list().into_iter().find(|c| c.id == chain_id) else {
         return json!({ "ok": false, "error": "Chain not found" });
@@ -68,7 +71,7 @@ pub fn export_chain(app: AppHandle, state: State<AppState>, chain_id: String) ->
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_chain(app: AppHandle, state: State<AppState>) -> Value {
     let Some(path) = picked(
         app.dialog()
@@ -110,7 +113,7 @@ pub fn import_chain(app: AppHandle, state: State<AppState>) -> Value {
 
 // ── Macros ────────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_macro(app: AppHandle, state: State<AppState>, name: String) -> Value {
     let stem = strip_json(&name);
     let src = paths::macros_dir().join(format!("{stem}.json"));
@@ -137,7 +140,7 @@ pub fn export_macro(app: AppHandle, state: State<AppState>, name: String) -> Val
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_macro(app: AppHandle, state: State<AppState>) -> Value {
     let Some(src) = picked(
         app.dialog()
@@ -173,7 +176,7 @@ pub fn import_macro(app: AppHandle, state: State<AppState>) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn bulk_export(app: AppHandle, state: State<AppState>, names: Vec<String>) -> Value {
     if names.is_empty() {
         return json!({ "ok": false, "error": "No macros selected" });
@@ -217,7 +220,7 @@ pub fn bulk_export(app: AppHandle, state: State<AppState>, names: Vec<String>) -
 
 // ── Bundles (.clawbundle = zip of macro.json + guards.json + templates/) ─────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_bundle(app: AppHandle, state: State<AppState>, name: String) -> Value {
     let stem = strip_json(&name);
     let macro_path = paths::macros_dir().join(format!("{stem}.json"));
@@ -245,7 +248,7 @@ pub fn export_bundle(app: AppHandle, state: State<AppState>, name: String) -> Va
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_bundle(app: AppHandle, state: State<AppState>) -> Value {
     let Some(src) = picked(
         app.dialog()

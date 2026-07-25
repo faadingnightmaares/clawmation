@@ -4,8 +4,8 @@
 //! `stats.py`, `guards.py`), owning its own state behind a lock and taking
 //! injected callbacks (`play_macro`, `is_idle`, `fire`, `detect`, `actuate`, …)
 //! so it can run and be tested without any real capture, input, or playback.
-//! The Tauri layer wires these to the real player, input controller, and vision
-//! sidecar in `state.rs`.
+//! The Tauri layer wires these to the real player, input controller, and
+//! detector in `state.rs`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

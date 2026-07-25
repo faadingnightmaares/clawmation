@@ -1,15 +1,20 @@
 //! Hardware layer — the OS-touching primitives the engines drive.
 //!
 //! Where `engine/` is deliberately hardware-free (managers with injected
-//! callbacks), most of these modules call straight into Win32, mirroring the
-//! Python `input.py` / `capture.py` modules. The exception is `vision`, which
-//! reaches the OS *out of process*: it drives the Python vision sidecar (kept
-//! verbatim for detection fidelity) over stdio JSON-RPC.
+//! callbacks), these modules call straight into Win32, mirroring the Python
+//! `input.py` / `capture.py` modules. `vision` is the exception in the other
+//! direction: it touches no OS API at all, being a transcription of the OpenCV
+//! primitives the detection path used to reach for.
 
 pub mod capture;
 pub mod input;
+pub mod ocr;
+pub mod overlay;
+pub mod picker;
 pub mod player;
+pub mod preview;
 pub mod recorder;
+pub mod snap;
 pub mod vision;
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};

@@ -3,8 +3,8 @@
 //! unattended macro keeps running.
 //!
 //! Mirrors `anime_macro/guards.py::GuardEngine`. One background thread polls at
-//! 5Hz; while a macro is actively playing it asks the vision sidecar to detect
-//! every cooldown-eligible guard in a single batch (one screen grab per cycle),
+//! 5Hz; while a macro is actively playing it detects every cooldown-eligible
+//! guard in a single batch (one screen grab per cycle),
 //! and for each match it pauses the macro, performs the guard's action, waits
 //! the configured settle delay, then resumes. Like the other engines it is
 //! hardware-free: detection, player state, actuation, and the fire callback are
@@ -27,7 +27,7 @@ use crate::hardware::vision::Detection;
 use crate::models::guard::Guard;
 
 /// 5Hz — fast enough to catch an interrupt within 200ms, slow enough to leave
-/// the game and the sidecar headroom (matches Python's `POLL_INTERVAL`).
+/// the game and the detector headroom (matches Python's `POLL_INTERVAL`).
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Dwell between the moves of a drag sweep, so a game registers it as a

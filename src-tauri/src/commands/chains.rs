@@ -18,12 +18,12 @@ use crate::paths;
 use crate::state::AppState;
 use crate::util::round1;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_chains(state: State<AppState>) -> Value {
     json!(state.chains.list())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_chain(
     state: State<AppState>,
     name: String,
@@ -42,12 +42,12 @@ pub fn add_chain(
     json!({ "ok": true, "chain": chain })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_chain(state: State<AppState>, chain_id: String) -> Value {
     json!({ "ok": state.chains.remove(&chain_id) })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn duplicate_chain(state: State<AppState>, chain_id: String) -> Value {
     match state.chains.duplicate(&chain_id) {
         Some(dup) => {
@@ -61,7 +61,7 @@ pub fn duplicate_chain(state: State<AppState>, chain_id: String) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chain(
     state: State<AppState>,
     chain_id: String,
@@ -76,12 +76,12 @@ pub fn update_chain(
     json!({ "ok": ok })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_chain(state: State<AppState>, chain_id: String) -> Value {
     crate::state::run_chain(&state.core, &state.chains, &chain_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn validate_chain(state: State<AppState>, chain_id: String) -> Value {
     let Some(chain) = state.chains.list().into_iter().find(|c| c.id == chain_id) else {
         return json!({ "ok": false, "error": "Chain not found" });
@@ -96,7 +96,7 @@ pub fn validate_chain(state: State<AppState>, chain_id: String) -> Value {
     json!({ "ok": true, "missing": missing, "total": chain.macro_names.len() })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_chain_duration(state: State<AppState>, chain_id: String) -> Value {
     let Some(chain) = state.chains.list().into_iter().find(|c| c.id == chain_id) else {
         return json!({ "ok": false, "error": "Chain not found" });
@@ -118,14 +118,14 @@ pub fn get_chain_duration(state: State<AppState>, chain_id: String) -> Value {
     json!({ "ok": true, "duration": round1(total_duration) })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_chain(state: State<AppState>) -> Value {
     state.chains.stop();
     state.emit("info", "Chain stop requested");
     json!({ "ok": true })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_running_chain(state: State<AppState>) -> Value {
     let progress = state.chains.get_progress();
     if !progress

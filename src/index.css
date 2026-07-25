@@ -1,0 +1,195 @@
+/* `source(none)` + an explicit whitelist, because Tailwind's default scan root
+   is the Vite root — which in debug builds is also the app's data root. A
+   scanned file is a file whose every write full-reloads the window, and the app
+   writes settings, stats, macros and snapshots there while it runs. */
+@import "tailwindcss" source(none);
+@import "tw-animate-css";
+@source "../index.html";
+@source "../indicator.html";
+@source "../src";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ---- Vendored type: Inter everywhere, Fira Code for the rare data chip ---- */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/inter-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/inter-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/fonts/inter-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./assets/fonts/inter-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Fira Code";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/fira-code-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Fira Code";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/fira-code-500.woff2") format("woff2");
+}
+
+/*
+  The three brand hues kept across a full redesign: parchment #faf8f5, ink #1a1816,
+  gold #c2a370. Light mode keeps parchment as ground; dark mode inverts the value
+  structure — warm ink becomes the ground, parchment the text, gold the lone accent.
+  Gold (--primary / --ring) is spent sparingly: the one action verb per surface,
+  focus, and the live/run state. Warm red (--destructive) is Stop + Delete only.
+*/
+:root {
+  --radius: 0.5rem;
+
+  --background: #faf8f5;
+  --foreground: #1a1816;
+  --card: #ffffff;
+  --card-foreground: #1a1816;
+  --popover: #ffffff;
+  --popover-foreground: #1a1816;
+  --primary: #c2a370;
+  --primary-foreground: #1a1512;
+  --secondary: #efeae2;
+  --secondary-foreground: #1a1816;
+  --muted: #f0ece5;
+  --muted-foreground: #6b6459;
+  --accent: #f0ece5;
+  --accent-foreground: #1a1816;
+  --destructive: #c15c46;
+  --destructive-foreground: #ffffff;
+  --border: rgba(26, 24, 22, 0.1);
+  --input: rgba(26, 24, 22, 0.14);
+  --ring: #c2a370;
+
+  --success: #3f9e6b;
+  --warning: #c79a3f;
+}
+
+.dark {
+  --background: #15120e;
+  --foreground: #faf8f5;
+  --card: #1b1712;
+  --card-foreground: #faf8f5;
+  --popover: #221d17;
+  --popover-foreground: #faf8f5;
+  --primary: #c2a370;
+  --primary-foreground: #1a1512;
+  --secondary: #2b241c;
+  --secondary-foreground: #faf8f5;
+  --muted: #221d17;
+  --muted-foreground: #a39a8e;
+  --accent: #2b241c;
+  --accent-foreground: #faf8f5;
+  --destructive: #cc6a52;
+  --destructive-foreground: #faf8f5;
+  --border: rgba(250, 248, 245, 0.1);
+  --input: rgba(250, 248, 245, 0.14);
+  --ring: #c2a370;
+
+  --success: #6fbf8f;
+  --warning: #d8b877;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Fira Code", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* A single barely-there warm radial for depth on the dark ground — no gradients
+     as decoration, no glassmorphism. Fixed so it doesn't scroll with content. */
+  .dark body {
+    background-image: radial-gradient(
+      120% 90% at 50% -10%,
+      rgba(194, 163, 112, 0.06) 0%,
+      transparent 55%
+    );
+    background-attachment: fixed;
+  }
+
+  /* Quiet, warm scrollbars that match the ground rather than the OS default. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--muted-foreground);
+  }
+}

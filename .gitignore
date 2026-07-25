@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime data. A debug build resolves its data root to this folder (see
+# src-tauri/src/paths.rs), so every setting saved, macro recorded, template
+# captured and snapshot taken during `tauri dev` lands here. It is one
+# developer's state, not source — `ensure_dirs()` recreates the folders on
+# first run.
+/config/
+/macros/
+/templates/
+/snapshots/

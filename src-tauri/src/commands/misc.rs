@@ -12,7 +12,7 @@ pub struct VersionInfo {
     pub version: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_version() -> VersionInfo {
     VersionInfo {
         version: VERSION.to_string(),
@@ -26,7 +26,7 @@ pub struct UpdateInfo {
     pub latest: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_update() -> UpdateInfo {
     UpdateInfo {
         update_available: false,

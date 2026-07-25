@@ -1,8 +1,8 @@
 //! AI step executor — the run loop and single-step execution behind the per-macro
 //! step editor. Mirrors `anime_macro/ai_macro.py::AIExecutor`.
 //!
-//! Detection is injected (in production the Rust side polls the vision sidecar for
-//! a fresh frame each call) and so is actuation (the input controller), so the
+//! Detection is injected (in production it grabs a fresh frame and runs the
+//! detector) and so is actuation (the input controller), so the
 //! orchestration that lives here — the loop, `find_click`'s stop-on-miss,
 //! `wait_for`'s poll/deadline, and the summary shape — is exercised by
 //! hardware-free tests through mock closures. Only enabled steps run; a failed
@@ -19,8 +19,8 @@ use serde_json::{json, Value};
 use crate::models::step::Step;
 use crate::util::py_float;
 
-/// One detection hit — the `(x, y, confidence)` the sidecar returns per match,
-/// all the executor's messages and result fields need (`Detection.{x,y,confidence}`).
+/// One detection hit — the `(x, y, confidence)` of a match, which is all the
+/// executor's messages and result fields need (`Detection.{x,y,confidence}`).
 #[derive(Debug, Clone)]
 pub struct Match {
     pub x: i64,
@@ -42,7 +42,7 @@ pub enum Action {
 }
 
 /// Poll a step's detection against a fresh frame → `(matches, message)`. Production
-/// calls the vision sidecar; tests supply a canned closure.
+/// calls `core::Vision`; tests supply a canned closure.
 pub type Detect = Box<dyn Fn(&Step) -> (Vec<Match>, String) + Send + Sync>;
 
 /// Perform one [`Action`]. Production drives the controller; tests record the call.

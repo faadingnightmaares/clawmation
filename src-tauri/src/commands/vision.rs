@@ -22,7 +22,7 @@ use crate::models::macro_def::Macro;
 use crate::paths;
 use crate::state::AppState;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vision_save(state: State<AppState>, triggers: Option<Vec<Value>>) -> Value {
     let parsed: Result<Vec<Guard>, _> = triggers
         .unwrap_or_default()
@@ -48,7 +48,7 @@ pub fn vision_save(state: State<AppState>, triggers: Option<Vec<Value>>) -> Valu
     json!({ "ok": true })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vision_load() -> Value {
     let path = paths::guards_dir().join("_vision.json");
     if !path.exists() {
@@ -78,7 +78,7 @@ fn parse_triggers(path: &Path) -> Result<Vec<Guard>, String> {
 
 /// Build the vision agent's four injected closures over [`Core`] and the shared
 /// event log — the Rust seat of the `on_event` / `macro_runner` that
-/// `Api.vision_start` defines inline. Detection is the sidecar grab, actuation
+/// `Api.vision_start` defines inline. Detection is a `core::Vision` grab, actuation
 /// the input controller, and the runner reuses the one shared player (Python
 /// spins up a fresh `MacroPlayer` per run — equivalent, as playback is otherwise
 /// idle while vision drives).
@@ -134,7 +134,7 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
     VisionAgent::new(detect, act, on_event, run_macro)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vision_start(state: State<AppState>) -> Value {
     // Hold the agent slot across the check and the store so two starts can't
     // race a second poll thread into existence (pywebview serialized these).
@@ -157,13 +157,11 @@ pub fn vision_start(state: State<AppState>) -> Value {
         return json!({ "ok": false, "error": "No enabled triggers" });
     }
 
-    // `self._get_capture()`: bring the sidecar up before the loop starts, else
-    // every grab returns empty and no trigger ever fires.
+    // `self._get_capture()`: open the capture before the loop starts, so the
+    // detector is pointed at the right screen when the first poll lands.
     let (w, h) = state.core.resolve_screen();
     let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    if let Err(e) = state.core.vision.ensure_spawned(w as i64, h as i64, &backend) {
-        return json!({ "ok": false, "error": e.to_string() });
-    }
+    state.core.vision.ensure_ready(w as i64, h as i64, &backend);
 
     let count = enabled.len();
     let agent = build_agent(&state.core, &state.vision_log);
@@ -172,7 +170,7 @@ pub fn vision_start(state: State<AppState>) -> Value {
     json!({ "ok": true, "triggers": count })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vision_stop(state: State<AppState>) -> Value {
     // Release the slot lock before stop() joins the poll thread: if that thread is
     // mid-run on an infinite macro the join blocks, and holding the lock would wedge
@@ -188,7 +186,7 @@ pub fn vision_stop(state: State<AppState>) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vision_status(state: State<AppState>) -> Value {
     let (running, fired) = match state.vision_agent.lock().unwrap().as_ref() {
         Some(agent) => (agent.is_running(), agent.fired_count()),

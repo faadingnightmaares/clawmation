@@ -73,6 +73,34 @@ pub struct Frame {
     pub height: u32,
 }
 
+impl Frame {
+    /// A tight sub-frame of `self`, clamped to its bounds.
+    ///
+    /// `None` when the rectangle is degenerate or lands entirely outside — the
+    /// caller then has nothing to search, which is not an error. Lets one
+    /// full-screen grab serve several region-scoped consumers per cycle instead
+    /// of re-grabbing per region.
+    pub fn crop(&self, x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
+        let (fw, fh) = (self.width as i32, self.height as i32);
+        let x0 = x.clamp(0, fw);
+        let y0 = y.clamp(0, fh);
+        let x1 = (x + w).clamp(0, fw);
+        let y1 = (y + h).clamp(0, fh);
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        if cw <= 0 || ch <= 0 {
+            return None;
+        }
+        let src_stride = self.width as usize * 3;
+        let dst_stride = cw as usize * 3;
+        let mut bgr = Vec::with_capacity(dst_stride * ch as usize);
+        for row in 0..ch {
+            let start = (y0 + row) as usize * src_stride + x0 as usize * 3;
+            bgr.extend_from_slice(&self.bgr[start..start + dst_stride]);
+        }
+        Some(Frame { bgr, width: cw as u32, height: ch as u32 })
+    }
+}
+
 /// Capture region as `(x1, y1, x2, y2)` pixels, matching Python's `region`
 /// tuple. `None` = the whole primary screen.
 type Region = Option<(i32, i32, i32, i32)>;

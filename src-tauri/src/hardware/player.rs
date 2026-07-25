@@ -10,10 +10,10 @@
 //! MIGRATION-NOTES "MacroPlayer"): `_densify_moves` (no caller) and the
 //! `on_event` playback callback (never passed at any of the four `.play()` call
 //! sites). Vision `CHECKPOINT` events run when `play()` is handed a
-//! `CheckpointDetect`: the `play_macro` path wires one over the sidecar, while the
-//! vision-agent runner passes `None`, mirroring Python's detector-vs-bare
-//! `MacroPlayer` split. Detection lives in the sidecar; this file owns only the
-//! poll/timeout/action orchestration.
+//! `CheckpointDetect`: the `play_macro` path wires one over `core::Vision`, while
+//! the vision-agent runner passes `None`, mirroring Python's detector-vs-bare
+//! `MacroPlayer` split. Detection lives behind that closure; this file owns only
+//! the poll/timeout/action orchestration.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -30,7 +30,7 @@ use crate::models::macro_def::{InputEventType, Macro, MacroEvent};
 
 /// A checkpoint detector: one poll returns the current matches for a checkpoint
 /// config. Boxed and `Send + Sync` so the play thread can own it; `play_macro`
-/// builds one over the vision sidecar, the vision-agent runner passes `None`.
+/// builds one over `core::Vision`, the vision-agent runner passes `None`.
 pub type CheckpointDetect = Box<dyn Fn(&Value) -> Vec<Detection> + Send + Sync>;
 
 /// Whether repetition `iteration` (1-based) should run, given the loop settings.
@@ -282,7 +282,7 @@ fn play_loop(
 
 /// Execute one vision checkpoint — the orchestration half of Python's
 /// `MacroPlayer._run_checkpoint`. Detection (frame grab, region collapse, method
-/// route) lives in the sidecar behind `detect`; this drives the poll/timeout loop
+/// route) lives behind the injected `detect`; this drives the poll/timeout loop
 /// and the resulting click/drag/key. The Python player logs checkpoint state
 /// (skips, timeouts, hold) only to stderr, never the UI, so those lines are
 /// dropped here — a timed-out checkpoint just returns.

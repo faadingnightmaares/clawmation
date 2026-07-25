@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 
 // @ts-expect-error process is a nodejs global
@@ -8,7 +9,13 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -28,7 +35,19 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      //
+      // …and the app's own data directories. In debug builds `paths.rs` resolves
+      // the data root to this folder, so every settings save, stats bump, macro
+      // write and snapshot lands inside the Vite root. Watching them makes the
+      // running app reload itself mid-recording; they are runtime state, never
+      // sources, so they stay out of the watcher entirely.
+      ignored: [
+        "**/src-tauri/**",
+        "**/config/**",
+        "**/macros/**",
+        "**/snapshots/**",
+        "**/templates/**",
+      ],
     },
   },
 

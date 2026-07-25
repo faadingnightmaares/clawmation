@@ -1,8 +1,8 @@
 //! Data directory layout, mirroring `anime_macro/config.py`.
 //!
-//! Release builds keep data next to the executable (portable app, exactly like
-//! the PyInstaller build). Debug builds resolve to the project root so
-//! `tauri dev` finds the working tree's `config/`, `macros/`, etc.
+//! Release builds keep data next to the executable, so the app stays portable:
+//! copy the folder and the macros come with it. Debug builds resolve to the
+//! project root so `tauri dev` finds the working tree's `config/`, `macros/`, etc.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

@@ -9,13 +9,15 @@
 use std::path::Path;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, State, Window};
 
+use crate::commands::window::with_window_hidden;
+use crate::hardware::picker;
 use crate::models::guard::{Guard, GuardFile};
 use crate::paths;
 use crate::state::AppState;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn guard_list(macro_name: String) -> Value {
     let stem = macro_name.strip_suffix(".json").unwrap_or(&macro_name);
     let path = paths::guards_dir().join(format!("{stem}.json"));
@@ -31,7 +33,7 @@ pub fn guard_list(macro_name: String) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_all_guard_counts() -> Value {
     let mut counts = serde_json::Map::new();
     // A missing guards dir lists as empty, matching `if not GUARDS_DIR.exists()`.
@@ -72,7 +74,7 @@ pub fn count_all_guards() -> i64 {
     total
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn guard_save(state: State<AppState>, macro_name: String, guards: Option<Vec<Value>>) -> Value {
     let parsed: Result<Vec<Guard>, _> = guards
         .unwrap_or_default()
@@ -100,83 +102,58 @@ pub fn guard_save(state: State<AppState>, macro_name: String, guards: Option<Vec
 /// Dry-run a guard against a fresh frame — the guard editor's Test button, shared
 /// by per-macro guards and vision triggers. The incoming dict is parsed through
 /// [`Guard`] (the `Guard.from_dict` analogue, as `guard_save` does), then handed to
-/// the vision sidecar, which grabs a frame, runs the verbatim `detect_guard`, and
-/// returns the match summary plus a preview JPEG. The sidecar's result dict is
-/// returned verbatim so the editor renders exactly what the desktop app did. Port
-/// of `Api.guard_test`.
-#[tauri::command]
-pub fn guard_test(state: State<AppState>, guard: Value) -> Value {
+/// the vision stack, which grabs a frame, runs the same `detect_guard` the poll
+/// loop runs, and returns the match summary plus an annotated preview. Port of
+/// `Api.guard_test`.
+#[tauri::command(async)]
+pub fn guard_test(state: State<AppState>, window: Window, guard: Value) -> Value {
     let g: Guard = match serde_json::from_value(guard) {
         Ok(g) => g,
         Err(e) => return json!({ "ok": false, "error": format!("Bad guard: {e}") }),
     };
     let (w, h) = state.core.resolve_screen();
     let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    match state.core.vision.guard_test(w as i64, h as i64, &backend, &g) {
-        Ok(v) => v,
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
+    // The editor is on top of whatever the guard watches for; test against the
+    // screen the guard will actually see at run time.
+    with_window_hidden(&window, || state.core.vision.guard_test(w as i64, h as i64, &backend, &g))
 }
 
-/// The four interactive pickers the guard/trigger editor opens, each a 1:1
-/// replacement for the desktop `Api.*` method of the same name. The overlay runs
-/// in the vision sidecar (brought up on first use exactly as `guard_test`); this
-/// side just resolves the screen + capture backend and, for the template pickers,
-/// hands over the Rust-owned save directory. Every one returns the sidecar's
-/// result dict verbatim so the editor renders exactly what the desktop app did; a
-/// transport failure collapses to `{ok:false, error}`, the shape the editor's
-/// catch already handles (and, for `add_template_image`, filters "cancelled" from).
-#[tauri::command]
-pub fn guard_pick_color(state: State<AppState>) -> Value {
-    let (w, h) = state.core.resolve_screen();
-    let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    match state.core.vision.guard_pick_color(w as i64, h as i64, &backend) {
-        Ok(v) => v,
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
+/// The interactive pickers the guard/trigger editor opens, each a 1:1 replacement
+/// for the desktop `Api.*` method of the same name, all drawing their own overlay
+/// in process ([`hardware::picker`](crate::hardware::picker)).
+///
+/// Every one returns the dict shape the editor already renders, so the frontend
+/// contract is unchanged: `{ok:false, error}` on failure, with "cancelled" the
+/// one error the editor filters out instead of showing.
+///
+/// The three that pick off the screen grab it *before* raising their overlay, so
+/// each first sends the app away — otherwise the frozen backdrop the user picks
+/// from is a picture of Clawmation sitting on top of the game.
+#[tauri::command(async)]
+pub fn guard_pick_color(window: Window) -> Value {
+    with_window_hidden(&window, picker::sample_color)
 }
 
-#[tauri::command]
-pub fn guard_pick_region(state: State<AppState>) -> Value {
-    let (w, h) = state.core.resolve_screen();
-    let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    match state.core.vision.guard_pick_region(w as i64, h as i64, &backend) {
-        Ok(v) => v,
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
+#[tauri::command(async)]
+pub fn guard_pick_region(window: Window) -> Value {
+    with_window_hidden(&window, picker::pick_region)
 }
 
-#[tauri::command]
-pub fn capture_template(state: State<AppState>) -> Value {
-    let (w, h) = state.core.resolve_screen();
-    let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    let templates_dir = paths::templates_dir().to_string_lossy().into_owned();
-    match state.core.vision.capture_template(w as i64, h as i64, &backend, &templates_dir) {
-        Ok(v) => v,
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
+#[tauri::command(async)]
+pub fn capture_template(window: Window) -> Value {
+    with_window_hidden(&window, || picker::capture_template(&paths::templates_dir()))
 }
 
-#[tauri::command]
-pub fn add_template_image(state: State<AppState>) -> Value {
-    let (w, h) = state.core.resolve_screen();
-    let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    let templates_dir = paths::templates_dir().to_string_lossy().into_owned();
-    match state.core.vision.add_template_image(w as i64, h as i64, &backend, &templates_dir) {
-        Ok(v) => v,
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
+/// The one picker that opens a file dialog instead of the screen, so there is no
+/// overlay and no window to hide.
+#[tauri::command(async)]
+pub fn add_template_image(app: AppHandle, state: State<AppState>) -> Value {
+    state.core.vision.add_template_image(&app, &paths::templates_dir())
 }
 
-#[tauri::command]
-pub fn surgical_capture(state: State<AppState>) -> Value {
-    let (w, h) = state.core.resolve_screen();
-    let backend = state.core.config.lock().unwrap().capture_backend.clone();
-    let templates_dir = paths::templates_dir().to_string_lossy().into_owned();
-    match state.core.vision.surgical_capture(w as i64, h as i64, &backend, &templates_dir) {
-        Ok(v) => v,
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
+#[tauri::command(async)]
+pub fn surgical_capture(window: Window) -> Value {
+    with_window_hidden(&window, || picker::surgical_capture(&paths::templates_dir()))
 }
 
 /// Read a JSON file into a `Value`, collapsing IO and parse failures into one

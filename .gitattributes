@@ -1,0 +1,14 @@
+# Normalise to LF in the repository. Windows checkouts still get CRLF in the
+# working tree via core.autocrlf, so this only settles what is stored.
+* text=auto eol=lf
+
+# Binary assets git must never touch.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.webp binary
+
+# Generated lockfiles — collapse them in diffs and reviews.
+package-lock.json linguist-generated=true -diff
+src-tauri/Cargo.lock linguist-generated=true -diff
