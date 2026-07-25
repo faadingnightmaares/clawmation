@@ -55,29 +55,38 @@ hand or work out why it didn't.
    running app, so a stale `tauri.conf.json` means the update is offered forever
    or never.
 
-2. Build with the private key in the environment. Without it the bundler still
-   produces installers, but no `.sig` files, and an unsigned update is one the
-   app will not install:
+2. Build with **both** signing variables in the environment. Without the key the
+   bundler still produces installers but no `.sig` files, and an unsigned update
+   is one the app will not install. Without the password variable the signer
+   prompts for one on stdin — which a scripted or backgrounded build never
+   answers, so it bundles the installers and then hangs there silently. Set it
+   to the empty string when the key has no password:
 
    ```bash
-   TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/clawmation.key) npm run tauri build
+   TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/clawmation.key) \
+   TAURI_SIGNING_PRIVATE_KEY_PASSWORD= \
+   npm run tauri build
    ```
 
    In PowerShell:
 
    ```powershell
-   $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content ~/.tauri/clawmation.key -Raw; npm run tauri build
+   $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content ~/.tauri/clawmation.key -Raw).Trim(); $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""; npm run tauri build
    ```
 
-   If the key has a password, add `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+   A signed build ends with a second summary — "Finished 2 updater signatures
+   at:" — after the bundle list. If you only see the bundle list, nothing was
+   signed.
 
 3. Collect the artifacts from `src-tauri/target/release/bundle/`:
 
-   - `nsis/clawmation_<version>_x64-setup.exe` — the installer people download.
-   - `nsis/clawmation_<version>_x64-setup.nsis.zip` — what the updater downloads.
-   - `nsis/clawmation_<version>_x64-setup.nsis.zip.sig` — its signature.
+   - `nsis/clawmation_<version>_x64-setup.exe` — the installer people download,
+     and the same file the updater downloads.
+   - `nsis/clawmation_<version>_x64-setup.exe.sig` — its signature.
 
-   Only NSIS carries updates on Windows; the MSI is a plain installer.
+   Tauri v2 signs the installer itself; there is no `.nsis.zip` unless
+   `createUpdaterArtifacts` is set to `"v1Compatible"`. The MSI is signed too,
+   but ignore it: NSIS is the only thing the updater installs on Windows.
 
 4. Write `latest.json` next to them:
 
@@ -89,7 +98,7 @@ hand or work out why it didn't.
      "platforms": {
        "windows-x86_64": {
          "signature": "<the entire contents of the .sig file>",
-         "url": "https://github.com/<owner>/clawmation/releases/download/v1.0.1/clawmation_1.0.1_x64-setup.nsis.zip"
+         "url": "https://github.com/<owner>/clawmation/releases/download/v1.0.1/clawmation_1.0.1_x64-setup.exe"
        }
      }
    }
@@ -99,7 +108,7 @@ hand or work out why it didn't.
    prefix — it is compared as semver against the running build.
 
 5. Publish a GitHub release tagged `v<version>` with `latest.json`, the
-   `.nsis.zip`, and the `.sig` attached.
+   `-setup.exe`, and its `.sig` attached.
 
 ## The endpoint
 
