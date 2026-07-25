@@ -11,17 +11,19 @@
         background: transparent;
         overflow: hidden;
       }
-      /* 72×66 sprite shown at 2× with hard pixel edges (no smoothing). */
+      /* The 112×72 sprite in src/indicator/cat.ts, shown at 2× with hard pixel
+         edges (no smoothing). Keep in step with WIDTH/HEIGHT in shell/indicator.rs
+         — the script sizes the canvas itself, so only the display size lives here. */
       #cat {
-        width: 144px;
-        height: 132px;
+        width: 224px;
+        height: 144px;
         image-rendering: pixelated;
         display: block;
       }
     </style>
   </head>
   <body>
-    <canvas id="cat" width="72" height="66"></canvas>
+    <canvas id="cat"></canvas>
     <script type="module" src="/src/indicator/indicator.ts"></script>
   </body>
 </html>

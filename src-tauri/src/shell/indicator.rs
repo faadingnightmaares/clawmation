@@ -15,11 +15,12 @@ use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilde
 /// Window label; the `indicator` capability and the render page key off it.
 pub const LABEL: &str = "indicator";
 
-/// Overlay size: the 72×66 pixel-cat canvas at 2× so the counting eyes stay
-/// legible in the corner. (`NativeIndicator` used the literal 72×66; the art is
-/// the same, just shown larger — see the page's `image-rendering: pixelated`.)
-const WIDTH: f64 = 144.0;
-const HEIGHT: f64 = 132.0;
+/// Overlay size: the 112×72 cat-tail canvas (`src/indicator/cat.ts`) at 2× so the
+/// counting eyes stay legible in the corner — see the page's `image-rendering:
+/// pixelated`. Wider and shorter than the head-only cat this replaced, because
+/// the tail now drops in from off-canvas to the left of the face.
+const WIDTH: f64 = 224.0;
+const HEIGHT: f64 = 144.0;
 /// Gap from the top-right screen corner — `NativeIndicator.MARGIN`.
 const MARGIN: f64 = 16.0;
 
