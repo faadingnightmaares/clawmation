@@ -8,7 +8,6 @@ import {
   Loader2,
   RefreshCw,
   SlidersHorizontal,
-  Sparkles,
 } from "lucide-react";
 
 import {
@@ -51,7 +50,7 @@ import { Guide } from "./Guide";
 import type { ViewProps } from "./types";
 
 type HotkeyKey = "hotkey_record" | "hotkey_play" | "hotkey_stop";
-type SwitchKey = "notify_on_complete" | "notify_on_schedule" | "humanize_clicks";
+type SwitchKey = "notify_on_complete" | "notify_on_schedule";
 
 const DEFAULT_CONFIG: ConfigDto = {
   capture_backend: "",
@@ -213,7 +212,7 @@ export function Settings(props: ViewProps) {
         <TabsContent value="preferences" className="pt-4">
           {loading ? (
             <div className="space-y-6">
-              {[0, 1, 2, 3, 4].map((i) => (
+              {[0, 1, 2, 3].map((i) => (
                 <Card key={i} className="gap-0 p-6">
                   <div className="flex items-start gap-3">
                     <Skeleton className="size-9 rounded-lg" />
@@ -266,16 +265,6 @@ export function Settings(props: ViewProps) {
                     onChange={(v) => void toggle("notify_on_schedule", v)}
                   />
                 </div>
-              </Section>
-
-              <Section icon={Sparkles} title="Feel" hint="Little touches that make automation feel less robotic.">
-                <SwitchRow
-                  id="humanize_clicks"
-                  title="Move the mouse the way a person would"
-                  desc="Adds tiny natural motion and timing so clicks look human"
-                  checked={config.humanize_clicks}
-                  onChange={(v) => void toggle("humanize_clicks", v)}
-                />
               </Section>
 
               <Section icon={FolderOpen} title="Your files" hint="Everything Clawmation saves stays right here on your PC.">
