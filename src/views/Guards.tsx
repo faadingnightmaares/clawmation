@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Loader2, Plus, Shield, ShieldCheck } from "lucide-react";
 
 import { getAllGuardCounts, listMacros, type MacroListItem } from "@/api";
 import { useStaggerIn } from "@/lib/anime";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { GuardsSheet } from "@/components/editors/GuardsSheet";
+import { GuardsEditor } from "@/components/editors/GuardsSheet";
 import type { ViewProps } from "./types";
 
 /** The protection half of Autopilot: one row per macro, unprotected ones last.
@@ -70,47 +70,59 @@ export function Guards({ navigate }: ViewProps) {
           {rows.map((m) => {
             const n = counts[m.name] ?? 0;
             const guarded = n > 0;
+            // The row expands onto its guards right beneath it — no drawer
+            // sliding in over the page. Clicking the row again folds it back up.
+            const open = managing === m.name;
             return (
-              <div key={m.name} className="group relative">
-                <button
-                  type="button"
-                  onClick={() => setManaging(m.name)}
-                  className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                >
-                  <span className="sr-only">
-                    {guarded ? "Manage guards for" : "Add a guard to"} {m.name}
-                  </span>
-                </button>
-
-                <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
-                  <div
-                    className={cn(
-                      "flex size-9 shrink-0 items-center justify-center rounded-lg border",
-                      guarded
-                        ? "border-primary/30 bg-primary/10 text-primary"
-                        : "border-border bg-secondary/50 text-muted-foreground",
-                    )}
+              <Fragment key={m.name}>
+                <div className={cn("group relative transition-colors", open && "bg-muted/40")}>
+                  <button
+                    type="button"
+                    onClick={() => setManaging(open ? null : m.name)}
+                    aria-expanded={open}
+                    className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   >
-                    {guarded ? <ShieldCheck className="size-4" /> : <Shield className="size-4" />}
-                  </div>
+                    <span className="sr-only">
+                      {open ? "Close guards for" : guarded ? "Manage guards for" : "Add a guard to"} {m.name}
+                    </span>
+                  </button>
 
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-foreground">{m.name}</p>
-                    <p className={cn("truncate text-xs", guarded ? "text-primary" : "text-muted-foreground")}>
-                      {guarded ? `${n} guard${n === 1 ? "" : "s"} watching` : "Not protected yet"}
-                    </p>
-                  </div>
+                  <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
+                    <div
+                      className={cn(
+                        "flex size-9 shrink-0 items-center justify-center rounded-lg border",
+                        guarded
+                          ? "border-primary/30 bg-primary/10 text-primary"
+                          : "border-border bg-secondary/50 text-muted-foreground",
+                      )}
+                    >
+                      {guarded ? <ShieldCheck className="size-4" /> : <Shield className="size-4" />}
+                    </div>
 
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="pointer-events-auto shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                    onClick={() => setManaging(m.name)}
-                  >
-                    {guarded ? "Manage" : "Add a guard"}
-                  </Button>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-foreground">{m.name}</p>
+                      <p className={cn("truncate text-xs", guarded ? "text-primary" : "text-muted-foreground")}>
+                        {guarded ? `${n} guard${n === 1 ? "" : "s"} watching` : "Not protected yet"}
+                      </p>
+                    </div>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="pointer-events-auto shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                      onClick={() => setManaging(open ? null : m.name)}
+                    >
+                      {guarded ? "Manage" : "Add a guard"}
+                    </Button>
+                  </div>
                 </div>
-              </div>
+
+                {open && (
+                  <div className="bg-muted/40">
+                    <GuardsEditor macroName={m.name} onChanged={() => void load()} />
+                  </div>
+                )}
+              </Fragment>
             );
           })}
         </div>
@@ -130,13 +142,6 @@ export function Guards({ navigate }: ViewProps) {
           </Button>
         </div>
       )}
-
-      <GuardsSheet
-        macroName={managing ?? ""}
-        open={managing !== null}
-        onOpenChange={(o) => !o && setManaging(null)}
-        onChanged={() => void load()}
-      />
     </section>
   );
 }
