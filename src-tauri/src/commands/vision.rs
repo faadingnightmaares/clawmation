@@ -92,7 +92,10 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
         Box::new(move |action: VisionAction| match action {
             VisionAction::KeyPress(key) => core.controller.key_press(&key),
             VisionAction::Click(x, y) => core.controller.click(x as i32, y as i32, "left"),
-            VisionAction::Nudge => core.controller.nudge(),
+            VisionAction::Nudge(x, y) => {
+                core.controller.move_to(x as i32, y as i32);
+                core.controller.nudge();
+            }
             VisionAction::MoveTo(x, y) => core.controller.move_to(x as i32, y as i32),
             VisionAction::MouseDown(button) => core.controller.mouse_down(None, &button),
             VisionAction::MouseUp(button) => core.controller.mouse_up(None, &button),
