@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { animate } from "animejs";
 import {
   CalendarClock,
@@ -69,13 +69,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import type { ViewProps } from "./types";
 
 // Mid-run this heartbeat drives a progress bar, so it stays quick. Idle it only
@@ -391,6 +384,149 @@ export function Chains(_props: ViewProps) {
     ? macros.map((m) => m.name).filter((n) => !editor.macro_names.includes(n))
     : [];
 
+  // The chain editor, rendered in place — under the row being edited, or as its
+  // own card while building a new one. Same fields the drawer held; the drawer
+  // itself is gone, so a chain is edited where it lives, the way a macro is.
+  const editorPanel = editor && (
+    <>
+      <div className="space-y-6 px-4 py-5">
+        <div className="space-y-1.5">
+          <Label htmlFor="chain-name">Name</Label>
+          <Input
+            id="chain-name"
+            value={editor.name}
+            onChange={(e) => patchEditor({ name: e.target.value })}
+            placeholder="Morning routine"
+            autoComplete="off"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="chain-delay">Pause between macros</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="chain-delay"
+                value={editor.delay_between}
+                onChange={(e) => patchEditor({ delay_between: parseFloat(e.target.value) || 0 })}
+                inputMode="decimal"
+                className="w-20"
+              />
+              <span className="text-xs text-muted-foreground">seconds</span>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="chain-repeat">Repeat</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="chain-repeat"
+                value={editor.repeat}
+                onChange={(e) => patchEditor({ repeat: parseInt(e.target.value) || 0 })}
+                inputMode="numeric"
+                className="w-20"
+              />
+              <span className="text-xs text-muted-foreground">times · 0 = forever</span>
+            </div>
+          </div>
+        </div>
+
+        <section className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-foreground">Macros in order</h3>
+            {editorTotalDur && (
+              <span className="text-xs text-muted-foreground">about {editorTotalDur} total</span>
+            )}
+          </div>
+
+          {editor.macro_names.length ? (
+            <div className="space-y-2">
+              {editor.macro_names.map((name, i) => (
+                <div
+                  key={`${name}-${i}`}
+                  className="flex items-center gap-2 rounded-lg border border-border bg-card p-2.5"
+                >
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-secondary text-xs tabular-nums text-muted-foreground">
+                    {i + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-foreground">{name}</span>
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {fmtDur(macroDuration(name) || 0)}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="px-1.5 text-muted-foreground"
+                    disabled={i === 0}
+                    onClick={() => moveMacroInEditor(i, -1)}
+                    title="Move up"
+                  >
+                    <ChevronUp className="size-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="px-1.5 text-muted-foreground"
+                    disabled={i === editor.macro_names.length - 1}
+                    onClick={() => moveMacroInEditor(i, 1)}
+                    title="Move down"
+                  >
+                    <ChevronDown className="size-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="px-1.5 text-muted-foreground hover:text-destructive"
+                    onClick={() => removeMacroFromEditor(i)}
+                    title="Remove"
+                  >
+                    <X className="size-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
+              No macros yet. Add one below to start the sequence.
+            </p>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <Select
+              value={editor.selectedMacro}
+              onValueChange={(v) => patchEditor({ selectedMacro: v })}
+              disabled={availableMacros.length === 0}
+            >
+              <SelectTrigger className="flex-1">
+                <SelectValue placeholder={availableMacros.length ? "Add a macro…" : "No more macros to add"} />
+              </SelectTrigger>
+              <SelectContent>
+                {availableMacros.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="secondary"
+              onClick={() => addMacroToEditor(editor.selectedMacro)}
+              disabled={!editor.selectedMacro}
+            >
+              <Plus className="size-4" /> Add
+            </Button>
+          </div>
+        </section>
+      </div>
+
+      <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+        <Button variant="outline" onClick={() => setEditor(null)}>
+          Cancel
+        </Button>
+        <Button onClick={saveEditor}>Save chain</Button>
+      </div>
+    </>
+  );
+
   return (
     <section className="flex flex-col gap-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -444,6 +580,11 @@ export function Chains(_props: ViewProps) {
         </div>
       )}
 
+      {/* A new chain, built right on the page instead of in a drawer. */}
+      {editor && editor.id === null && (
+        <div className="overflow-hidden rounded-xl border border-primary/30 bg-card">{editorPanel}</div>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Loading…
@@ -454,84 +595,94 @@ export function Chains(_props: ViewProps) {
             const id = String(c.id);
             const name = c.name ?? "Untitled chain";
             const live = chainRunning && String(runningChain?.id ?? "") === id;
+            // The row expands onto its editor right beneath it, the way a macro
+            // row does — no drawer sliding in over the page. Clicking the row
+            // again (or Cancel) folds it back up.
+            const open = !!editor && editor.id !== null && String(editor.id) === id;
             return (
-              <div key={id} className={cn("group relative transition-colors", live && "bg-primary/5")}>
-                {/* The row opens the chain, where the order and timings live. */}
-                <button
-                  type="button"
-                  onClick={() => openEditChain(c)}
-                  className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                >
-                  <span className="sr-only">Edit {name}</span>
-                </button>
+              <Fragment key={id}>
+                <div className={cn("group relative transition-colors", live && "bg-primary/5", open && "bg-muted/40")}>
+                  {/* The row opens the chain, where the order and timings live. */}
+                  <button
+                    type="button"
+                    onClick={() => (open ? setEditor(null) : openEditChain(c))}
+                    aria-expanded={open}
+                    className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  >
+                    <span className="sr-only">{open ? "Close" : "Edit"} {name}</span>
+                  </button>
 
-                <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-secondary/50 text-muted-foreground">
-                    <Workflow className="size-4" />
-                  </div>
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium text-foreground">{name}</span>
-                      {c.missingMacros.length > 0 && (
-                        <Badge
-                          variant="outline"
-                          className="shrink-0 gap-1 border-destructive/40 font-normal text-destructive"
-                          title={`Missing: ${c.missingMacros.join(", ")}. Open the chain to fix it.`}
-                        >
-                          <TriangleAlert className="size-3" />
-                          {c.missingMacros.length} missing
-                        </Badge>
-                      )}
+                  <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-secondary/50 text-muted-foreground">
+                      <Workflow className="size-4" />
                     </div>
-                    <p className="truncate text-xs text-muted-foreground">{chainSummary(c)}</p>
-                  </div>
 
-                  <div className="pointer-events-auto flex shrink-0 items-center gap-1">
-                    {live ? (
-                      <Button variant="outline" size="sm" onClick={handleStop}>
-                        <Square className="size-4 fill-current" /> Stop
-                      </Button>
-                    ) : (
-                      <Button size="sm" onClick={() => handleRun(id, name)}>
-                        <Play className="size-4" /> Run
-                      </Button>
-                    )}
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="sm" title={`More for ${name}`}>
-                          <MoreHorizontal className="size-4" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium text-foreground">{name}</span>
+                        {c.missingMacros.length > 0 && (
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 gap-1 border-destructive/40 font-normal text-destructive"
+                            title={`Missing: ${c.missingMacros.join(", ")}. Open the chain to fix it.`}
+                          >
+                            <TriangleAlert className="size-3" />
+                            {c.missingMacros.length} missing
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">{chainSummary(c)}</p>
+                    </div>
+
+                    <div className="pointer-events-auto flex shrink-0 items-center gap-1">
+                      {live ? (
+                        <Button variant="outline" size="sm" onClick={handleStop}>
+                          <Square className="size-4 fill-current" /> Stop
                         </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-48">
-                        <DropdownMenuItem onSelect={() => openSchedule(id)}>
-                          <CalendarClock className="size-4" /> Schedule it
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => openEditChain(c)}>
-                          <Pencil className="size-4" /> Edit
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void handleDuplicate(id)}>
-                          <Copy className="size-4" /> Duplicate
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void handleExport(id)}>
-                          <Download className="size-4" /> Export to a file
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onSelect={() => void handleDelete(id)}
-                          className="text-destructive focus:text-destructive"
-                        >
-                          <Trash2 className="size-4" /> Delete
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                      ) : (
+                        <Button size="sm" onClick={() => handleRun(id, name)}>
+                          <Play className="size-4" /> Run
+                        </Button>
+                      )}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm" title={`More for ${name}`}>
+                            <MoreHorizontal className="size-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48">
+                          <DropdownMenuItem onSelect={() => openSchedule(id)}>
+                            <CalendarClock className="size-4" /> Schedule it
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => openEditChain(c)}>
+                            <Pencil className="size-4" /> Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => void handleDuplicate(id)}>
+                            <Copy className="size-4" /> Duplicate
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => void handleExport(id)}>
+                            <Download className="size-4" /> Export to a file
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onSelect={() => void handleDelete(id)}
+                            className="text-destructive focus:text-destructive"
+                          >
+                            <Trash2 className="size-4" /> Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
                   </div>
                 </div>
-              </div>
+
+                {/* The editor, in place under the row. */}
+                {open && <div className="bg-muted/40">{editorPanel}</div>}
+              </Fragment>
             );
           })}
         </div>
-      ) : (
+      ) : editor && editor.id === null ? null : (
         <div className="flex flex-col items-center gap-4 rounded-xl border border-border bg-card px-6 py-12 text-center">
           <div className="flex size-12 items-center justify-center rounded-full bg-secondary text-muted-foreground">
             <Workflow className="size-6" />
@@ -553,156 +704,6 @@ export function Chains(_props: ViewProps) {
           </div>
         </div>
       )}
-
-      {/* Editor */}
-      <Sheet open={!!editor} onOpenChange={(o) => !o && setEditor(null)}>
-        <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-lg">
-          {editor && (
-            <>
-              <SheetHeader className="px-6 pb-2 pr-12 pt-6">
-                <SheetTitle>{editor.id ? "Edit chain" : "New chain"}</SheetTitle>
-                <SheetDescription>Run several macros back to back, in the order you set.</SheetDescription>
-              </SheetHeader>
-
-              <div className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
-                <div className="space-y-1.5">
-                  <Label htmlFor="chain-name">Name</Label>
-                  <Input
-                    id="chain-name"
-                    value={editor.name}
-                    onChange={(e) => patchEditor({ name: e.target.value })}
-                    placeholder="Morning routine"
-                    autoComplete="off"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="chain-delay">Pause between macros</Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        id="chain-delay"
-                        value={editor.delay_between}
-                        onChange={(e) => patchEditor({ delay_between: parseFloat(e.target.value) || 0 })}
-                        inputMode="decimal"
-                        className="w-20"
-                      />
-                      <span className="text-xs text-muted-foreground">seconds</span>
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="chain-repeat">Repeat</Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        id="chain-repeat"
-                        value={editor.repeat}
-                        onChange={(e) => patchEditor({ repeat: parseInt(e.target.value) || 0 })}
-                        inputMode="numeric"
-                        className="w-20"
-                      />
-                      <span className="text-xs text-muted-foreground">times · 0 = forever</span>
-                    </div>
-                  </div>
-                </div>
-
-                <section className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-foreground">Macros in order</h3>
-                    {editorTotalDur && (
-                      <span className="text-xs text-muted-foreground">about {editorTotalDur} total</span>
-                    )}
-                  </div>
-
-                  {editor.macro_names.length ? (
-                    <div className="space-y-2">
-                      {editor.macro_names.map((name, i) => (
-                        <div
-                          key={`${name}-${i}`}
-                          className="flex items-center gap-2 rounded-lg border border-border bg-card p-2.5"
-                        >
-                          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-secondary text-xs tabular-nums text-muted-foreground">
-                            {i + 1}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate text-sm text-foreground">{name}</span>
-                          <span className="text-xs tabular-nums text-muted-foreground">
-                            {fmtDur(macroDuration(name) || 0)}
-                          </span>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="px-1.5 text-muted-foreground"
-                            disabled={i === 0}
-                            onClick={() => moveMacroInEditor(i, -1)}
-                            title="Move up"
-                          >
-                            <ChevronUp className="size-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="px-1.5 text-muted-foreground"
-                            disabled={i === editor.macro_names.length - 1}
-                            onClick={() => moveMacroInEditor(i, 1)}
-                            title="Move down"
-                          >
-                            <ChevronDown className="size-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="px-1.5 text-muted-foreground hover:text-destructive"
-                            onClick={() => removeMacroFromEditor(i)}
-                            title="Remove"
-                          >
-                            <X className="size-4" />
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
-                      No macros yet. Add one below to start the sequence.
-                    </p>
-                  )}
-
-                  <div className="flex gap-2 pt-1">
-                    <Select
-                      value={editor.selectedMacro}
-                      onValueChange={(v) => patchEditor({ selectedMacro: v })}
-                      disabled={availableMacros.length === 0}
-                    >
-                      <SelectTrigger className="flex-1">
-                        <SelectValue placeholder={availableMacros.length ? "Add a macro…" : "No more macros to add"} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableMacros.map((name) => (
-                          <SelectItem key={name} value={name}>
-                            {name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      variant="secondary"
-                      onClick={() => addMacroToEditor(editor.selectedMacro)}
-                      disabled={!editor.selectedMacro}
-                    >
-                      <Plus className="size-4" /> Add
-                    </Button>
-                  </div>
-                </section>
-              </div>
-
-              <div className="flex justify-end gap-2 border-t border-border px-6 py-4">
-                <Button variant="outline" onClick={() => setEditor(null)}>
-                  Cancel
-                </Button>
-                <Button onClick={saveEditor}>Save chain</Button>
-              </div>
-            </>
-          )}
-        </SheetContent>
-      </Sheet>
 
       {/* Schedule */}
       <Dialog open={scheduleFor !== null} onOpenChange={(o) => !o && setScheduleFor(null)}>

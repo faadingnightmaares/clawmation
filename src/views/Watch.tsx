@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Activity, Eye, Loader2, Plus, ScanEye, Square } from "lucide-react";
+import { Fragment, useCallback, useEffect, useState } from "react";
+import { Eye, Loader2, Plus, ScanEye, Square } from "lucide-react";
 
 import {
   guardTest,
@@ -16,16 +16,8 @@ import { notify, notifyUndo } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { draftFromGuard, guardFromDraft, newWatchDraft, type TriggerDraft } from "@/lib/triggers";
 import { Button } from "@/components/ui/button";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { TriggerEditor } from "@/components/editors/TriggerEditor";
 import { TriggerRow } from "@/components/editors/TriggerRow";
-import { SplitView } from "@/components/SplitView";
 import type { ViewProps } from "./types";
 
 export function Watch(_props: ViewProps) {
@@ -37,9 +29,6 @@ export function Watch(_props: ViewProps) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<TriggerDraft | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
-  // Which pane the rail is showing: where a watcher is set up, and where it
-  // reports what it has done.
-  const [pane, setPane] = useState<"triggers" | "activity">("triggers");
 
   const listRef = useStaggerIn<HTMLDivElement>(triggers.length);
 
@@ -205,112 +194,100 @@ export function Watch(_props: ViewProps) {
         ) : null}
       </header>
 
-      <SplitView
-        label="Watch sections"
-        items={[
-          { id: "triggers", label: "Triggers", Icon: ScanEye },
-          { id: "activity", label: "Activity", Icon: Activity },
-        ]}
-        active={pane}
-        onSelect={(id) => setPane(id)}
-      >
-        {/* ── The things being watched for ─────────────────────────────────── */}
-        <div className={pane === "triggers" ? undefined : "hidden"}>
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" /> Loading…
-            </div>
-          ) : triggers.length ? (
-            <div ref={listRef} className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-              {triggers.map((t) => (
+      {/* ── A new trigger, written right on the page instead of in a drawer ── */}
+      {editing && editingIsNew && (
+        <div className="overflow-hidden rounded-xl border border-primary/30 bg-card">
+          <TriggerEditor
+            initial={editing}
+            showSurgical
+            saveLabel="Save trigger"
+            onSave={saveTrigger}
+            onCancel={() => setEditing(null)}
+          />
+        </div>
+      )}
+
+      {/* ── The things being watched for ─────────────────────────────────── */}
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" /> Loading…
+        </div>
+      ) : triggers.length ? (
+        <div ref={listRef} className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+          {triggers.map((t) => {
+            const id = String(t.id);
+            // The row opens onto its editor right beneath it, the way a macro row
+            // does — no drawer sliding in over the page. Clicking the row again
+            // (or Cancel) folds it back up.
+            const open = !!editing && !editingIsNew && String(editing.id) === id;
+            return (
+              <Fragment key={id}>
                 <TriggerRow
-                  key={String(t.id)}
                   guard={t}
-                  testing={testingId === String(t.id)}
-                  onEdit={() => setEditing(draftFromGuard(t))}
+                  testing={testingId === id}
+                  open={open}
+                  onEdit={() => setEditing(open ? null : draftFromGuard(t))}
                   onTest={() => test(t)}
                   onToggle={(en) => toggle(t, en)}
                   onDelete={() => remove(t)}
                 />
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
-              <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
-                <ScanEye className="size-7" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-foreground">Nothing to watch for yet</h2>
-                <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-                  A trigger is one thing on screen plus what to do about it: spot the button, click the button.
-                </p>
-              </div>
-              <ol className="mx-auto flex max-w-md flex-col gap-2 text-left text-sm text-muted-foreground">
-                <NumStep n={1}>Show me what to look for: a colour, a picture of a button, or some words.</NumStep>
-                <NumStep n={2}>Say what to do when it appears: click it, press a key, or nudge the mouse.</NumStep>
-                <NumStep n={3}>Press Start and leave it running while you do something else.</NumStep>
-              </ol>
-              <Button size="lg" onClick={add}>
-                <Plus className="size-4" /> Add the first thing to watch for
-              </Button>
-            </div>
-          )}
+                {open && (
+                  <div className="bg-muted/40">
+                    <TriggerEditor
+                      initial={draftFromGuard(t)}
+                      showSurgical
+                      saveLabel="Save trigger"
+                      onSave={saveTrigger}
+                      onCancel={() => setEditing(null)}
+                    />
+                  </div>
+                )}
+              </Fragment>
+            );
+          })}
         </div>
-
-        {/* ── What it has actually done, so "is this working?" has an answer ── */}
-        <div className={pane === "activity" ? undefined : "hidden"}>
-          {log.length > 0 ? (
-            <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-              {log.map((e, i) => (
-                <li key={`${i}-${e.msg}`} className="flex items-center gap-3 px-4 py-2">
-                  <span
-                    className={cn(
-                      "size-1.5 shrink-0 rounded-full",
-                      e.kind === "act" ? "bg-primary" : "bg-muted-foreground/40",
-                    )}
-                  />
-                  <span className="truncate text-sm text-muted-foreground">{humanEvent(e.msg)}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="flex flex-col items-center gap-4 rounded-xl border border-border bg-card px-6 py-14 text-center">
-              <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
-                <Activity className="size-7" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-foreground">Nothing has happened yet</h2>
-                <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-                  {running
-                    ? "The watcher is looking. The moment it steps in, every move lands here."
-                    : "Start watching, and everything the watcher does lands here."}
-                </p>
-              </div>
-            </div>
-          )}
+      ) : editing && editingIsNew ? null : (
+        <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
+          <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
+            <ScanEye className="size-7" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">Nothing to watch for yet</h2>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+              A trigger is one thing on screen plus what to do about it: spot the button, click the button.
+            </p>
+          </div>
+          <ol className="mx-auto flex max-w-md flex-col gap-2 text-left text-sm text-muted-foreground">
+            <NumStep n={1}>Show me what to look for: a colour, a picture of a button, or some words.</NumStep>
+            <NumStep n={2}>Say what to do when it appears: click it, press a key, or nudge the mouse.</NumStep>
+            <NumStep n={3}>Press Start and leave it running while you do something else.</NumStep>
+          </ol>
+          <Button size="lg" onClick={add}>
+            <Plus className="size-4" /> Add the first thing to watch for
+          </Button>
         </div>
-      </SplitView>
+      )}
 
-      {/* Editor */}
-      <Sheet open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
-        <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-lg">
-          {editing && (
-            <>
-              <SheetHeader className="px-6 pb-2 pr-12 pt-6">
-                <SheetTitle>{editingIsNew ? "New trigger" : "Edit trigger"}</SheetTitle>
-                <SheetDescription>Tell Clawmation what to watch for and what to do when it appears.</SheetDescription>
-              </SheetHeader>
-              <TriggerEditor
-                initial={editing}
-                showSurgical
-                saveLabel="Save trigger"
-                onSave={saveTrigger}
-                onCancel={() => setEditing(null)}
-              />
-            </>
-          )}
-        </SheetContent>
-      </Sheet>
+      {/* ── What it has actually done, so "is this working?" has an answer ── */}
+      {running && log.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium text-foreground">Just now</h2>
+          <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+            {log.slice(0, 6).map((e, i) => (
+              <li key={`${i}-${e.msg}`} className="flex items-center gap-3 px-4 py-2">
+                <span
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    e.kind === "act" ? "bg-primary" : "bg-muted-foreground/40",
+                  )}
+                />
+                <span className="truncate text-sm text-muted-foreground">{humanEvent(e.msg)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
     </div>
   );
 }

@@ -11,6 +11,9 @@ import { Switch } from "@/components/ui/switch";
 export interface TriggerRowProps {
   guard: Guard;
   testing?: boolean;
+  /** Set when the row is expanded onto its inline editor; tints the row so the
+   *  summary and the panel beneath it read as one unit (the MacroRow idiom). */
+  open?: boolean;
   onEdit: () => void;
   onTest: () => void;
   onToggle: (enabled: boolean) => void;
@@ -20,20 +23,21 @@ export interface TriggerRowProps {
 /** One hairline row in a `divide-y` list: both the Watch list and the per-macro
  *  guards sheet. The row itself is the edit target; the pencil it replaces was a
  *  small thing to aim at for the reason people open this list at all. */
-export function TriggerRow({ guard, testing, onEdit, onTest, onToggle, onDelete }: TriggerRowProps) {
+export function TriggerRow({ guard, testing, open, onEdit, onTest, onToggle, onDelete }: TriggerRowProps) {
   const d = draftFromGuard(guard);
   const look = lookOf(d.method);
   const enabled = d.enabled;
   const name = d.name || "Untitled trigger";
 
   return (
-    <div className={cn("group relative transition-opacity", !enabled && "opacity-55")}>
+    <div className={cn("group relative transition-[background-color,opacity]", !enabled && "opacity-55", open && "bg-muted/40")}>
       <button
         type="button"
         onClick={onEdit}
+        aria-expanded={open}
         className="absolute inset-0 z-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        <span className="sr-only">Edit {name}</span>
+        <span className="sr-only">{open ? "Close" : "Edit"} {name}</span>
       </button>
 
       <div className="pointer-events-none relative z-10 flex items-center gap-3 px-4 py-3">
