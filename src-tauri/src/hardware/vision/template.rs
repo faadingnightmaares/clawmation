@@ -51,8 +51,19 @@ use super::Detection;
 const SCALE_MIN: f64 = 0.3;
 const SCALE_MAX: f64 = 2.0;
 const SCALE_RATIO: f64 = 1.12;
-/// The coarse pass runs on half-resolution pixels, so a quarter of the work.
-const COARSE_FACTOR: f64 = 0.5;
+/// The coarse pass runs on downscaled pixels. Half resolution is a quarter of
+/// the work, and it is where this was tuned, so it stays the ceiling.
+const COARSE_MAX_FACTOR: f64 = 0.5;
+/// Coarse-pass area the sweep aims for, in pixels.
+///
+/// Half resolution is right for the region-scoped searches guards use, and
+/// wrong by an order of magnitude for a watch trigger set to "anywhere": a
+/// 2560x1440 screen is thirty times a drawn region, and correlation is linear
+/// in area, so the same ladder that costs a guard a few milliseconds costs the
+/// watcher seconds. Since the coarse pass only nominates and native resolution
+/// judges, the cheaper pass buys back a poll interval that actually catches
+/// things at the price of a slightly noisier shortlist.
+const COARSE_TARGET_PX: f64 = 160_000.0;
 /// A coarse template smaller than this on a side has no shape left to correlate
 /// against, and a nomination made from noise is worse than none: it takes a
 /// shortlist slot from a real one.
@@ -269,8 +280,9 @@ impl Matcher {
             (self.clahe.apply(search), &tpl.clahe, tpl.mask.as_ref())
         };
 
-        let coarse_w = ((sw as f64 * COARSE_FACTOR) as usize).max(1);
-        let coarse_h = ((sh as f64 * COARSE_FACTOR) as usize).max(1);
+        let factor = coarse_factor(sw, sh, tpl.w.min(tpl.h));
+        let coarse_w = ((sw as f64 * factor) as usize).max(1);
+        let coarse_h = ((sh as f64 * factor) as usize).max(1);
         let coarse = Searched::new(&resize(&proc, coarse_w, coarse_h, Interp::Area));
 
         // The coarse pass nominates; it does not judge. It loses correlation to
@@ -286,8 +298,8 @@ impl Matcher {
             if full_tw < 8 || full_th < 8 || full_th > sh || full_tw > sw {
                 continue;
             }
-            let ctw = (full_tw as f64 * COARSE_FACTOR) as usize;
-            let cth = (full_th as f64 * COARSE_FACTOR) as usize;
+            let ctw = (full_tw as f64 * factor) as usize;
+            let cth = (full_th as f64 * factor) as usize;
             if ctw < COARSE_MIN_SIDE || cth < COARSE_MIN_SIDE || ctw > coarse_w || cth > coarse_h {
                 continue;
             }
@@ -304,8 +316,8 @@ impl Matcher {
                 continue;
             }
 
-            let fx = (mx as f64 / COARSE_FACTOR) as i64;
-            let fy = (my as f64 / COARSE_FACTOR) as i64;
+            let fx = (mx as f64 / factor) as i64;
+            let fy = (my as f64 / factor) as i64;
             nominate(
                 &mut shortlist,
                 Detection {
@@ -325,7 +337,8 @@ impl Matcher {
 
         let mut confirmed: Option<Detection> = None;
         for cand in &shortlist {
-            let Some(hit) = refine(&proc, base, mask_base, cand, ox, oy, label, threshold) else {
+            let Some(hit) = refine(&proc, base, mask_base, cand, ox, oy, label, threshold, factor)
+            else {
                 continue;
             };
             let better = match &confirmed {
@@ -387,14 +400,16 @@ fn refine(
     oy: i64,
     label: &str,
     threshold: f64,
+    factor: f64,
 ) -> Option<Detection> {
     let (sw, sh) = (proc.w as i64, proc.h as i64);
     let (tw, th) = (cand.w, cand.h);
     let (cx, cy) = (cand.x - ox, cand.y - oy);
-    let x1 = (cx - tw / 2 - refine_slack(tw)).max(0);
-    let y1 = (cy - th / 2 - refine_slack(th)).max(0);
-    let x2 = (cx + tw / 2 + refine_slack(tw)).min(sw);
-    let y2 = (cy + th / 2 + refine_slack(th)).min(sh);
+    let (sx, sy) = (refine_slack(tw, factor), refine_slack(th, factor));
+    let x1 = (cx - tw / 2 - sx).max(0);
+    let y1 = (cy - th / 2 - sy).max(0);
+    let x2 = (cx + tw / 2 + sx).min(sw);
+    let y2 = (cy + th / 2 + sy).min(sh);
     if x2 - x1 < tw || y2 - y1 < th {
         return None;
     }
@@ -416,11 +431,23 @@ fn refine(
     })
 }
 
-/// How far the native refine looks from where the coarse pass pointed. The
-/// downscale costs a pixel or two of position, and a nomination one rung off in
-/// scale sits proportionally off-centre, so the slack grows with the template.
-fn refine_slack(side: i64) -> i64 {
-    (((side as f64 * (SCALE_RATIO - 1.0)) as i64) + 8).max(12)
+/// How far the native refine looks from where the coarse pass pointed. A
+/// nomination one rung off in scale sits proportionally off-centre, so the slack
+/// grows with the template, and one coarse pixel covers `1 / factor` native
+/// ones, so it also grows as the coarse pass gets cheaper.
+fn refine_slack(side: i64, factor: f64) -> i64 {
+    let quantisation = (1.0 / factor).ceil() as i64;
+    (((side as f64 * (SCALE_RATIO - 1.0)) as i64) + 8 + quantisation).max(12)
+}
+
+/// How far down the coarse pass shrinks a search of this size. Bounded below by
+/// what leaves the template a shape to correlate against, since a nomination
+/// made from a three-pixel-tall smear is worse than no nomination at all.
+fn coarse_factor(sw: i64, sh: i64, tpl_min_side: usize) -> f64 {
+    let area = (sw.max(1) as f64) * (sh.max(1) as f64);
+    let floor =
+        (COARSE_MIN_SIDE as f64 / tpl_min_side.max(1) as f64).min(COARSE_MAX_FACTOR);
+    (COARSE_TARGET_PX / area).sqrt().clamp(floor, COARSE_MAX_FACTOR)
 }
 
 /// The template and its mask, resized to the size a confirmed detection claims.
@@ -726,6 +753,73 @@ mod tests {
             }
         }
         assert!(Matcher::new().robust(&small, 0, 0, &tpl, "t", "t", 0.7).is_empty());
+    }
+
+    #[test]
+    fn the_coarse_pass_gets_cheaper_as_the_search_gets_wider() {
+        // A drawn guard region keeps the half resolution this was tuned at.
+        assert!((coarse_factor(480, 320, 32) - 0.5).abs() < 1e-9);
+        // A whole 2560x1440 screen does not: at half resolution it would cost
+        // thirty times as much for one nomination.
+        assert!(coarse_factor(2560, 1440, 32) < 0.25);
+        // However wide the search, the coarse template keeps a shape. Six
+        // pixels on the short side of a 12-pixel template is half resolution,
+        // and no search area may argue it lower.
+        assert!((coarse_factor(2560, 1440, 12) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_target_is_found_on_a_search_too_wide_for_the_half_resolution_pass() {
+        // The tuned tests all run on scenes small enough to stay at half
+        // resolution, so without this one nothing covers what a watch trigger
+        // set to the whole screen actually executes.
+        let patch = badge(120, 40);
+        let tpl = Template::from_gray(&patch);
+        assert!(coarse_factor(1200, 800, tpl.w.min(tpl.h)) < COARSE_MAX_FACTOR);
+
+        let hits =
+            Matcher::new().robust(&scene(1200, 800, &patch, 700, 500), 0, 0, &tpl, "t", "t", 0.8);
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].w, hits[0].h), (120, 40), "the native rung is the one that won");
+        // Within a few pixels rather than on the pixel: this patch is a diagonal
+        // ramp, and equalising a 1200x800 scene against a 120x40 crop moves its
+        // correlation peak a little whatever the coarse pass does. The same
+        // scene at half resolution is off by the same amount, so the tolerance
+        // is the fixture's, not the wider search's.
+        assert!((hits[0].x - 760).abs() <= 8 && (hits[0].y - 520).abs() <= 8, "{:?}", hits[0]);
+    }
+
+    /// What a full-screen Watch trigger actually costs, present and absent.
+    /// Prints; asserts nothing about duration, because a timing assertion on a
+    /// shared runner is a flaky test rather than a measurement.
+    #[test]
+    #[ignore = "timing benchmark, run by hand: prints, asserts nothing about duration"]
+    fn bench_full_screen_sweep() {
+        use std::time::Instant;
+
+        let patch = badge(146, 32);
+        let tpl = Template::from_gray(&patch);
+        let present = scene(2560, 1440, &patch, 1400, 900);
+        let mut absent = Gray::new(2560, 1440);
+        for y in 0..1440 {
+            for x in 0..2560 {
+                absent.set(x, y, ((x * 3 + y * 5) % 60) as u8);
+            }
+        }
+
+        let t = Instant::now();
+        let hits = Matcher::new().robust(&present, 0, 0, &tpl, "t", "t", 0.8);
+        println!("present, cold: {:?} ({} hit(s))", t.elapsed(), hits.len());
+
+        let mut warm = Matcher::new();
+        warm.robust(&present, 0, 0, &tpl, "t", "t", 0.8);
+        let t = Instant::now();
+        warm.robust(&present, 0, 0, &tpl, "t", "t", 0.8);
+        println!("present, remembered: {:?}", t.elapsed());
+
+        let t = Instant::now();
+        let hits = Matcher::new().robust(&absent, 0, 0, &tpl, "t", "t", 0.8);
+        println!("absent: {:?} ({} hit(s))", t.elapsed(), hits.len());
     }
 
     #[test]

@@ -88,6 +88,13 @@ pub fn plan_action(guard: &Guard, best: &Detection) -> Plan {
     } else {
         Vec::new()
     };
+    // Marking a spot without drawing across it stores a stroke that starts and
+    // ends on that spot, because `click_lines` is the shape the picker hands
+    // back either way. Pressing and releasing without travelling is a click, and
+    // saying so costs three fewer input events, an 8ms hold, and a feed line
+    // that claims a drag the user never drew.
+    let strokes: Vec<Vec<i64>> =
+        strokes.into_iter().filter(|s| s.len() == 4 && (s[0] != s[2] || s[1] != s[3])).collect();
     if !strokes.is_empty() {
         Plan::Drag { tlx, tly, strokes }
     } else if guard.click_offset.len() == 2 {
