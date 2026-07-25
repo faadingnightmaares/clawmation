@@ -115,7 +115,7 @@ hand or work out why it didn't.
 `src-tauri/tauri.conf.json` points at:
 
 ```
-https://github.com/a7mda/clawmation/releases/latest/download/latest.json
+https://github.com/faadingnightmaares/clawmation/releases/latest/download/latest.json
 ```
 
 **Check that owner and repository name before the first release.** A wrong URL
