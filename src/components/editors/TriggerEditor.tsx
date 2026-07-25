@@ -10,6 +10,7 @@ import {
   Keyboard,
   Loader2,
   MousePointerClick,
+  Move,
   Palette,
   Pipette,
   ScanLine,
@@ -302,6 +303,9 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
               options={[
                 { key: "click", label: "Click it", icon: MousePointerClick },
                 { key: "key", label: "Press a key", icon: Keyboard },
+                // Watch-only: a per-macro guard acts on the game, it does not
+                // keep the game thinking someone is there.
+                ...(showSurgical ? [{ key: "nudge", label: "Nudge the mouse", icon: Move }] : []),
               ]}
               value={d.action}
               onChange={(v) => patch({ action: v })}

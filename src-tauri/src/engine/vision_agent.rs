@@ -69,11 +69,14 @@ const STROKE_STEP: Duration = Duration::from_millis(8);
 /// The action a fired trigger performs on screen. The three cursor primitives
 /// exist for the same reason they do in [`super::guards`]: a trigger whose
 /// picture was marked with drawn strokes is a drag, not a click, and the sweep
-/// is driven from here so it stays testable without real input.
+/// is driven from here so it stays testable without real input. `Nudge` is the
+/// exception: it ignores the detection and wiggles the cursor in place, for a
+/// trigger whose point is to look active rather than press anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisionAction {
     KeyPress(String),
     Click(i64, i64),
+    Nudge,
     MoveTo(i64, i64),
     MouseDown(String),
     MouseUp(String),
@@ -271,7 +274,8 @@ impl Inner {
 
     /// Perform the trigger's action, then run its macro sequence (Python's
     /// `_act`). Each fire increments the count; a keyed trigger presses its key,
-    /// otherwise it follows the same geometric plan a guard would. Blank-named
+    /// a nudging one wiggles the mouse, and anything else follows the same
+    /// geometric plan a guard would. Blank-named
     /// steps are skipped and a failing macro reports its reason to the feed
     /// without aborting the rest.
     ///
@@ -287,6 +291,11 @@ impl Inner {
         if trigger.action == "key" && !trigger.key.is_empty() {
             (self.act)(VisionAction::KeyPress(trigger.key.clone()));
             (self.on_event)("act", &format!("'{}' -> pressed {}", trigger.name, trigger.key));
+        } else if trigger.action == "nudge" {
+            // The one action with no use for the match: the cursor is wiggled
+            // wherever it already happens to sit.
+            (self.act)(VisionAction::Nudge);
+            (self.on_event)("act", &format!("'{}' -> nudged the mouse", trigger.name));
         } else {
             match plan_action(trigger, best) {
                 Plan::Click(x, y) => {
@@ -516,6 +525,22 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec![("act".into(), "'Watcher' -> pressed e".into())]
+        );
+    }
+
+    #[test]
+    fn nudge_trigger_wiggles_without_pressing() {
+        // The point of the mode: it acts without caring where the match is —
+        // the detection at (300, 400) must not turn into a click there.
+        let (agent, actions, events) = harness("t", vec![detection(300, 400)]);
+        let mut t = base_trigger("t");
+        t.action = "nudge".into();
+        agent.test_prime(vec![t]);
+        agent.test_tick();
+        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Nudge]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![("act".into(), "'Watcher' -> nudged the mouse".into())]
         );
     }
 

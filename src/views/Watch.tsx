@@ -233,7 +233,7 @@ export function Watch(_props: ViewProps) {
           </div>
           <ol className="mx-auto flex max-w-md flex-col gap-2 text-left text-sm text-muted-foreground">
             <NumStep n={1}>Show me what to look for: a colour, a picture of a button, or some words.</NumStep>
-            <NumStep n={2}>Say what to do when it appears: click it, or press a key.</NumStep>
+            <NumStep n={2}>Say what to do when it appears: click it, press a key, or nudge the mouse.</NumStep>
             <NumStep n={3}>Press Start and leave it running while you do something else.</NumStep>
           </ol>
           <Button size="lg" onClick={add}>
@@ -296,6 +296,7 @@ function humanEvent(msg: string): string {
   if (what.startsWith("clicked")) return `Clicked “${name}”.`;
   if (what.startsWith("dragged")) return `Dragged across “${name}”.`;
   if (what.startsWith("pressed ")) return `Pressed ${what.slice(8)} for “${name}”.`;
+  if (what.startsWith("nudged")) return `Nudged the mouse for “${name}”.`;
   if (what.startsWith("running ")) return `“${name}” appeared: ${what}.`;
   return `“${name}”: ${what}`;
 }

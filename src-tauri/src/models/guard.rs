@@ -44,7 +44,7 @@ pub struct Guard {
     pub click_line: Vec<i64>,
     pub click_lines: Vec<Vec<i64>>,
     pub ocr_text: String,
-    /// Response when triggered: `"click"` or `"key"`.
+    /// Response when triggered: `"click"`, `"key"`, or `"nudge"`.
     pub action: String,
     pub key: String,
     pub macro_sequence: Vec<MacroSeqItem>,

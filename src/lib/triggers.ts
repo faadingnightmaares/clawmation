@@ -29,7 +29,7 @@ export interface TriggerDraft {
   id: string;
   name: string;
   method: string; // "color" | "template" | "ocr"
-  action: string; // "click" | "key"
+  action: string; // "click" | "key" | "nudge"
   key: string;
   hsv_low: number[];
   hsv_high: number[];
@@ -189,7 +189,12 @@ export function describeTrigger(d: TriggerDraft): string {
           ? `“${d.ocr_text.trim()}” appears`
           : "the text appears";
   const where = isAnywhere(d.region) ? "" : " in a set area";
-  const act = d.action === "key" ? `press ${d.key || "a key"}` : "click it";
+  const act =
+    d.action === "key"
+      ? `press ${d.key || "a key"}`
+      : d.action === "nudge"
+        ? "nudge the mouse"
+        : "click it";
   return `When ${what}${where}, ${act}.`;
 }
 

@@ -403,6 +403,19 @@ impl InputController {
         send(&[mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0)]);
     }
 
+    /// The smallest motion that still counts as mouse activity: 1px out and 1px
+    /// back, so the cursor ends exactly where it started no matter how often it
+    /// fires — subpixel moves do not exist, hardware input is whole pixels, and
+    /// this is the floor. Relative halves (not an absolute round-trip) so Raw
+    /// Input consumers see genuine movement, with a frame-sized pause between
+    /// them so a game polling the cursor position once per frame still catches
+    /// the displaced position rather than only the cancellation.
+    pub fn nudge(&self) {
+        self.move_relative(1, 0);
+        std::thread::sleep(Duration::from_millis(16));
+        self.move_relative(-1, 0);
+    }
+
     /// Human-like cursor move to `(x, y)` along a cubic Bézier curve.
     ///
     /// Used for AUTONOMOUS clicks (vision triggers, guards): a straight-line

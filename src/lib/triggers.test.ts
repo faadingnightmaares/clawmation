@@ -69,6 +69,11 @@ describe("guard ↔ draft round-trip", () => {
     expect(guardFromDraft(draftFromGuard(g))).toEqual(g);
   });
 
+  it("preserves a nudge trigger exactly", () => {
+    const g = storedGuard({ action: "nudge" });
+    expect(guardFromDraft(draftFromGuard(g))).toEqual(g);
+  });
+
   it("preserves a surgical click line and offset", () => {
     const g = storedGuard({
       method: "template",
@@ -180,6 +185,7 @@ describe("plain-language helpers", () => {
   it("describes each trigger kind in plain words", () => {
     const base = newTriggerDraft("x");
     expect(describeTrigger(base)).toBe("When a colour appears, click it.");
+    expect(describeTrigger({ ...base, action: "nudge" })).toBe("When a colour appears, nudge the mouse.");
     expect(describeTrigger({ ...base, method: "ocr", ocr_text: "Reconnect", action: "key", key: "space" })).toBe(
       "When “Reconnect” appears, press space.",
     );
