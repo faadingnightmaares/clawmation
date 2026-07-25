@@ -8,6 +8,10 @@ description = "Macro recorder and player for Windows games, with screen-watching
 authors = ["a7mda"]
 license = "MIT"
 readme = "../README.md"
+repository = "https://github.com/faadingnightmaares/clawmation"
+homepage = "https://github.com/faadingnightmaares/clawmation"
+keywords = ["macro", "automation", "windows", "tauri", "screen-capture"]
+categories = ["gui"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -29,7 +33,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 # Native save/open/folder dialogs for the import/export/bundle commands. Called
 # from the Rust side (`DialogExt::…::blocking_*`) so the command surface stays a
-# 1:1 match for the Python `tkinter.filedialog` flows — the frontend just invokes
+# 1:1 match for the Python `tkinter.filedialog` flows; the frontend just invokes
 # `export_macro` / `import_chain` / … and gets `{ok, path}` back.
 tauri-plugin-dialog = "2"
 # `.clawbundle` export/import is a zip of macro.json + guards.json + templates/,
@@ -56,23 +60,23 @@ image = { version = "0.25", default-features = false, features = [
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` makes float parsing correctly-rounded, so every timestamp and
-# duration loads to the exact same f64 the Python app wrote — re-saved macros stay
+# duration loads to the exact same f64 the Python app wrote; re-saved macros stay
 # byte-identical instead of drifting by 1 ULP.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 chrono = "0.4"
-# Global hotkeys — record/play/stop fire even when the window is unfocused, the
+# Global hotkeys: record/play/stop fire even when the window is unfocused, the
 # port of `Api._register_hotkeys`. See `shell/hotkeys.rs` for the one behavioral
 # departure (Tauri's shortcuts are exclusive; Python's `keyboard` hooks weren't).
 tauri-plugin-global-shortcut = "2.3.2"
-# Tray toasts for playback-complete and scheduled runs, throttled by `notify.rs`
-# — the port of `SystemTray.notify`.
+# Tray toasts for playback-complete and scheduled runs, throttled by `notify.rs`,
+# the port of `SystemTray.notify`.
 tauri-plugin-notification = "2.3.3"
 # One running Clawmation at a time: a second launch focuses the first and exits,
 # replacing the named-mutex guard in `_acquire_single_instance`. Registered first
 # so it wins before any window or hotkey exists.
 tauri-plugin-single-instance = "2.4.3"
-# Persists window size/position/maximized across sessions — the drop-in for
+# Persists window size/position/maximized across sessions, the drop-in for
 # Python's `_load_window_state` / `_save_window_state`.
 tauri-plugin-window-state = "2.4.1"
 # Signed in-app updates (`commands/misc.rs`). Driven entirely from Rust, so the
@@ -82,8 +86,8 @@ tauri-plugin-updater = "2"
 
 # Raw Win32 bindings for input synthesis. `windows-sys` exposes the API as plain
 # integer-alias types and C structs (not the `windows` crate's newtype wrappers),
-# which mirror the Python `ctypes` definitions in `input.py` almost line-for-line
-# — the faithful, minimal-dependency choice for the input/recorder/player slices.
+# which mirror the Python `ctypes` definitions in `input.py` almost line-for-line,
+# the faithful, minimal-dependency choice for the input/recorder/player slices.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
@@ -98,7 +102,7 @@ windows-sys = { version = "0.59", features = [
 # by `hardware/capture.rs`: DXGI Desktop Duplication is ~8 chained COM interfaces
 # and hand-indexing their vtables through `windows-sys` is impractical. This buys
 # exact control of the capture semantics the Python `dxcam` path must preserve
-# (reuse-last-frame on timeout, fps-as-read-throughput, dxcam→mss fallback) — the
+# (reuse-last-frame on timeout, fps-as-read-throughput, dxcam→mss fallback), the
 # reason to hand-roll rather than adopt a capture crate whose own backend model
 # we'd have to re-wrap. See MIGRATION-NOTES "Capture".
 windows = { version = "0.59", features = [
@@ -109,7 +113,7 @@ windows = { version = "0.59", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
-    # `hardware/ocr.rs` — the platform OCR engine, replacing the sidecar's
+    # `hardware/ocr.rs`: the platform OCR engine, replacing the sidecar's
     # EasyOCR path. `Media_Ocr` is the recognizer; `Graphics_Imaging` builds the
     # `SoftwareBitmap` it reads; `Security_Cryptography` wraps our BGRA bytes as
     # the `IBuffer` that bitmap is copied from; `Foundation` supplies the
@@ -121,7 +125,7 @@ windows = { version = "0.59", features = [
     "Media_Ocr",
     "Security_Cryptography",
     "Storage_Streams",
-    # `hardware/overlay.rs` — the fullscreen GDI overlay the screen pickers draw
+    # `hardware/overlay.rs`: the fullscreen GDI overlay the screen pickers draw
     # on. `LibraryLoader` supplies the `HINSTANCE` the window class registers
     # against; `Input_KeyboardAndMouse` supplies `GetKeyState`, which is how the
     # Shift modifier is read (`WM_KEYDOWN` carries the key, never the modifiers).

@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest something Clawmation should be able to do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        Describe the situation rather than the solution. Knowing what you were doing when
+        you wanted this usually points at a better answer than the one either of us
+        thought of first.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+    validations:
+      required: false
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How you handle it today
+      description: A macro, a guard, another tool, or nothing at all.
+    validations:
+      required: false

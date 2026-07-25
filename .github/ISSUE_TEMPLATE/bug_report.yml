@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in Clawmation does not work the way it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: The shortest sequence of steps that brings the problem back.
+      placeholder: |
+        1. Open Watch
+        2. Add a trigger that snaps the Reconnect button
+        3. Press Start watching
+        4. It never fires
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Clawmation version
+      description: Settings, under About.
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 Pro 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: detection
+    attributes:
+      label: For detection problems
+      description: >
+        If a guard or a Watch trigger is missing something, attach the template image or
+        the trigger settings, plus a screenshot of the game at the moment it should have
+        matched. That pair is by far the most useful thing you can send.

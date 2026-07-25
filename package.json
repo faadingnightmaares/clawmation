@@ -4,6 +4,14 @@
   "version": "1.0.0",
   "description": "Macro recorder and player for Windows games, with screen-watching guards",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faadingnightmaares/clawmation.git"
+  },
+  "bugs": {
+    "url": "https://github.com/faadingnightmaares/clawmation/issues"
+  },
+  "homepage": "https://github.com/faadingnightmaares/clawmation#readme",
   "type": "module",
   "scripts": {
     "dev": "vite",
