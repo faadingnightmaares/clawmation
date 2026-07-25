@@ -103,7 +103,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm test && npx tsc --noEmit
 ```
 
-That is 222 Rust tests and 36 frontend tests. Eleven more Rust tests are marked
+That is 223 Rust tests and 37 frontend tests. Eleven more Rust tests are marked
 `#[ignore]`: ten drive real hardware, moving the cursor, taking over the screen with a
 fullscreen overlay, or reading the live desktop, and one is a hover timing benchmark that
 only prints. Run them deliberately, one at a time, on a machine you are not otherwise

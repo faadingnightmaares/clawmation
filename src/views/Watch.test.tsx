@@ -41,15 +41,17 @@ async function openEditorAndPickAColour() {
 describe("Watch, saving a trigger", () => {
   beforeEach(() => invoke.mockReset());
 
-  it("starts watching in the same click when nothing is running", async () => {
+  it("saves without starting the watcher", async () => {
+    // Save saves. Arming is Start's job, so describing something to look for
+    // never puts the app on the screen clicking things in the same gesture.
     mockBackend(false);
     view();
 
     await openEditorAndPickAColour();
-    fireEvent.click(await screen.findByRole("button", { name: /save & start watching/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^save trigger$/i }));
 
-    await waitFor(() => expect(calls()).toContain("vision_start"));
-    expect(calls().indexOf("vision_save")).toBeLessThan(calls().indexOf("vision_start"));
+    await waitFor(() => expect(calls()).toContain("vision_save"));
+    expect(calls()).not.toContain("vision_start");
 
     // A Watch trigger is saved with no wait between repeats, so a thing that
     // keeps reappearing gets collected as fast as the screen can be read.
@@ -59,7 +61,7 @@ describe("Watch, saving a trigger", () => {
     expect(saved.triggers[0].cooldown).toBe(0);
   });
 
-  it("only saves when the watcher is already running", async () => {
+  it("saves the same way while the watcher is already running", async () => {
     mockBackend(true);
     view();
 
@@ -76,6 +78,24 @@ describe("Watch, saving a trigger", () => {
     view();
 
     fireEvent.click(await screen.findByRole("button", { name: /add the first thing/i }));
-    expect(await screen.findByRole("button", { name: /save & start watching/i })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: /^save trigger$/i })).toBeDisabled();
+  });
+});
+
+describe("Watch, starting the watcher", () => {
+  beforeEach(() => invoke.mockReset());
+
+  it("saves the list before arming, since the backend starts from the file", async () => {
+    mockBackend(false);
+    view();
+
+    await openEditorAndPickAColour();
+    fireEvent.click(await screen.findByRole("button", { name: /^save trigger$/i }));
+    await waitFor(() => expect(calls()).toContain("vision_save"));
+
+    fireEvent.click(await screen.findByRole("button", { name: /start watching/i }));
+
+    await waitFor(() => expect(calls()).toContain("vision_start"));
+    expect(calls().lastIndexOf("vision_save")).toBeLessThan(calls().indexOf("vision_start"));
   });
 });

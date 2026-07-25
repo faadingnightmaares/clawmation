@@ -14,9 +14,31 @@
 //! across a *full-screen* search area costs a few hundred milliseconds more than
 //! the transform would. Scoping such a guard to a region removes it entirely.
 
+use std::sync::OnceLock;
+
 use rayon::prelude::*;
 
 use super::image::Gray;
+
+/// The pool every correlation runs on.
+///
+/// Rayon's global pool is one thread per logical core, which is right for a
+/// batch job and wrong for this one. A watcher polls forever in the background
+/// while the user plays the game it is watching, so a pass that takes the whole
+/// machine takes it from them, and the thread it starves first is the UI thread
+/// a Start click is waiting on. Half the cores keeps a pass fast enough that the
+/// capture is still the limit, and leaves the other half to the app and the game.
+fn pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads((cores / 2).max(1))
+            .thread_name(|i| format!("clawmation-vision-{i}"))
+            .build()
+            .expect("vision thread pool builds from a valid thread count")
+    })
+}
 
 /// A search area, pre-digested so a whole scale sweep can be run against it
 /// without recomputing the window statistics each time.
@@ -202,20 +224,22 @@ fn correlate(img: &[i32], iw: usize, ih: usize, ker: &[i32], kw: usize, kh: usiz
     debug_assert!(kw <= iw && kh <= ih);
     let (ow, oh) = (iw - kw + 1, ih - kh + 1);
     let mut out = vec![0i64; ow * oh];
-    out.par_chunks_mut(ow).enumerate().for_each(|(y, row)| {
-        for (x, cell) in row.iter_mut().enumerate() {
-            let mut acc = 0i64;
-            for j in 0..kh {
-                let irow = &img[(y + j) * iw + x..][..kw];
-                let krow = &ker[j * kw..][..kw];
-                let mut s = 0i32;
-                for i in 0..kw {
-                    s += krow[i] * irow[i];
+    pool().install(|| {
+        out.par_chunks_mut(ow).enumerate().for_each(|(y, row)| {
+            for (x, cell) in row.iter_mut().enumerate() {
+                let mut acc = 0i64;
+                for j in 0..kh {
+                    let irow = &img[(y + j) * iw + x..][..kw];
+                    let krow = &ker[j * kw..][..kw];
+                    let mut s = 0i32;
+                    for i in 0..kw {
+                        s += krow[i] * irow[i];
+                    }
+                    acc += i64::from(s);
                 }
-                acc += i64::from(s);
+                *cell = acc;
             }
-            *cell = acc;
-        }
+        });
     });
     out
 }

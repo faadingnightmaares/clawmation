@@ -80,20 +80,15 @@ export function Watch(_props: ViewProps) {
     await visionSave(next);
   };
 
-  // Saving while nothing is running arms the watcher in the same click. Otherwise
-  // the trigger is saved, the sheet closes, and the user still has to find the
-  // Start button and press it, which is what they wanted all along.
+  // Save saves. Arming the watcher is the Start button's job, and folding it in
+  // here meant describing a thing to look for and having it act on the screen in
+  // the same click, before anyone had a chance to look at what they had written.
   const saveTrigger = async (guard: Guard) => {
     const exists = triggers.some((t) => String(t.id) === String(guard.id));
     const next = exists ? triggers.map((t) => (String(t.id) === String(guard.id) ? guard : t)) : [...triggers, guard];
     setEditing(null);
-    if (running) {
-      await persist(next);
-      notify("success", `“${String(guard.name)}” saved.`);
-      return;
-    }
-    setTriggers(next);
-    await startWith(next);
+    await persist(next);
+    notify("success", `“${String(guard.name)}” saved.`);
   };
 
   const toggle = (t: Guard, enabled: boolean) =>
@@ -117,13 +112,13 @@ export function Watch(_props: ViewProps) {
     }
   };
 
-  // Takes the list explicitly: a save-and-start passes the trigger it just added,
-  // which the `triggers` state hasn't caught up to yet.
-  const startWith = async (list: Guard[]) => {
-    const count = list.filter((t) => t.enabled !== false).length;
+  const start = async () => {
+    const count = enabledCount;
     setBusy(true);
     try {
-      await visionSave(list);
+      // Saved first, because the backend starts from the file rather than from
+      // whatever the view is holding.
+      await visionSave(triggers);
       const r = await visionStart();
       if (r.ok) {
         setRunning(true);
@@ -140,8 +135,6 @@ export function Watch(_props: ViewProps) {
       void refreshStatus();
     }
   };
-
-  const start = () => startWith(triggers);
 
   const stop = async () => {
     setBusy(true);
@@ -281,7 +274,7 @@ export function Watch(_props: ViewProps) {
               <TriggerEditor
                 initial={editing}
                 showSurgical
-                saveLabel={running ? "Save trigger" : "Save & start watching"}
+                saveLabel="Save trigger"
                 onSave={saveTrigger}
                 onCancel={() => setEditing(null)}
               />

@@ -21,9 +21,9 @@
 //!   checks stay effectively as fast as before; expensive ones back off on
 //!   their own, on whatever machine they land on, with no tuning to guess at.
 //! * **A trigger that just fired runs at its own `cooldown`,** with no duty
-//!   floor at all. At the default of zero that means straight back round:
-//!   collecting a thing that keeps reappearing goes as fast as the hardware
-//!   allows, which is the whole point of the watcher.
+//!   floor at all. At the default of zero that means straight back round on the
+//!   next frame: collecting a thing that keeps reappearing goes as fast as the
+//!   hardware allows, which is the whole point of the watcher.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -52,6 +52,15 @@ const MAX_IDLE: Duration = Duration::from_millis(1500);
 
 /// How long to wait when there is nothing enabled to look at.
 const EMPTY_IDLE: Duration = Duration::from_millis(200);
+
+/// Floor on the wait after a trigger fires, roughly one display frame.
+///
+/// A zero cooldown means "collect it as fast as the hardware allows", and the
+/// hardware here is the capture, which tops out near 60fps. Looking again
+/// sooner than that re-runs the whole detector over pixels that have not
+/// changed, so the burst is paced to the frame rather than to nothing. It costs
+/// no fires and it is the difference between a busy core and a pinned one.
+const BURST_FLOOR: Duration = Duration::from_millis(16);
 
 /// Dwell between the moves of a drag sweep, so a game registers it as a
 /// continuous drag rather than a teleport. Matches [`super::guards`].
@@ -180,9 +189,9 @@ impl Inner {
     /// on each match in order, reschedule everything that was looked at, and
     /// report how long the caller should wait before asking again.
     ///
-    /// A zero wait is the burst case: some trigger fired and its cooldown is
-    /// zero, so the next look is immediate. Detection itself paces the loop
-    /// there; it cannot spin, because a pass always costs a capture.
+    /// A wait of [`BURST_FLOOR`] is the burst case: some trigger fired and its
+    /// cooldown is zero, so the next look is a frame away rather than a poll
+    /// interval away.
     fn tick(&self) -> Duration {
         let enabled: Vec<Guard> = self
             .triggers
@@ -240,7 +249,7 @@ impl Inner {
                     // wait its cooldown from the end of that, not the start.
                     next.push((
                         trigger.id.clone(),
-                        Duration::from_secs_f64(trigger.cooldown.max(0.0)),
+                        Duration::from_secs_f64(trigger.cooldown.max(0.0)).max(BURST_FLOOR),
                     ));
                 }
                 None => next.push((trigger.id.clone(), idle)),
@@ -511,18 +520,35 @@ mod tests {
     }
 
     #[test]
-    fn no_cooldown_fires_every_tick() {
-        // And asks for no wait at all between them: "collect it as fast as the
-        // hardware allows" is what a zero cooldown means.
+    fn no_cooldown_fires_every_frame() {
+        // And asks only for the frame floor between them: "collect it as fast
+        // as the hardware allows" is what a zero cooldown means, and the
+        // hardware is the capture. The sleep is what the run loop does with the
+        // returned wait, so ticking straight through it would test a loop that
+        // does not exist.
         let (agent, actions, _) = harness("t", vec![detection(1, 1)]);
         agent.test_prime(vec![base_trigger("t")]);
-        assert_eq!(agent.test_tick(), Duration::ZERO);
+        assert_eq!(agent.test_tick(), BURST_FLOOR);
+        thread::sleep(BURST_FLOOR);
         agent.test_tick();
         assert_eq!(
             *actions.lock().unwrap(),
             vec![VisionAction::Click(1, 1), VisionAction::Click(1, 1)]
         );
         assert_eq!(agent.fired_count(), 2);
+    }
+
+    #[test]
+    fn a_burst_trigger_is_not_looked_at_again_inside_the_frame() {
+        // The other half of the floor: a second look in the same frame reads
+        // pixels that have not changed, which is the whole cost with none of
+        // the benefit, so it is skipped rather than merely wasted.
+        let (agent, actions, _) = harness("t", vec![detection(1, 1)]);
+        agent.test_prime(vec![base_trigger("t")]);
+        agent.test_tick();
+        agent.test_tick();
+        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(1, 1)]);
+        assert_eq!(agent.fired_count(), 1);
     }
 
     #[test]

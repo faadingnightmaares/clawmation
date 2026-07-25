@@ -63,21 +63,34 @@ impl Detections {
         self.show(live);
     }
 
+    /// Queue the show or hide onto the UI thread and return.
+    ///
+    /// Every caller here is a detection loop arming or disarming, on whatever
+    /// thread happened to run the command. Showing a window is a round trip to
+    /// the UI thread, so doing it inline makes the caller wait on a thread it
+    /// is also competing with for the CPU. That is what left `vision_start`
+    /// hanging and the Start button spinning: the watcher was already running
+    /// flat out by the time the overlay was asked for, and the answer never
+    /// came back. The overlay is a view onto the loops, never a step in
+    /// starting one, so nothing is lost by letting it catch up on its own.
     fn show(&self, live: bool) {
         let Some(app) = self.app.lock().unwrap().clone() else { return };
-        let Some(win) = app.get_webview_window(LABEL) else { return };
-        if !live {
-            let _ = win.hide();
-            return;
-        }
-        // The exclusion is re-asserted at the moment it matters, and the overlay
-        // stays down without it: boxes a screen grab can see are boxes the next
-        // detection pass reads back as part of the game.
-        let Ok(hwnd) = win.hwnd() else { return };
-        if !shield::set_excluded(hwnd.0, true) {
-            return;
-        }
-        let _ = win.show();
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Some(win) = handle.get_webview_window(LABEL) else { return };
+            if !live {
+                let _ = win.hide();
+                return;
+            }
+            // The exclusion is re-asserted at the moment it matters, and the
+            // overlay stays down without it: boxes a screen grab can see are
+            // boxes the next detection pass reads back as part of the game.
+            let Ok(hwnd) = win.hwnd() else { return };
+            if !shield::set_excluded(hwnd.0, true) {
+                return;
+            }
+            let _ = win.show();
+        });
     }
 }
 
