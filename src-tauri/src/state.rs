@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::core::Core;
+use crate::engine::anti_afk::{AntiAfkAction, AntiAfkService};
 use crate::engine::chains::ChainManager;
 use crate::engine::scheduler::MacroScheduler;
 use crate::engine::vision_agent::VisionAgent;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub core: Core,
     pub chains: Arc<ChainManager>,
     pub scheduler: Arc<MacroScheduler>,
+    pub anti_afk: Arc<AntiAfkService>,
     /// Present only while the vision-agent loop is running (`Api.start_vision`).
     pub vision_agent: Arc<Mutex<Option<VisionAgent>>>,
     /// The vision panel's rolling event feed (`Api._vision_log`): `(kind, msg)`
@@ -32,6 +34,20 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: MacroConfig) -> Self {
         let core = Core::new(config);
+        let (anti_afk_interval, anti_afk_action) = {
+            let config = core.config.lock().unwrap();
+            (
+                config.anti_afk_interval_min,
+                AntiAfkAction::from_config(&config.anti_afk_action),
+            )
+        };
+        let anti_afk = Arc::new(AntiAfkService::new(
+            Arc::new(crate::hardware::window::NativeAntiAfkPlatform::new(
+                core.controller.clone(),
+            )),
+            anti_afk_interval,
+            anti_afk_action,
+        ));
 
         // Chains and the scheduler drive playback through `Core`; each callback
         // captures its own `Core` clone (leaving the graph acyclic). A scheduled
@@ -111,6 +127,7 @@ impl AppState {
             core,
             chains,
             scheduler,
+            anti_afk,
             vision_agent: Arc::new(Mutex::new(None)),
             vision_log: Arc::new(Mutex::new(Vec::new())),
         }

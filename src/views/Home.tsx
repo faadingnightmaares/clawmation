@@ -6,6 +6,7 @@ import { fmtAgo, fmtDur } from "@/format";
 import { useStaggerIn } from "@/lib/anime";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { AntiAfkCard } from "@/components/AntiAfkCard";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { ViewProps } from "./types";
 
@@ -67,6 +68,8 @@ export function Home({ status, navigate }: ViewProps) {
           onClick={() => navigate("vision")}
         />
       </div>
+
+      <AntiAfkCard />
 
       {/* At a glance */}
       <section className="space-y-3">

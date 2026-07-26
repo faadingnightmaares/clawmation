@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub mod ai;
+pub mod anti_afk;
 pub mod chains;
 pub mod guards;
 pub mod scheduler;

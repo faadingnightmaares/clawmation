@@ -78,6 +78,53 @@ export function getStatus(): Promise<Status> {
   return invoke<Status>("get_status");
 }
 
+// ─── Anti-AFK ───
+
+export interface SelectableWindow {
+  id: string;
+  title: string;
+  pid: number;
+}
+
+export type AntiAfkAction = "jump" | "walk" | "camera" | "random";
+
+export interface AntiAfkState {
+  enabled: boolean;
+  target_id: string | null;
+  interval_min: number;
+  action: AntiAfkAction;
+  status: "off" | "active" | "acting" | "target_unavailable" | "error";
+  error: string | null;
+}
+
+export interface AntiAfkUpdate {
+  target_id?: string;
+  interval_min?: number;
+  action?: AntiAfkAction;
+  enabled?: boolean;
+}
+
+export interface AntiAfkUpdateResult extends OpResult {
+  state?: AntiAfkState;
+}
+
+export function antiAfkListWindows(): Promise<SelectableWindow[]> {
+  return invoke<SelectableWindow[]>("anti_afk_list_windows");
+}
+
+export function antiAfkGet(): Promise<AntiAfkState> {
+  return invoke<AntiAfkState>("anti_afk_get");
+}
+
+export function antiAfkUpdate(patch: AntiAfkUpdate): Promise<AntiAfkUpdateResult> {
+  return invoke<AntiAfkUpdateResult>("anti_afk_update", {
+    targetId: patch.target_id,
+    intervalMin: patch.interval_min,
+    action: patch.action,
+    enabled: patch.enabled,
+  });
+}
+
 // ─── Config & data folders ───
 
 /** `get_config` payload. Mirrors Rust `ConfigDto`. */

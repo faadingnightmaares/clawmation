@@ -1,6 +1,7 @@
 //! Tauri commands: the 1:1 port of the pywebview `api.*` surface.
 
 pub mod ai;
+pub mod anti_afk;
 pub mod chains;
 pub mod checkpoints;
 pub mod config;

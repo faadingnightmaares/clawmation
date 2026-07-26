@@ -29,6 +29,10 @@ pub struct MacroConfig {
     pub hotkey_stop: String,
     pub notify_on_schedule: bool,
     pub notify_on_complete: bool,
+    /// Anti-AFK repeat interval. The target and enabled state are session-only.
+    pub anti_afk_interval_min: u32,
+    /// Anti-AFK action: jump, walk, camera, or random.
+    pub anti_afk_action: String,
 }
 
 impl Default for MacroConfig {
@@ -44,6 +48,8 @@ impl Default for MacroConfig {
             hotkey_stop: "f12".to_string(),
             notify_on_schedule: true,
             notify_on_complete: true,
+            anti_afk_interval_min: 15,
+            anti_afk_action: "random".to_string(),
         }
     }
 }
@@ -96,5 +102,13 @@ mod tests {
         assert!(!cfg.humanize_clicks, "absent humanize_clicks -> false");
         assert!(cfg.notify_on_schedule, "absent notify_on_schedule -> true");
         assert!(cfg.notify_on_complete, "absent notify_on_complete -> true");
+        assert_eq!(
+            cfg.anti_afk_interval_min, 15,
+            "absent anti_afk_interval_min -> 15"
+        );
+        assert_eq!(
+            cfg.anti_afk_action, "random",
+            "absent anti_afk_action -> random"
+        );
     }
 }

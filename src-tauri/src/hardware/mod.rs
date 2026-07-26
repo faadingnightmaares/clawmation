@@ -18,6 +18,7 @@ pub mod recorder;
 pub mod shield;
 pub mod snap;
 pub mod vision;
+pub mod window;
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
