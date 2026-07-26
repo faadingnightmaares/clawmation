@@ -766,7 +766,7 @@ impl Core {
         };
         let guard_engine = Arc::new(GuardEngine::new(detect, player_state, actuate, Some(on_fire)));
 
-        Self {
+        let core = Self {
             config,
             log,
             runtime,
@@ -779,7 +779,14 @@ impl Core {
             notifier,
             indicator,
             detections,
-        }
+        };
+
+        // DPI self-check at startup: probe on a fresh worker thread and log the
+        // verdict, so a scaling regression names itself here ("DPI MISMATCH...")
+        // instead of being inferred later from missed clicks.
+        let (healthy, line) = crate::hardware::dpi::report();
+        core.emit(if healthy { "ok" } else { "warn" }, line);
+        core
     }
 
     /// Append a log entry (mirrors `Api._emit`; the UI pulls the tail via

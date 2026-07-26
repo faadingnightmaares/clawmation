@@ -37,6 +37,21 @@ pub fn get_version() -> VersionInfo {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct DpiReport {
+    pub ok: bool,
+    pub report: String,
+}
+
+/// Live probe of the DPI pipeline on a fresh worker thread: the same check the
+/// app logs at startup, on demand, so a scaling regression can be confirmed on
+/// the machine it breaks on rather than inferred from missed clicks.
+#[tauri::command]
+pub fn dpi_report() -> DpiReport {
+    let (ok, report) = crate::hardware::dpi::report();
+    DpiReport { ok, report }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct UpdateInfo {
     pub update_available: bool,

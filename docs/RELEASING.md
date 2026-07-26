@@ -32,8 +32,9 @@ you have users, or accept that cost deliberately.
 ## Cutting a release, the short way
 
 Add the private key as a repository secret named `TAURI_SIGNING_PRIVATE_KEY`
-(plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if it has one), bump the three version
-numbers below, then push a tag:
+(plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if it has one), bump the three
+declared version numbers below, refresh both lockfiles, add
+`docs/releases/v<version>.md`, then push a tag:
 
 ```bash
 git tag v1.0.1 && git push origin v1.0.1
@@ -53,7 +54,12 @@ hand or work out why it didn't.
    `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `package.json`. The
    updater compares the manifest's version against the one baked into the
    running app, so a stale `tauri.conf.json` means the update is offered forever
-   or never.
+   or never. Refresh and commit `src-tauri/Cargo.lock` and `package-lock.json`
+   too; their Clawmation package entries must carry the same version.
+
+   Add the notes shown by GitHub and the in-app prompt at
+   `docs/releases/v<version>.md`. The tag workflow fails instead of publishing
+   placeholder text when that file is missing.
 
 2. Build with **both** signing variables in the environment. Without the key the
    bundler still produces installers but no `.sig` files, and an unsigned update

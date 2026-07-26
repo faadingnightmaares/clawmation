@@ -37,3 +37,6 @@ dist-ssr
 /macros/
 /templates/
 /snapshots/
+
+# Local browser mockups and visual QA harnesses created during design work.
+/.superpowers/

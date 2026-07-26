@@ -29,24 +29,14 @@ import { useStaggerIn } from "@/lib/anime";
 import { accelCaps } from "@/lib/hotkeys";
 import { notify } from "@/lib/toast";
 import { HotkeyField } from "@/components/HotkeyField";
+import { ReleaseUpdateDialog } from "@/components/ReleaseUpdateDialog";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Guide } from "./Guide";
 import type { ViewProps } from "./types";
 
@@ -328,43 +318,14 @@ export function Settings(props: ViewProps) {
       </Tabs>
 
       {/* Closing mid-download would leave the installer running unattended, so
-          the dialog only dismisses while the user still has a choice. */}
-      <AlertDialog
-        open={!!available}
-        onOpenChange={(o) => !o && !installing && setAvailable(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Clawmation {available?.latest} is ready</AlertDialogTitle>
-            <AlertDialogDescription>
-              You’re on {available?.current}. Installing takes a moment and restarts the app, so
-              finish anything that’s running first.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-
-          {available?.notes && (
-            <p className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
-              {available.notes}
-            </p>
-          )}
-
-          {installing ? (
-            <div className="space-y-2 py-2">
-              <Progress value={progress ?? 0} />
-              <p className="text-xs text-muted-foreground">
-                {progress === null ? "Downloading…" : `Downloading… ${progress}%`}
-              </p>
-            </div>
-          ) : (
-            <AlertDialogFooter>
-              <AlertDialogCancel>Not now</AlertDialogCancel>
-              <AlertDialogAction onClick={(e) => (e.preventDefault(), void runInstall())}>
-                Install and restart
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          )}
-        </AlertDialogContent>
-      </AlertDialog>
+          the controlled prompt only dismisses while the user still has a choice. */}
+      <ReleaseUpdateDialog
+        info={available}
+        installing={installing}
+        progress={progress}
+        onDismiss={() => setAvailable(null)}
+        onInstall={() => void runInstall()}
+      />
     </div>
   );
 }

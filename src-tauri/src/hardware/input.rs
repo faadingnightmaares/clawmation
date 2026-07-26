@@ -364,11 +364,14 @@ impl Drop for NoAcceleration {
 // aware: on a scaled display an unaware thread stretches every absolute
 // coordinate by the DPI factor, so a recorded move to a UI button lands past
 // it. `move_to` therefore holds a `PerMonitorAware` guard (see `hardware::dpi`)
-// so recorded physical pixels are placed physically. Relative
-// `MOUSEEVENTF_MOVE` deltas need no guard — the OS never scales raw relative
-// motion. The recorder guards its hook thread and `screen_size` guards the
-// resolution query the same way, so the whole pipeline agrees on physical
-// pixels at any DPI.
+// so recorded physical pixels are placed physically, and `bezier_move_to`
+// holds one too because it reads the curve's start point with `GetCursorPos`.
+// Relative `MOUSEEVENTF_MOVE` deltas are raw counts rather than screen
+// coordinates, so `move_relative` passes the recorded physical delta through
+// unchanged for Raw Input consumers. Windows can still scale the visible cursor
+// path, so the player follows each relative event with a `SetCursorPos`-only
+// reconciliation. The recorder guards its hook thread, the player guards the
+// playback thread, and `screen_size` guards the resolution query the same way.
 
 // ── Controller ───────────────────────────────────────────────────────────────
 
@@ -417,7 +420,23 @@ impl InputController {
         if dx == 0 && dy == 0 {
             return;
         }
+        // `MOUSEINPUT::dx`/`dy` are Raw Input counts, not screen coordinates.
+        // Preserve the recorded delta for game camera movement; the player
+        // separately reconciles the visible cursor to its physical target.
+        let (dx, dy) = crate::hardware::dpi::relative_counts(dx, dy);
         send(&[mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0)]);
+    }
+
+    /// Reconcile the visible cursor with a recorded physical target without
+    /// injecting another relative event. Relative `SendInput` is still sent
+    /// first so Raw Input consumers receive the recorded movement; this call
+    /// removes any cursor drift introduced by display scaling, pointer speed,
+    /// acceleration, rounding, or a game temporarily recentering the pointer.
+    pub(crate) fn sync_cursor_to(&self, x: i32, y: i32) {
+        let _aware = PerMonitorAware::new();
+        unsafe {
+            SetCursorPos(x, y);
+        }
     }
 
     /// The smallest motion that still counts as mouse activity: 1px out and 1px
@@ -442,6 +461,10 @@ impl InputController {
     /// Recorded-macro replay never calls this; it replays the user's exact
     /// sampled path instead. Ported from `input.py::bezier_move_to`.
     pub fn bezier_move_to(&self, x: i32, y: i32, duration: f64) {
+        // Physical coordinates in, physical path out — this reads the curve's
+        // start point with `GetCursorPos`, which is DPI-virtualized per thread,
+        // so the guard covers the start read as well as the moves that follow.
+        let _aware = PerMonitorAware::new();
         // The current cursor position is the curve's start point.
         let mut pt = POINT { x: 0, y: 0 };
         unsafe {
@@ -694,6 +717,11 @@ mod tests {
     #[test]
     #[ignore = "moves the real mouse cursor"]
     fn move_to_round_trips_cursor_position() {
+        // Mirror `run()`: raise the process before anything moves. The readback
+        // below is deliberately UNGUARDED, so on a scaled display it reports the
+        // logical position if the raise did not take — failing the test instead
+        // of masking a regression that would shift every replayed click.
+        crate::hardware::dpi::raise_process_to_per_monitor_v2();
         let controller = InputController::new();
         controller.move_to(400, 300);
         let mut pt = POINT { x: 0, y: 0 };

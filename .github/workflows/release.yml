@@ -43,6 +43,22 @@ jobs:
       - run: npm test
       - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
+      # One checked-in note source feeds both the GitHub release and
+      # `latest.json`, so the in-app prompt can never ship the old placeholder
+      # while the release page says something else.
+      - name: Load release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $notesPath = "docs/releases/$env:GITHUB_REF_NAME.md"
+          if (-not (Test-Path -LiteralPath $notesPath)) {
+            throw "Missing release notes: $notesPath"
+          }
+          $delimiter = "RELEASE_NOTES_$([Guid]::NewGuid().ToString('N'))"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "body<<$delimiter"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value (Get-Content -LiteralPath $notesPath -Raw)
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value $delimiter
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,10 +70,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Clawmation ${{ github.ref_name }}
-          releaseBody: |
-            The app shows these notes verbatim in its update prompt, so write
-            them for the person deciding whether to restart right now.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: true
           # Writes latest.json alongside the installers: the manifest the
           # updater endpoint in tauri.conf.json points at.
-          includeUpdaterJson: true
+          uploadUpdaterJson: true

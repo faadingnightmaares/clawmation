@@ -214,6 +214,10 @@ fn play_loop(
     speed: f64,
     checkpoint: Option<CheckpointDetect>,
 ) {
+    // Replays in the physical pixels the recorder captured: hold
+    // Per-Monitor-V2 for the whole playback thread, the same idiom as the
+    // recorder's hook thread (see `hardware::dpi`).
+    let _aware = crate::hardware::dpi::PerMonitorAware::new();
     let controller = InputController::new();
     let (x_scale, y_scale) = compute_scales(
         effective_record_resolution(macro_def.record_resolution, target_resolution, &macro_def.events),
@@ -237,8 +241,9 @@ fn play_loop(
 
         // 1ms timer + no mouse acceleration for the duration of this iteration;
         // both restore on drop at the end of the loop body (matching Python's
-        // `timeEndPeriod` finally + `_NoAcceleration` context manager). Mouse
-        // acceleration is disabled so relative deltas map 1:1 to cursor motion.
+        // `timeEndPeriod` finally + `_NoAcceleration` context manager). The player
+        // still reconciles the visible cursor after relative movement because
+        // display scaling can affect the pointer path independently.
         let _timer = HiResTimer::begin();
         let _no_accel = NoAcceleration::new();
 
@@ -293,22 +298,32 @@ fn play_loop(
                             if dx != 0 || dy != 0 {
                                 controller.move_relative(dx, dy);
                             }
+                            // Relative input preserves Raw Input for game camera
+                            // movement, but Windows may scale the visible cursor
+                            // path at non-100% display scaling. Reconcile it to
+                            // the recorded physical point after every segment so
+                            // drift can never accumulate into a missed click.
+                            controller.sync_cursor_to(x, y);
                         }
                         None => controller.move_to(x, y),
                     }
                     prev = Some((x, y));
                 }
-                // Button edges send ONLY the button, no cursor move: the
-                // preceding moves already placed the cursor, and an absolute move
-                // here would emit a WM_INPUT that corrupts Raw Input delta
-                // tracking (breaks right-click-drag camera rotation).
+                // Reconcile with SetCursorPos immediately before each button
+                // edge, then send ONLY the button. SetCursorPos does not inject
+                // a relative Raw Input delta, so right-click-drag camera tracking
+                // keeps the recorded movement while UI clicks land exactly.
                 InputEventType::MouseDown => {
+                    let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                    controller.sync_cursor_to(x, y);
                     controller.mouse_down(None, &event.button);
-                    prev = Some(scale_point(event.x, event.y, x_scale, y_scale));
+                    prev = Some((x, y));
                 }
                 InputEventType::MouseUp => {
+                    let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                    controller.sync_cursor_to(x, y);
                     controller.mouse_up(None, &event.button);
-                    prev = Some(scale_point(event.x, event.y, x_scale, y_scale));
+                    prev = Some((x, y));
                 }
                 // Keys, scroll, wait, and legacy clicks (when no edges exist).
                 _ => controller.replay_event(event, 0, 0, x_scale, y_scale),
@@ -808,6 +823,76 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(450),
             "paced timeline took >= 0.45s, got {elapsed:?}",
+        );
+    }
+
+    /// The whole promise of the DPI fix in one test: a point RECORDED through
+    /// the real hook must REPLAY onto that same physical pixel through the
+    /// real playback thread, at whatever scaling the display runs at. The
+    /// field bug — clicks landing a scale factor short at 125% — is exactly
+    /// record-space and replay-space disagreeing, which this asserts they
+    /// cannot. Ignored by default: it moves the real cursor, but never clicks.
+    #[test]
+    #[ignore = "moves the real mouse cursor"]
+    fn replay_lands_on_the_point_the_recorder_saw() {
+        use crate::hardware::input::InputController;
+        use crate::hardware::recorder::MacroRecorder;
+        use std::collections::HashSet;
+
+        // Mirror `run()`: the process raise happens before any thread exists.
+        crate::hardware::dpi::raise_process_to_per_monitor_v2();
+
+        let controller = InputController::new();
+        let physical = crate::hardware::screen_size();
+        let mut original = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut original);
+        }
+
+        // Record a short path ending at a known physical point. No buttons are
+        // injected, so this hardware regression test cannot activate anything
+        // on the user's desktop.
+        let mut rec = MacroRecorder::new(physical, HashSet::new());
+        rec.start();
+        std::thread::sleep(Duration::from_millis(100)); // hook thread arms
+        controller.move_to(620, 460); // approach from somewhere else
+        controller.move_to(820, 640);
+        std::thread::sleep(Duration::from_millis(150)); // drain the queue
+        let mut macro_def = rec.stop();
+        macro_def.loop_count = 1; // stop() leaves 0, which play() reads as "infinite"
+
+        // Park the cursor FAR from the target: the replay must travel there,
+        // not merely already be there.
+        controller.move_to(80, 80);
+
+        // The real playback path — the same call core makes, with the same
+        // physical target `resolve_screen` supplies. 8x speed collapses the
+        // recorded inter-event delays; pacing is the other test's job.
+        let player = MacroPlayer::new();
+        let events = macro_def.events.clone();
+        player.play(macro_def, physical, 8.0, None);
+        player.wait();
+        assert!(!player.is_playing(), "playback finished");
+
+        // Deliberately UNGUARDED readback: the process-wide raise must make this
+        // physical too. Before cursor reconciliation, this exact test landed at
+        // (870,685) on 125% instead of (820,640).
+        let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+        }
+        controller.move_to(original.x, original.y);
+        assert!(
+            (pt.x - 820).abs() <= 3 && (pt.y - 640).abs() <= 3,
+            "replay landed at ({},{}) instead of the recorded physical (820,640) on a {}x{} screen; recorded events: {:?}",
+            pt.x,
+            pt.y,
+            physical.0,
+            physical.1,
+            events
+                .iter()
+                .map(|e| (format!("{:?}", e.event_type), e.x, e.y))
+                .collect::<Vec<_>>()
         );
     }
 }

@@ -188,22 +188,18 @@ fn new_event(event_type: InputEventType, timestamp: f64) -> MacroEvent {
     }
 }
 
-/// Idle shorter than this is the user's stop-press reaction time, not a
-/// deliberate pause, so it is not worth preserving as a replay delay.
-const TRAILING_WAIT_MIN: f64 = 0.05;
-
 /// Capture the idle time after the last recorded action as a trailing WAIT
 /// event stamped at the recording's total elapsed time. The player paces off
 /// event timestamps and replays WAIT as a pure delay, so a looping macro now
 /// waits this gap out before restarting instead of jumping straight into the
-/// next iteration (issue #2): without it every loop was shorter than the
-/// recording by exactly the time between the last action and the stop press.
+/// next iteration. The terminal timestamp is always preserved, including short
+/// reaction time and all-idle recordings, so the saved duration cannot be less
+/// than the active recording session (issues #2 and #6).
 fn append_trailing_wait(events: &mut Vec<MacroEvent>, total_elapsed: f64) {
     let total = round4(total_elapsed);
-    if let Some(last) = events.last() {
-        if total - last.timestamp > TRAILING_WAIT_MIN {
-            events.push(new_event(InputEventType::Wait, total));
-        }
+    let last = events.last().map(|e| e.timestamp).unwrap_or(0.0);
+    if total > last {
+        events.push(new_event(InputEventType::Wait, total));
     }
 }
 
@@ -243,7 +239,13 @@ impl RecorderState {
     /// Python's `_elapsed` (`perf_counter() - start - paused_total`), so playback
     /// has no dead gaps where the user paused to think.
     fn elapsed(&self) -> f64 {
-        self.start.elapsed().as_secs_f64() - self.paused_total.as_secs_f64()
+        let current_pause = if self.paused {
+            self.pause_start.elapsed()
+        } else {
+            Duration::ZERO
+        };
+        self.start.elapsed().as_secs_f64()
+            - (self.paused_total + current_pause).as_secs_f64()
     }
 
     fn active(&self) -> bool {
@@ -522,11 +524,18 @@ impl MacroRecorder {
     /// decimals here, mirroring Python's `to_dict`, so the saved file matches the
     /// precision of every existing macro on disk.
     pub fn stop(&mut self) -> Macro {
-        // Stop accepting events first (any in-flight callback returns early),
-        // then wake the hook thread so it unhooks and exits.
-        if let Some(s) = lock_shared().as_mut() {
-            s.recording = false;
-        }
+        // Stop accepting events and capture the terminal timestamp together.
+        // Taking it before hook teardown keeps teardown latency out of the saved
+        // duration; `elapsed` also subtracts a pause that is still in progress.
+        let total_elapsed = lock_shared()
+            .as_mut()
+            .map(|s| {
+                s.recording = false;
+                s.elapsed()
+            })
+            .unwrap_or(0.0);
+
+        // Wake the hook thread so it unhooks and exits.
         if self.thread_id != 0 {
             unsafe {
                 PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
@@ -537,15 +546,9 @@ impl MacroRecorder {
         }
         self.thread_id = 0;
 
-        // Take the events and the total elapsed time together: the trailing
-        // idle (now minus the last action, pauses excluded) is captured below
-        // so a loop's cadence matches the recording's.
-        let (mut events, total_elapsed) = lock_shared()
+        let mut events = lock_shared()
             .take()
-            .map(|s| {
-                let total = s.elapsed();
-                (s.events, total)
-            })
+            .map(|s| s.events)
             .unwrap_or_default();
         for e in &mut events {
             e.timestamp = round4(e.timestamp);
@@ -583,25 +586,46 @@ mod tests {
     }
 
     #[test]
-    fn trailing_wait_preserves_idle_after_the_last_action() {
-        let mut events = vec![new_event(InputEventType::KeyDown, 1.0)];
-        append_trailing_wait(&mut events, 3.5);
+    fn issue_6_preserves_the_full_157_second_recording() {
+        // Reported regression: a 2:37 session whose final input was at 2:27
+        // saved as 2:27. The terminal wait must retain those final 10 seconds.
+        let mut events = vec![new_event(InputEventType::KeyDown, 147.0)];
+        append_trailing_wait(&mut events, 157.0);
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].event_type, InputEventType::Wait);
-        assert_eq!(events[1].timestamp, 3.5, "stamped at the total elapsed time");
+        assert_eq!(
+            events[1].timestamp, 157.0,
+            "saved duration must equal the full active recording session"
+        );
     }
 
     #[test]
-    fn trailing_wait_skips_reaction_time_and_empty_recordings() {
-        // Sub-threshold idle is the stop-press reaction, not a deliberate pause.
+    fn terminal_wait_preserves_short_and_all_idle_recordings() {
+        // Even short reaction time belongs to the recorded timeline.
         let mut events = vec![new_event(InputEventType::KeyDown, 1.0)];
         append_trailing_wait(&mut events, 1.03);
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.last().unwrap().timestamp, 1.03);
 
-        // An all-idle recording (no actions) stays empty.
+        // An all-idle recording still has an exact duration.
         let mut empty: Vec<MacroEvent> = Vec::new();
         append_trailing_wait(&mut empty, 5.0);
-        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].event_type, InputEventType::Wait);
+        assert_eq!(empty[0].timestamp, 5.0);
+    }
+
+    #[test]
+    fn elapsed_excludes_a_pause_still_in_progress_at_stop() {
+        let now = Instant::now();
+        let mut state = RecorderState::new(HashSet::new());
+        state.start = now - Duration::from_secs(157);
+        state.paused = true;
+        state.pause_start = now - Duration::from_secs(10);
+
+        assert!(
+            (state.elapsed() - 147.0).abs() < 0.01,
+            "a live ten-second pause must not inflate the active duration"
+        );
     }
 
     #[test]
@@ -736,11 +760,16 @@ mod tests {
     fn records_synthesized_input() {
         use crate::hardware::input::InputController;
 
-        let mut rec = MacroRecorder::new((1920, 1080), HashSet::new());
+        // The live physical resolution, exactly what `core::start_record`
+        // supplies via `resolve_screen`.
+        let mut rec = MacroRecorder::new(crate::hardware::screen_size(), HashSet::new());
         rec.start();
         assert!(rec.is_recording());
 
         let controller = InputController::new();
+        // A jog off the target first: if the cursor already sits on (500,400)
+        // from a previous run, the real move below would emit no motion event.
+        controller.move_to(480, 320);
         controller.move_to(500, 400);
         controller.click(500, 400, "left");
         controller.key_press("a");
@@ -762,6 +791,30 @@ mod tests {
                 .iter()
                 .any(|e| e.event_type == InputEventType::KeyDown && e.key == "a"),
             "no 'a' key-down captured"
+        );
+        // The coordinate-space guarantee, the 125%-scaling regression in one
+        // check: a physical move to (500,400) must be recorded AS (500,400), at
+        // any display scaling. An unaware hook thread would report the logical
+        // point (400,320 at 125%) and every replayed position would land a
+        // DPI-factor short of its target.
+        assert!(
+            macro_.events.iter().any(|e| e.event_type == InputEventType::MouseMove
+                && (e.x - 500).abs() <= 2
+                && (e.y - 400).abs() <= 2),
+            "no recorded move landed at the physical target (500,400): {:?}",
+            macro_
+                .events
+                .iter()
+                .filter(|e| e.event_type == InputEventType::MouseMove)
+                .map(|e| (e.x, e.y))
+                .collect::<Vec<_>>()
+        );
+        // Record and playback read the display size through the same guarded
+        // query, so the stamped resolution is physical too.
+        assert_eq!(
+            macro_.record_resolution,
+            crate::hardware::screen_size(),
+            "stamped resolution must match the physical display"
         );
         // Timestamps were rounded to 4 decimals on the way out.
         for e in &macro_.events {

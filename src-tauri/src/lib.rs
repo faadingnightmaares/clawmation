@@ -27,6 +27,11 @@ use tauri_plugin_window_state::StateFlags;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Per-Monitor-V2 for the whole process BEFORE any thread, window, or
+    // capture exists: every thread spawned afterwards then records and replays
+    // in physical pixels at any display scaling. Not leaning on tao raising it
+    // at event-loop creation — see hardware::dpi for the full guarantee.
+    hardware::dpi::raise_process_to_per_monitor_v2();
     paths::ensure_dirs();
 
     let app_state = AppState::new(MacroConfig::load());
@@ -223,6 +228,7 @@ pub fn run() {
             commands::misc::get_version,
             commands::misc::check_update,
             commands::misc::install_update,
+            commands::misc::dpi_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
