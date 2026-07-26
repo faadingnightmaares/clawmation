@@ -15,6 +15,7 @@ import {
   getConfig,
   getDataPaths,
   getVersion,
+  hotkeysResume,
   installUpdate,
   onUpdateProgress,
   openDataFolder,
@@ -123,6 +124,10 @@ export function Settings(props: ViewProps) {
     // say so instead of saving a shortcut that can never fire.
     const clash = HOTKEYS.find((hk) => hk.key !== key && accel && config[hk.key] === accel);
     if (clash) {
+      // The field suspended the shortcuts and committed this capture, but we are
+      // rejecting it without saving — so `update_config` never re-registers. Re-arm
+      // the existing bindings here or the shortcuts stay dead until a restart.
+      void hotkeysResume();
       notify("error", `${prettyAccel(accel)} is already set to “${clash.label.toLowerCase()}”.`);
       return;
     }
@@ -130,6 +135,9 @@ export function Settings(props: ViewProps) {
     setConfig((c) => ({ ...c, [key]: accel }));
     const res = await persist({ [key]: accel });
     if (!res) {
+      // Same reason as the clash branch: a failed save returns before
+      // `update_config` re-registers, so re-arm the (unchanged) shortcuts here.
+      void hotkeysResume();
       setConfig((c) => ({ ...c, [key]: previous }));
       return;
     }

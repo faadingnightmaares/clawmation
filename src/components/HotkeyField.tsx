@@ -28,6 +28,14 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
   const [listening, setListening] = useState(false);
   const capsRef = useRef<HTMLSpanElement>(null);
   const onCaptureRef = useRef(onCapture);
+  // Whether the current listening session committed a value (a real accel or an
+  // unbind). When it did, `update_config` re-registers the shortcuts itself, so
+  // the effect cleanup must NOT also fire `hotkeysResume` — the two register
+  // concurrently and the resume can re-register the *old* shortcut on top of the
+  // new one, leaving the change dead until a restart. Resume runs only on the
+  // cancel path (Esc / blur / unmount), where no save happened and the suspend
+  // left the shortcuts released.
+  const committedRef = useRef(false);
 
   useEffect(() => {
     onCaptureRef.current = onCapture;
@@ -35,6 +43,7 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
 
   useEffect(() => {
     if (!listening) return;
+    committedRef.current = false;
     // Best-effort: outside Tauri there are no global shortcuts to release, and
     // failing to release them must not stop the user setting a key.
     void hotkeysSuspend().catch(() => {});
@@ -52,6 +61,7 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
         return;
       }
       if ((e.code === "Backspace" || e.code === "Delete") && bare) {
+        committedRef.current = true;
         onCaptureRef.current("");
         setListening(false);
         return;
@@ -61,6 +71,7 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
         notify("info", "That key can’t be used as a shortcut. Try another.");
         return;
       }
+      committedRef.current = true;
       onCaptureRef.current(accel);
       setListening(false);
     };
@@ -68,7 +79,10 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
     window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener("keydown", onKey, true);
-      void hotkeysResume().catch(() => {});
+      // Re-arm only when the session backed out without saving: a committed
+      // capture is re-registered by `update_config`, and a concurrent resume
+      // here would race it back onto the old shortcut (see committedRef above).
+      if (!committedRef.current) void hotkeysResume().catch(() => {});
     };
   }, [listening]);
 

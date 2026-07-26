@@ -22,7 +22,8 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Foundation::{HANDLE, POINT};
+use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
@@ -357,6 +358,56 @@ impl Drop for NoAcceleration {
     }
 }
 
+// ── DPI handling ─────────────────────────────────────────────────────────────
+// The low-level mouse hook records cursor coordinates in PHYSICAL pixels, and
+// relative `MOUSEEVENTF_MOVE` deltas are physical too — the OS never scales raw
+// relative motion. But `SetCursorPos` and the absolute `SendInput` normalization
+// are DPI-virtualized unless the *calling thread* is Per-Monitor aware: on a
+// scaled display (a 2K panel at 125%) an unaware thread has every absolute
+// coordinate stretched by the DPI factor, so a recorded move to a UI button
+// lands past it. tao raises DPI awareness on the UI thread only, and playback
+// runs on spawned threads that don't inherit it, so we force Per-Monitor-V2
+// awareness for the duration of an absolute move and restore the prior context
+// after. A no-op where the thread is already aware; exact where it isn't.
+
+// windows-sys 0.59 ships the `DPI_AWARENESS_CONTEXT_*` constants but not this
+// call, so link it directly from user32.dll (already in the link set for
+// `SetCursorPos`/`GetSystemMetrics`). Takes and returns a `DPI_AWARENESS_CONTEXT`
+// — the same `*mut c_void` as `HANDLE`.
+extern "system" {
+    fn SetThreadDpiAwarenessContext(value: HANDLE) -> HANDLE;
+}
+
+/// RAII form of `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)`: makes this
+/// thread Per-Monitor-V2 DPI-aware on construction and restores the previous
+/// context on drop. This is the per-thread, reversible analogue of the
+/// process-wide awareness the recorder's UI thread already has — applied here so
+/// absolute placement interprets the recorded physical pixels as physical.
+struct PerMonitorAware {
+    previous: HANDLE,
+}
+
+impl PerMonitorAware {
+    fn new() -> Self {
+        // Returns the prior context, or NULL when unsupported (pre-Windows 10
+        // 1607) — in which case awareness is unchanged and there's nothing to
+        // restore on drop.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        Self { previous }
+    }
+}
+
+impl Drop for PerMonitorAware {
+    fn drop(&mut self) {
+        if !self.previous.is_null() {
+            unsafe {
+                SetThreadDpiAwarenessContext(self.previous);
+            }
+        }
+    }
+}
+
 // ── Controller ───────────────────────────────────────────────────────────────
 
 /// Game-safe input simulation via raw `SendInput` (zero per-call pause).
@@ -374,6 +425,10 @@ impl InputController {
     /// DirectInput apps ignore `SendInput` mouse moves entirely, and without it
     /// the cursor doesn't move.
     pub fn move_to(&self, x: i32, y: i32) {
+        // Physical coordinates in, physical placement out (see `PerMonitorAware`):
+        // without this a scaled display re-expands the recorded physical point by
+        // the DPI factor and the cursor lands past its target.
+        let _aware = PerMonitorAware::new();
         let (ox, oy, w, h) = virtual_screen();
         let (ax, ay) = to_absolute(x, y, ox, oy, w, h);
         send(&[mouse_input(

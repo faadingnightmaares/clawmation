@@ -2,35 +2,55 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Loader2, Search } from "lucide-react";
 
-import { listChains, listMacros, playMacro, runChain, type MacroListItem } from "@/api";
+import {
+  listChains,
+  listMacros,
+  playMacro,
+  runChain,
+  visionLoad,
+  visionSave,
+  type Guard,
+  type MacroListItem,
+} from "@/api";
+import { describeTrigger, draftFromGuard } from "@/lib/triggers";
 import { cn } from "@/lib/utils";
 
 /**
  * The macro launcher: a Raycast/PowerToys-style palette the play hotkey opens.
- * Lists every macro AND every autopilot chain, macros first (most-recently-played
- * on top), then chains by name. Each macro row shows how long one run takes and
- * its category, plus cumulative time played and play count; each chain row shows
- * how many macros it runs and its repeat.
- * Filter by typing, move with ↑/↓, Enter runs the highlighted item (a macro
- * plays, a chain runs), Esc — or just clicking back into the game — dismisses:
- * the window hides itself on blur, so this component only handles picking.
+ * Lists every macro, every autopilot chain, AND every Watch trigger — macros
+ * first (most-recently-played on top), then chains by name, then watch triggers.
+ * Each macro row shows how long one run takes and its category, plus cumulative
+ * time played and play count; each chain row shows how many macros it runs and
+ * its repeat; each watch row shows what it looks for and whether it is on.
+ * Filter by typing, move with ↑/↓, Enter acts on the highlighted item — a macro
+ * plays, a chain runs, a watch trigger is switched on/off — Esc, or just clicking
+ * back into the game, dismisses: the window hides itself on blur, so this
+ * component only handles picking.
  */
 
-/** One selectable row: either a macro or a chain, normalized for the flat list. */
+/** One selectable row: a macro, a chain, or a watch trigger, normalized for the
+ *  flat list. */
 type Entry = {
-  kind: "macro" | "chain";
+  kind: "macro" | "chain" | "watch";
   /** Stable React key; also the value handed to play/run. */
   id: string;
   name: string;
-  /** Secondary line under the name (run length + category for macros, size for chains). */
+  /** Secondary line under the name (run length + category for macros, size for
+   *  chains, what-it-watches-for for watch triggers). */
   sub: string;
-  /** Right-aligned stats (time · count for macros, repeat for chains). */
+  /** Right-aligned stats (time · count for macros, repeat for chains, on/off for
+   *  watch triggers). */
   right: string;
+  /** Watch triggers only: the full guard (to flip its `enabled`) and its current
+   *  on/off state, so the row can be toggled and drawn accordingly. */
+  guard?: Guard;
+  enabled?: boolean;
 };
 
 export function Launcher() {
   const [macros, setMacros] = useState<MacroListItem[]>([]);
   const [chains, setChains] = useState<{ id: string; name: string; macroCount: number; repeat: number }[]>([]);
+  const [watches, setWatches] = useState<Guard[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -38,7 +58,11 @@ export function Launcher() {
 
   const load = useCallback(async () => {
     try {
-      const [macroList, chainList] = await Promise.all([listMacros(), listChains()]);
+      const [macroList, chainList, watchList] = await Promise.all([
+        listMacros(),
+        listChains(),
+        visionLoad().catch(() => ({ ok: false, triggers: [] as Guard[] })),
+      ]);
       setMacros(macroList);
       setChains(
         chainList
@@ -50,6 +74,7 @@ export function Launcher() {
             repeat: c.repeat ?? 1,
           })),
       );
+      setWatches(watchList.ok ? (watchList.triggers ?? []) : []);
     } finally {
       setLoading(false);
     }
@@ -57,7 +82,7 @@ export function Launcher() {
 
   // Load on mount, then refresh whenever the window regains focus — the hotkey
   // shows (focuses) the window, so the list is re-read and the query cleared on
-  // every summon. What you see is always the current macro/chain set.
+  // every summon. What you see is always the current macro/chain/watch set.
   useEffect(() => {
     void load();
     const win = getCurrentWindow();
@@ -76,7 +101,8 @@ export function Launcher() {
 
   // Case-insensitive substring filter. Macros first, most-recently-played on top
   // (never-played, `last_played` 0, fall to the bottom of the macro block), then
-  // chains alphabetically — one flat list so the arrow keys flow straight through.
+  // chains alphabetically, then watch triggers alphabetically — one flat list so
+  // the arrow keys flow straight through.
   const entries = useMemo<Entry[]>(() => {
     const q = query.trim().toLowerCase();
     const match = (name: string) => !q || name.toLowerCase().includes(q);
@@ -100,24 +126,58 @@ export function Launcher() {
         sub: `${c.macroCount} macro${c.macroCount === 1 ? "" : "s"}`,
         right: c.repeat > 1 ? `×${c.repeat}` : "chain",
       }));
-    return [...macroEntries, ...chainEntries];
-  }, [macros, chains, query]);
+    const watchEntries: Entry[] = watches
+      .filter((g) => match(String(g.name) || "Untitled watch"))
+      .sort((a, b) => (String(a.name) || "").localeCompare(String(b.name) || ""))
+      .map((g) => {
+        const enabled = g.enabled !== false;
+        return {
+          kind: "watch",
+          id: String(g.id),
+          name: String(g.name) || "Untitled watch",
+          sub: describeTrigger(draftFromGuard(g)),
+          right: enabled ? "on" : "off",
+          guard: g,
+          enabled,
+        };
+      });
+    return [...macroEntries, ...chainEntries, ...watchEntries];
+  }, [macros, chains, watches, query]);
 
   // A filter change can leave the selection past the end; snap it back to the top.
   useEffect(() => {
     setSelected(0);
   }, [query]);
 
-  const run = useCallback(async (entry: Entry) => {
-    if (entry.kind === "macro") {
-      await playMacro(entry.id);
-    } else {
-      await runChain(entry.id);
-    }
-    await getCurrentWindow().hide();
-  }, []);
+  // Flip a watch trigger's `enabled` and persist the whole set (the backend, like
+  // the Watch view, stores the file as the unit of truth). Unlike a played macro
+  // or a run chain, this does NOT dismiss the palette — switching triggers on/off
+  // is a settings-style action you do several of in a row, so the list stays open
+  // and updates in place.
+  const toggleWatch = useCallback(async (guard: Guard) => {
+    const enabled = guard.enabled === false; // flip: off→on, on→off
+    const next = watches.map((g) => (String(g.id) === String(guard.id) ? { ...g, enabled } : g));
+    setWatches(next);
+    await visionSave(next);
+  }, [watches]);
 
-  // Arrows move the selection, Enter runs it, Esc dismisses. Bound on the
+  const run = useCallback(
+    async (entry: Entry) => {
+      if (entry.kind === "watch") {
+        if (entry.guard) await toggleWatch(entry.guard);
+        return; // stay open: toggling is not a screen-takeover like playing a macro
+      }
+      if (entry.kind === "macro") {
+        await playMacro(entry.id);
+      } else {
+        await runChain(entry.id);
+      }
+      await getCurrentWindow().hide();
+    },
+    [toggleWatch],
+  );
+
+  // Arrows move the selection, Enter acts on it, Esc dismisses. Bound on the
   // document so they work whether the input or a row has focus.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -145,7 +205,7 @@ export function Launcher() {
     document.getElementById(`launcher-row-${selected}`)?.scrollIntoView({ block: "nearest" });
   }, [selected]);
 
-  const isEmpty = macros.length === 0 && chains.length === 0;
+  const isEmpty = macros.length === 0 && chains.length === 0 && watches.length === 0;
 
   return (
     <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground">
@@ -161,13 +221,13 @@ export function Launcher() {
           autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search macros and chains…"
+          placeholder="Search macros, chains and watch…"
           spellCheck={false}
           className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
         />
       </div>
 
-      {/* Macro + chain list. */}
+      {/* Macro + chain + watch list. */}
       <div className="flex-1 overflow-y-auto py-1">
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
@@ -176,7 +236,7 @@ export function Launcher() {
           </div>
         ) : entries.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-            {isEmpty ? "No macros or chains yet." : "Nothing matches that search."}
+            {isEmpty ? "No macros, chains or watch triggers yet." : "Nothing matches that search."}
           </div>
         ) : (
           entries.map((entry, i) => (
@@ -192,13 +252,16 @@ export function Launcher() {
               )}
             >
               {/* Type badge: a macro plays outright, a chain runs its macros in
-                  sequence. Kept tiny so the name still reads first. */}
+                  sequence, a watch trigger toggles on/off. Kept tiny so the name
+                  still reads first. */}
               <span
                 className={cn(
                   "w-12 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wide",
                   entry.kind === "chain"
                     ? "bg-accent text-accent-foreground"
-                    : "bg-muted text-muted-foreground",
+                    : entry.kind === "watch"
+                      ? "bg-primary/15 text-primary"
+                      : "bg-muted text-muted-foreground",
                 )}
               >
                 {entry.kind}
@@ -207,7 +270,16 @@ export function Launcher() {
                 <p className="truncate text-sm font-medium">{entry.name}</p>
                 <p className="truncate text-xs text-muted-foreground">{entry.sub}</p>
               </div>
-              <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+              <span
+                className={cn(
+                  "shrink-0 text-xs tabular-nums",
+                  entry.kind === "watch"
+                    ? entry.enabled
+                      ? "font-semibold text-primary"
+                      : "text-muted-foreground/60"
+                    : "text-muted-foreground",
+                )}
+              >
                 {entry.right}
               </span>
             </button>
@@ -218,7 +290,7 @@ export function Launcher() {
       {/* Hint bar. */}
       <div className="flex shrink-0 items-center gap-3 border-t border-border px-4 py-2 text-[11px] text-muted-foreground">
         <span>↑↓ navigate</span>
-        <span>↵ run</span>
+        <span>↵ run / toggle</span>
         <span>esc dismiss</span>
       </div>
     </div>
