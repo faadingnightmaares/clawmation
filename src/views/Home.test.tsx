@@ -108,11 +108,16 @@ describe("Home Anti-AFK controls", () => {
     mockBackend("A10");
     view();
 
-    fireEvent.click(await screen.findByRole("combobox", { name: "Anti-AFK action" }));
-    expect(await screen.findByText("Jump")).toBeInTheDocument();
-    expect(screen.getByText("Walk")).toBeInTheDocument();
-    expect(screen.getByText("Camera nudge")).toBeInTheDocument();
-    expect(screen.getAllByText("Random mix")).toHaveLength(2);
+    const actionSelect = await screen.findByRole("combobox", {
+      name: "Anti-AFK action",
+    });
+    await waitFor(() => expect(actionSelect).toBeEnabled());
+    fireEvent.click(actionSelect);
+
+    expect(await screen.findByRole("option", { name: "Jump" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Walk" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Camera nudge" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Random mix" })).toBeInTheDocument();
   });
 
   it("enables the selected target and delegates the immediate jump to the backend", async () => {
