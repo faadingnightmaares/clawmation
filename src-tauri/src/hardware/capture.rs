@@ -373,6 +373,15 @@ impl DxgiCapture {
 /// `np.array(shot)[:, :, :3]` does. A negative `biHeight` requests a top-down
 /// buffer, matching the DXGI path's row order.
 fn grab_gdi(region: Region) -> Option<Frame> {
+    // A GDI grab is DPI-virtualized per thread: an unaware thread's
+    // GetSystemMetrics and BitBlt return the *logical* desktop (2048×1152 at
+    // 125% scaling), while the rest of the pipeline deals in physical pixels —
+    // DXGI capture always is, and the recorder/player/vision-detector screen
+    // dims are forced physical. Without this guard a region expanded against
+    // physical screen pixels would crop a logical-resolution frame, shifting
+    // detections well off their configured bounds (issue #5). Held for the
+    // whole grab so the metrics and the blit agree.
+    let _aware = crate::hardware::dpi::PerMonitorAware::new();
     let (screen_w, screen_h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     let (left, top, w, h) = region_rect(region, screen_w, screen_h);
     if w <= 0 || h <= 0 {

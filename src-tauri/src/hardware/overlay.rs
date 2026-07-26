@@ -63,8 +63,12 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(once(0)).collect()
 }
 
-/// Primary-display size in physical pixels, the overlay's full extent.
+/// Primary-display size in physical pixels, the overlay's full extent. Unaware
+/// threads get the logical (scaled-down) metrics, which would size the overlay
+/// short of the physical screen's edges and break the alignment between a drag
+/// and the captured frame it selects from (issue #5).
 pub fn screen_size() -> (i32, i32) {
+    let _aware = crate::hardware::dpi::PerMonitorAware::new();
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
@@ -297,6 +301,16 @@ where
     let (class, title) = (class.to_string(), title.to_string());
 
     thread::spawn(move || {
+        // DPI awareness is per-thread, so it must be forced on *this* thread —
+        // the one that creates the window and pumps its messages. Without it,
+        // CreateWindowExW interprets the physical screen extent in logical
+        // units (at 125% scaling the window comes out a quarter of the screen
+        // short on each axis) and WM_MOUSEMOVE reports coordinates in a space
+        // the physical-pixel captured frame does not share, so the region a
+        // user drags is not the region that gets picked (issue #5). Held for
+        // the whole pump: creation, sizing, and input all agree on physical
+        // pixels.
+        let _aware = crate::hardware::dpi::PerMonitorAware::new();
         let mut scene = scene;
         let hwnd = unsafe { create_window::<S>(&class, &title, &mut scene as *mut S) };
         if let Some(hwnd) = hwnd {

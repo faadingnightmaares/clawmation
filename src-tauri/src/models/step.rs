@@ -85,10 +85,10 @@ impl Default for AIMacro {
 }
 
 impl AIMacro {
-    /// The app only ever writes this file (the steps editor reads it back as raw
-    /// JSON), so the typed load exists to let the conversion tests assert on what
-    /// was written rather than on a string.
-    #[cfg(test)]
+    /// Load a saved fine-tune from `macros/ai/<name>.json`. The step editor
+    /// reads this back verbatim so a save round-trips — reopening the editor
+    /// shows the user's edited steps, not a re-derivation of the recording
+    /// (issue #3).
     pub fn load(path: &Path) -> serde_json::Result<Self> {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         serde_json::from_str(&text)

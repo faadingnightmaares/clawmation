@@ -56,10 +56,24 @@ pub fn steps_test(state: State<AppState>, window: Window, step: Value) -> Value 
 
 // ── Pure implementations (unit-tested against a temp dir) ────────────────────
 
-/// `macro_to_steps`: load a recorded macro and convert it to an editable step
-/// list. A missing macro reports `Macro '<name>' not found`; a load error surfaces
-/// verbatim, matching the source's `except → str(e)`.
+/// `macro_to_steps`: the editable step list for a macro. A saved fine-tune
+/// (`macros/ai/<name>.json`) wins and is returned verbatim — re-deriving steps
+/// from the recorded events, the stale source they were built from, would
+/// silently drop any action the user inserted by hand (issue #3). Only when no
+/// fine-tune has been saved yet does it convert the recorded macro. A missing
+/// macro reports `Macro '<name>' not found`; a load error surfaces verbatim,
+/// matching the source's `except → str(e)`.
 fn macro_to_steps_in(macros_dir: &Path, macro_name: &str) -> Value {
+    let ai_path = macros_dir.join("ai").join(format!("{macro_name}.json"));
+    if ai_path.exists() {
+        return match AIMacro::load(&ai_path) {
+            Ok(m) => {
+                let count = m.steps.len();
+                json!({ "ok": true, "steps": m.steps, "count": count })
+            }
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+    }
     let path = macros_dir.join(format!("{macro_name}.json"));
     if !path.exists() {
         return json!({ "ok": false, "error": format!("Macro '{macro_name}' not found") });
@@ -142,6 +156,48 @@ mod tests {
         assert_eq!(r["count"], json!(1));
         assert_eq!(r["steps"][0]["type"], "click");
         assert_eq!(r["steps"][0]["label"], "Click (100, 200)");
+    }
+
+    #[test]
+    fn macro_to_steps_prefers_a_saved_fine_tune_over_the_recording() {
+        let macros = temp_dir("ai_m2s_pref");
+        let name = "__test___pref";
+        // The recorded macro: one click, which would convert to one step.
+        let m = Macro {
+            name: name.to_string(),
+            events: vec![
+                ev(InputEventType::MouseDown, 0.1, 100, 200),
+                ev(InputEventType::MouseUp, 0.12, 100, 200),
+            ],
+            ..Default::default()
+        };
+        m.save_to(&macros.join(format!("{name}.json"))).unwrap();
+        // A saved fine-tune: the click PLUS a hand-inserted wait-for step.
+        let ai_dir = macros.join("ai");
+        std::fs::create_dir_all(&ai_dir).unwrap();
+        let fine = AIMacro {
+            name: name.to_string(),
+            steps: vec![
+                Step {
+                    step_type: "click".to_string(),
+                    label: "Click (100, 200)".to_string(),
+                    ..Default::default()
+                },
+                Step {
+                    step_type: "wait_for".to_string(),
+                    label: "Wait for a colour".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        fine.save_to(&ai_dir.join(format!("{name}.json"))).unwrap();
+
+        // The saved steps come back verbatim — the inserted action survives.
+        let r = macro_to_steps_in(&macros, name);
+        assert_eq!(r["ok"], json!(true));
+        assert_eq!(r["count"], json!(2));
+        assert_eq!(r["steps"][1]["type"], "wait_for");
     }
 
     #[test]

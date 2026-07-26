@@ -240,6 +240,9 @@ fn delete_macro_in(macros_dir: &Path, stats: &PlayStats, name: &str) -> Value {
     }
     match std::fs::remove_file(&path) {
         Ok(()) => {
+            // Drop the saved fine-tune with the macro (best-effort), so a later
+            // re-recording under the same name is not shadowed by stale steps.
+            let _ = std::fs::remove_file(macros_dir.join("ai").join(format!("{name}.json")));
             stats.remove(name);
             json!({ "ok": true })
         }
@@ -255,6 +258,7 @@ fn bulk_delete_in(macros_dir: &Path, stats: &PlayStats, names: &[String]) -> Val
     for name in names {
         let path = macros_dir.join(format!("{name}.json"));
         if path.exists() && std::fs::remove_file(&path).is_ok() {
+            let _ = std::fs::remove_file(macros_dir.join("ai").join(format!("{name}.json")));
             deleted.push(name.clone());
             stats.remove(name);
         } else {
@@ -501,6 +505,12 @@ fn rename_macro_in(macros_dir: &Path, guards_dir: &Path, old_name: &str, new_nam
     let gsrc = guards_dir.join(format!("{old_name}.json"));
     if gsrc.exists() {
         let _ = std::fs::rename(&gsrc, guards_dir.join(format!("{safe}.json")));
+    }
+    // Move the saved fine-tune too, so the step editor keeps round-tripping
+    // under the new name.
+    let asrc = macros_dir.join("ai").join(format!("{old_name}.json"));
+    if asrc.exists() {
+        let _ = std::fs::rename(&asrc, macros_dir.join("ai").join(format!("{safe}.json")));
     }
     json!({ "ok": true, "name": safe })
 }

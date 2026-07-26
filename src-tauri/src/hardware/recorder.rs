@@ -188,6 +188,25 @@ fn new_event(event_type: InputEventType, timestamp: f64) -> MacroEvent {
     }
 }
 
+/// Idle shorter than this is the user's stop-press reaction time, not a
+/// deliberate pause, so it is not worth preserving as a replay delay.
+const TRAILING_WAIT_MIN: f64 = 0.05;
+
+/// Capture the idle time after the last recorded action as a trailing WAIT
+/// event stamped at the recording's total elapsed time. The player paces off
+/// event timestamps and replays WAIT as a pure delay, so a looping macro now
+/// waits this gap out before restarting instead of jumping straight into the
+/// next iteration (issue #2): without it every loop was shorter than the
+/// recording by exactly the time between the last action and the stop press.
+fn append_trailing_wait(events: &mut Vec<MacroEvent>, total_elapsed: f64) {
+    let total = round4(total_elapsed);
+    if let Some(last) = events.last() {
+        if total - last.timestamp > TRAILING_WAIT_MIN {
+            events.push(new_event(InputEventType::Wait, total));
+        }
+    }
+}
+
 // ── Recording state (shared with the hook procedures) ─────────────────────────
 
 /// The mutable recording state. Lives in the process-global [`struct@SHARED`]
@@ -392,6 +411,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 /// own thread; reports that thread's native id back so [`MacroRecorder::stop`]
 /// can wake it. The hooks are unhooked as the loop exits.
 fn hook_thread(ready: mpsc::Sender<u32>) {
+    // Record in physical pixels. A low-level mouse hook reports coordinates in
+    // the DPI space of the thread that installed it, so make this thread
+    // Per-Monitor-V2 aware BEFORE installing the hooks (see `hardware::dpi`).
+    // With `screen_size` querying the stored resolution under the same context,
+    // the recorded coordinates and `record_resolution` live in one physical
+    // space, so replay on the recording display is scale-1.0 at any DPI. Held
+    // for the whole thread — the hook callbacks run here too.
+    let _aware = crate::hardware::dpi::PerMonitorAware::new();
     unsafe {
         let hmod = GetModuleHandleW(std::ptr::null());
         let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0);
@@ -510,16 +537,20 @@ impl MacroRecorder {
         }
         self.thread_id = 0;
 
-        let events: Vec<MacroEvent> = lock_shared()
+        // Take the events and the total elapsed time together: the trailing
+        // idle (now minus the last action, pauses excluded) is captured below
+        // so a loop's cadence matches the recording's.
+        let (mut events, total_elapsed) = lock_shared()
             .take()
-            .map(|s| s.events)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|mut e| {
-                e.timestamp = round4(e.timestamp);
-                e
+            .map(|s| {
+                let total = s.elapsed();
+                (s.events, total)
             })
-            .collect();
+            .unwrap_or_default();
+        for e in &mut events {
+            e.timestamp = round4(e.timestamp);
+        }
+        append_trailing_wait(&mut events, total_elapsed);
 
         let (secs, created_at) = now_unix();
         Macro {
@@ -549,6 +580,28 @@ mod tests {
         assert_eq!(round4(0.99321), 0.9932);
         assert_eq!(round4(0.05), 0.05);
         assert_eq!(round4(0.0), 0.0);
+    }
+
+    #[test]
+    fn trailing_wait_preserves_idle_after_the_last_action() {
+        let mut events = vec![new_event(InputEventType::KeyDown, 1.0)];
+        append_trailing_wait(&mut events, 3.5);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].event_type, InputEventType::Wait);
+        assert_eq!(events[1].timestamp, 3.5, "stamped at the total elapsed time");
+    }
+
+    #[test]
+    fn trailing_wait_skips_reaction_time_and_empty_recordings() {
+        // Sub-threshold idle is the stop-press reaction, not a deliberate pause.
+        let mut events = vec![new_event(InputEventType::KeyDown, 1.0)];
+        append_trailing_wait(&mut events, 1.03);
+        assert_eq!(events.len(), 1);
+
+        // An all-idle recording (no actions) stays empty.
+        let mut empty: Vec<MacroEvent> = Vec::new();
+        append_trailing_wait(&mut empty, 5.0);
+        assert!(empty.is_empty());
     }
 
     #[test]
