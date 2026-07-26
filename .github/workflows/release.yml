@@ -74,4 +74,4 @@ jobs:
           releaseDraft: true
           # Writes latest.json alongside the installers: the manifest the
           # updater endpoint in tauri.conf.json points at.
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
