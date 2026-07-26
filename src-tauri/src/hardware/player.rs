@@ -73,6 +73,46 @@ fn scale_point(x: i64, y: i64, x_scale: f64, y_scale: f64) -> (i32, i32) {
     ((x as f64 * x_scale) as i32, (y as f64 * y_scale) as i32)
 }
 
+/// The resolution to scale FROM, correcting a stored `record_resolution` that is
+/// smaller than the coordinates it recorded. Recorded coordinates come from the
+/// low-level mouse hook, which always reports PHYSICAL pixels; the stored
+/// resolution came from `GetSystemMetrics`, which a DPI-unaware recorder (the old
+/// Python app, or a build from before per-monitor awareness) read as the
+/// *logical*, scaled-down size. On a 2560-wide panel at 125% that stores 2048
+/// while the coordinates still run to ~2560, so replaying against the physical
+/// target scales every relative delta up by the 1.25 DPI factor and the path
+/// visibly "extends" outward. A resolution that does not bound its own
+/// coordinates is provably wrong, and there the coordinates are physical and so
+/// is the target, so the correct transform is 1:1 — substituting the target makes
+/// the scale 1.0 and replays the path exactly. A correctly-recorded resolution
+/// always bounds its coordinates, so genuine cross-resolution macros (recorded at
+/// 1080p, played at 1440p) are left untouched.
+fn effective_record_resolution(
+    record_resolution: (u32, u32),
+    target_resolution: (u32, u32),
+    events: &[MacroEvent],
+) -> (u32, u32) {
+    let (mut rw, mut rh) = record_resolution;
+    let (mut max_x, mut max_y) = (0i64, 0i64);
+    for e in events {
+        if e.x > max_x {
+            max_x = e.x;
+        }
+        if e.y > max_y {
+            max_y = e.y;
+        }
+    }
+    // Valid coordinates in an `rw`-wide space are 0..=rw-1, so a coordinate that
+    // reaches `rw` already falls outside the stored space.
+    if max_x >= rw as i64 {
+        rw = target_resolution.0;
+    }
+    if max_y >= rh as i64 {
+        rh = target_resolution.1;
+    }
+    (rw, rh)
+}
+
 /// State shared between the public `MacroPlayer` handle and its playback thread.
 struct PlayerShared {
     /// Set to request the play loop stop at the next event boundary.
@@ -175,7 +215,10 @@ fn play_loop(
     checkpoint: Option<CheckpointDetect>,
 ) {
     let controller = InputController::new();
-    let (x_scale, y_scale) = compute_scales(macro_def.record_resolution, target_resolution);
+    let (x_scale, y_scale) = compute_scales(
+        effective_record_resolution(macro_def.record_resolution, target_resolution, &macro_def.events),
+        target_resolution,
+    );
     let speed = if speed > 0.0 { speed } else { 1.0 };
     // Prefer exact down/up for modern macros; skip legacy synthetic clicks when
     // real edges exist so a click isn't fired twice.
@@ -696,6 +739,41 @@ mod tests {
         // int(v * scale) truncation, matching Python + replay_event.
         assert_eq!(scale_point(100, 50, 1.5, 1.5), (150, 75));
         assert_eq!(scale_point(3, 3, 0.9, 0.9), (2, 2)); // 2.7 -> 2
+    }
+
+    #[test]
+    fn effective_record_resolution_corrects_an_understated_space() {
+        let ev = |x, y| MacroEvent {
+            event_type: InputEventType::MouseMove,
+            timestamp: 0.0,
+            x,
+            y,
+            button: "left".to_string(),
+            key: String::new(),
+            delta: 0,
+            duration: 0.0,
+            checkpoint: None,
+        };
+
+        // A macro recorded under a LOGICAL 2048x1152 query whose coordinates are
+        // the PHYSICAL 2211x1364 (a 2560x1440 panel at 125% scaling): the stored
+        // resolution does not bound its own coordinates, so it is replaced by the
+        // physical target, making the replay scale 1.0 instead of stretching every
+        // delta out by the DPI factor (the "always extending" path).
+        let logical = vec![ev(0, 0), ev(2211, 1364)];
+        let corrected = effective_record_resolution((2048, 1152), (2560, 1440), &logical);
+        assert_eq!(corrected, (2560, 1440));
+        assert_eq!(compute_scales(corrected, (2560, 1440)), (1.0, 1.0));
+
+        // A correctly-recorded macro (resolution bounds its coordinates) is left
+        // alone, so a genuine cross-resolution rescale still applies.
+        let small = vec![ev(0, 0), ev(1919, 1079)];
+        let untouched = effective_record_resolution((1920, 1080), (2560, 1440), &small);
+        assert_eq!(untouched, (1920, 1080));
+        assert_eq!(
+            compute_scales(untouched, (2560, 1440)),
+            (2560.0 / 1920.0, 1440.0 / 1080.0)
+        );
     }
 
     /// End-to-end timing + loop-control check on the real playback thread.

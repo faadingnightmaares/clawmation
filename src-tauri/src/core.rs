@@ -196,6 +196,14 @@ impl Vision {
     /// once. Idempotent, and infallible: `ScreenCapture::new` falls back to GDI
     /// rather than failing, so there is nothing here for a caller to handle.
     pub fn ensure_ready(&self, screen_w: i64, screen_h: i64, backend: &str) {
+        // Re-point the detector at the live screen on EVERY call, ahead of the
+        // ready fast-path: a percentage watch region expands against these dims,
+        // so a resolution change — or a first call that finds the capture slot
+        // already open and would otherwise return with the detector still 0×0 —
+        // must not leave it expanding against stale dimensions. That is the
+        // failure where a limited watch area silently crops to the wrong
+        // rectangle while "Anywhere" still detects fine.
+        self.detector.lock().unwrap().set_screen(screen_w, screen_h);
         if self.ready.load(Ordering::SeqCst) {
             return;
         }
@@ -210,7 +218,6 @@ impl Vision {
         self.ready.store(true, Ordering::SeqCst);
         drop(slot);
 
-        self.detector.lock().unwrap().set_screen(screen_w, screen_h);
         *self.resolved.lock().unwrap() = Some(resolved.clone());
         if let Ok(mut log) = self.log.lock() {
             log.push("ok", format!("Capture ready ({resolved})"));

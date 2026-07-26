@@ -155,6 +155,8 @@ export interface MacroListItem {
   notes: string;
   play_count: number;
   last_played: number;
+  /** Cumulative seconds this macro has been played (0 until the first run). */
+  played: number;
 }
 
 export function listMacros(): Promise<MacroListItem[]> {
@@ -395,14 +397,17 @@ export function guardPickColor(): Promise<PickColorResult> {
   return invoke<PickColorResult>("guard_pick_color");
 }
 
-/** A dragged watch region in screen pixels; the editor converts it to the
- * `[x1,y1,x2,y2]` percentages a guard stores. */
+/** A dragged watch region. The backend returns the pixel rect (`x/y/w/h`) AND
+ * `region`, the same box as `[x1,y1,x2,y2]` percentages of the captured frame;
+ * the editor stores `region` directly (it is computed against the picker's own
+ * frame, so it stays correct across monitors and DPI scales). */
 export interface PickRegionResult {
   ok: boolean;
   x?: number;
   y?: number;
   w?: number;
   h?: number;
+  region?: number[];
   error?: string;
 }
 

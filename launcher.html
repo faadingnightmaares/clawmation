@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/Clawmation.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clawmation Launcher</title>
+    <style>
+      /* Match the app canvas so the frameless panel never flashes a white
+         background for a frame when the play hotkey shows it. Keep in step with
+         tauri.conf.json's backgroundColor (#15120e). */
+      html,
+      body {
+        margin: 0;
+        background: #15120e;
+      }
+    </style>
+  </head>
+  <body class="ds-canvas">
+    <div id="root"></div>
+    <script type="module" src="/src/launcher/main.tsx"></script>
+  </body>
+</html>

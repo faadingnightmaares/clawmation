@@ -21,6 +21,13 @@ pub struct MacroStat {
     pub first_played: f64,
     #[serde(default)]
     pub last_played: f64,
+    /// Cumulative wall-time this macro has spent playing, in seconds. Filled in
+    /// by `update_last_run` as each run reports its real duration (the launcher
+    /// shows it as "time played"). `#[serde(default)]` so a pre-existing stats
+    /// file, which never tracked it, loads as 0.0 and accumulates from the next
+    /// play rather than failing to deserialize.
+    #[serde(default)]
+    pub total_duration: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -165,7 +165,8 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
   const onPickRegion = async () => {
     try {
       const r = await guardPickRegion();
-      if (r.ok) patch({ region: pxRectToPct(r.x ?? 0, r.y ?? 0, r.w ?? 0, r.h ?? 0) });
+      if (r.ok)
+        patch({ region: r.region ?? pxRectToPct(r.x ?? 0, r.y ?? 0, r.w ?? 0, r.h ?? 0) });
       else if (r.error && r.error !== "cancelled") notify("error", r.error);
     } catch {
       notify("error", "Couldn’t set the watch area.");

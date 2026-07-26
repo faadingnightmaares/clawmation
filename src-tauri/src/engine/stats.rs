@@ -43,6 +43,7 @@ impl PlayStats {
                         count: 1,
                         first_played: now,
                         last_played: now,
+                        total_duration: 0.0,
                     },
                 );
             }
@@ -98,17 +99,27 @@ impl PlayStats {
             .collect()
     }
 
-    /// Fill duration/status onto the newest `running` history entry for `name`.
-    /// No-op if there is no matching entry, matching the best-effort source.
+    /// Fill duration/status onto the newest `running` history entry for `name`,
+    /// and bank the run's real duration onto the macro's cumulative
+    /// `total_duration`. No-op if there is no matching entry, matching the
+    /// best-effort source. This is the only place the real per-run duration is
+    /// known (`record_play` books the entry with 0.0 up front), so it is where
+    /// the lifetime play time accumulates.
     pub fn update_last_run(&self, name: &str, duration: f64, status: &str) {
         let mut data = self.data.lock().unwrap();
-        if let Some(entry) = data
+        let updated = data
             .history
             .iter_mut()
             .find(|e| e.name == name && e.status == "running")
-        {
-            entry.duration = round1(duration);
-            entry.status = status.to_string();
+            .map(|entry| {
+                entry.duration = round1(duration);
+                entry.status = status.to_string();
+            })
+            .is_some();
+        if updated {
+            if let Some(stat) = data.stats.get_mut(name) {
+                stat.total_duration = round1(stat.total_duration + duration);
+            }
             self.persist(&data);
         }
     }

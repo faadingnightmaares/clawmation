@@ -108,7 +108,11 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     let app_state = app.state::<AppState>();
     match which {
         Action::Record => app_state.core.hotkey_record(),
-        Action::Play => app_state.core.hotkey_play(),
+        // The play hotkey opens the macro launcher — a Raycast/PowerToys-style
+        // picker listing every macro with its play count and time played — so the
+        // user chooses what to run instead of the old "replay the last macro"
+        // behavior. The tray's "Replay last macro" still calls `hotkey_play`.
+        Action::Play => crate::shell::launcher::toggle(app),
         // The stop hotkey is the global emergency stop (`Api.emergency_stop`),
         // which also reaches the vision agent on `AppState`.
         Action::Stop => {

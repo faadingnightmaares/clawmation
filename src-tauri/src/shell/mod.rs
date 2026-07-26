@@ -6,4 +6,5 @@
 pub mod detections;
 pub mod hotkeys;
 pub mod indicator;
+pub mod launcher;
 pub mod tray;

@@ -47,6 +47,15 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
         core.player.stop();
         stopped.push("playback");
     }
+    // A running chain keeps firing macro after macro on its own thread; flag it
+    // to halt after the current one. With the player stopped above (the in-flight
+    // macro dies), this ends the whole chain rather than just the macro it was on.
+    // The vision watch below is the "autopilot" loop; there is no other autopilot
+    // runtime, so recording + playback + chain + vision is the complete stop set.
+    if state.chains.running_chain().is_some() {
+        state.chains.stop();
+        stopped.push("chain");
+    }
     {
         // Gate on is_running (Python's check), then take the agent out from under
         // the lock before stop() joins its thread: a join blocked on an infinite

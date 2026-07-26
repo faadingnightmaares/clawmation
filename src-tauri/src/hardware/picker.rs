@@ -1025,7 +1025,15 @@ pub fn sample_color() -> Value {
     }
 }
 
-/// Drag a rectangle; returns it as `{x, y, w, h}` clamped to the screen.
+/// Drag a rectangle; returns it as `{x, y, w, h}` clamped to the screen, plus
+/// `region`: the same box as `[x1, y1, x2, y2]` percentages of the captured
+/// frame. The percentages are computed HERE, against the frame's own dimensions,
+/// because the picker captures the PRIMARY monitor while the frontend only knows
+/// the size of the display its window happens to sit on — dividing the picked
+/// pixels by that (possibly different) denominator skews a limited watch area,
+/// the bug where a drawn region detects in the wrong place while "Anywhere"
+/// works. A frame-relative percentage stays correct on any monitor layout or DPI
+/// scale; the editor stores it directly.
 pub fn pick_region() -> Value {
     let Some(frame) = grab_screen() else { return no_capture() };
     let (fw, fh) = (frame.width as i32, frame.height as i32);
@@ -1033,9 +1041,34 @@ pub fn pick_region() -> Value {
         None => cancelled(),
         Some((x, y, w, h)) => {
             let (x, y) = (x.clamp(0, fw - 1), y.clamp(0, fh - 1));
-            json!({ "ok": true, "x": x, "y": y, "w": w.min(fw - x), "h": h.min(fh - y) })
+            let (w, h) = (w.min(fw - x), h.min(fh - y));
+            json!({
+                "ok": true,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "region": region_pct(x, y, w, h, fw, fh),
+            })
         }
     }
+}
+
+/// `[x1, y1, x2, y2]` percentages (0..100, two decimals) of a pixel rect against
+/// a frame of `fw`×`fh`. Two decimals, not whole percent: one percent is 25.6 px
+/// on a 2560-wide screen, so coarser rounding can shift or clip a box drawn
+/// tightly around a line of text until OCR reads nothing.
+fn region_pct(x: i32, y: i32, w: i32, h: i32, fw: i32, fh: i32) -> [f64; 4] {
+    fn pct(num: f64, den: f64) -> f64 {
+        ((num / den.max(1.0)) * 10000.0).round() / 100.0
+    }
+    let (fw, fh) = (fw as f64, fh as f64);
+    [
+        pct(x as f64, fw).clamp(0.0, 100.0),
+        pct(y as f64, fh).clamp(0.0, 100.0),
+        pct((x + w) as f64, fw).clamp(0.0, 100.0),
+        pct((y + h) as f64, fh).clamp(0.0, 100.0),
+    ]
 }
 
 fn run_region(frame: Frame) -> Option<(i32, i32, i32, i32)> {

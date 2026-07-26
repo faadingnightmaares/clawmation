@@ -171,8 +171,11 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
   const pickRegion = () =>
     run("region", async () => {
       const r = await guardPickRegion();
-      if (r.ok && r.x != null && r.y != null && r.w != null && r.h != null) {
-        patch({ region: pxRectToPct(r.x, r.y, r.w, r.h), _preview: null });
+      if (r.ok) {
+        // Prefer the frame-relative percentages the picker computed; fall back to
+        // a local conversion only for a backend that omits them.
+        const region = r.region ?? pxRectToPct(r.x ?? 0, r.y ?? 0, r.w ?? 0, r.h ?? 0);
+        patch({ region, _preview: null });
         notify("success", "Area set.");
       } else if (r.error && r.error !== CANCELLED) {
         notify("error", r.error);

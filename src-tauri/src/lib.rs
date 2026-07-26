@@ -64,7 +64,11 @@ pub fn run() {
                 .with_state_flags(
                     StateFlags::all() & !StateFlags::DECORATIONS & !StateFlags::VISIBLE,
                 )
-                .with_denylist(&[shell::indicator::LABEL, shell::detections::LABEL])
+                .with_denylist(&[
+                    shell::indicator::LABEL,
+                    shell::detections::LABEL,
+                    shell::launcher::LABEL,
+                ])
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -98,6 +102,26 @@ pub fn run() {
             match shell::detections::create(&handle) {
                 Ok(()) => app.state::<AppState>().core.detections.attach(handle.clone()),
                 Err(e) => eprintln!("Clawmation: detection overlay unavailable: {e}"),
+            }
+            // The macro launcher (the play hotkey's Raycast-style picker), built
+            // hidden and centered; the hotkey toggles it. Optional like the
+            // overlays: a failure is logged and startup continues, the hotkey just
+            // won't open a panel.
+            if let Err(e) = shell::launcher::create(&handle) {
+                eprintln!("Clawmation: macro launcher unavailable: {e}");
+            }
+            // The launcher dismisses itself the moment focus leaves it — click
+            // back into a game, Alt-Tab away — the Raycast behavior that keeps a
+            // hotkey-summoned palette from lingering over the thing you summoned
+            // it to use. Hiding on blur is idempotent, so the hotkey's own
+            // dismiss (which also hides) double-firing is harmless.
+            if let Some(launcher) = app.get_webview_window(shell::launcher::LABEL) {
+                let blur_handle = handle.clone();
+                launcher.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Focused(false)) {
+                        shell::launcher::hide(&blur_handle);
+                    }
+                });
             }
             // Look for a new release once, off the startup path. Nothing waits on
             // it and a failure is silent; an offline machine must still start.

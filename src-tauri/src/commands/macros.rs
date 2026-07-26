@@ -35,6 +35,9 @@ pub struct MacroListItem {
     pub notes: String,
     pub play_count: i64,
     pub last_played: f64,
+    /// Cumulative seconds this macro has been played; the launcher's "time
+    /// played" column. 0.0 until the first completed run banks a duration.
+    pub played: f64,
 }
 
 /// One entry of `list_templates`, matching the Python dict shape.
@@ -86,6 +89,7 @@ pub fn list_macros() -> Vec<MacroListItem> {
                 notes: macro_def.notes,
                 play_count: stat.map(|s| s.count).unwrap_or(0),
                 last_played: stat.map(|s| s.last_played).unwrap_or(0.0),
+                played: stat.map(|s| s.total_duration).unwrap_or(0.0),
                 name: macro_def.name,
             })
         })
