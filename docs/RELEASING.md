@@ -91,8 +91,9 @@ hand or work out why it didn't.
    - `nsis/clawmation_<version>_x64-setup.exe.sig`: its signature.
 
    Tauri v2 signs the installer itself; there is no `.nsis.zip` unless
-   `createUpdaterArtifacts` is set to `"v1Compatible"`. The MSI is signed too,
-   but ignore it: NSIS is the only thing the updater installs on Windows.
+   `createUpdaterArtifacts` is set to `"v1Compatible"`. The bundle configuration
+   intentionally builds NSIS only: generating MSI and NSIS together can make an
+   automated `latest.json` select the wrong Windows artifact.
 
 4. Write `latest.json` next to them:
 
