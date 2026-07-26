@@ -36,6 +36,8 @@ pub fn emergency_stop(state: State<AppState>) -> Value {
 pub fn emergency_stop_impl(state: &AppState) -> Value {
     let core = &state.core;
     let mut stopped: Vec<&str> = Vec::new();
+    let managed_playback =
+        core.runtime.lock().unwrap().mode == "playing" && core.player.is_playing();
 
     if let Some(recorder) = core.recorder.lock().unwrap().as_mut() {
         if recorder.is_recording() {
@@ -75,7 +77,13 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
         }
     }
 
-    core.set_mode("idle");
+    // A normal macro has a watcher that owns its terminal status, duration and
+    // mode reset. Let it finish that job instead of making "idle" visible while
+    // the input thread is still unwinding; recorder/steps/vision-only stops have
+    // no such watcher and reset immediately.
+    if !managed_playback {
+        core.set_mode("idle");
+    }
     let summary = if stopped.is_empty() {
         "nothing active".to_string()
     } else {

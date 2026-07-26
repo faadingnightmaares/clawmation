@@ -9,6 +9,7 @@ mod core;
 pub mod engine;
 pub mod hardware;
 mod logbuf;
+mod migrations;
 mod models;
 mod notify;
 mod paths;
@@ -35,6 +36,18 @@ pub fn run() {
     paths::ensure_dirs();
 
     let app_state = AppState::new(MacroConfig::load());
+    let migration = migrations::migrate_legacy_macros(&paths::macros_dir());
+    if let Some(summary) = migration.summary() {
+        app_state.core.emit(
+            if migration.errors.is_empty() { "ok" } else { "warn" },
+            summary,
+        );
+    }
+    for error in migration.errors {
+        app_state
+            .core
+            .emit("err", format!("Macro upgrade left a file unchanged: {error}"));
+    }
 
     tauri::Builder::default()
         // Single-instance first: a duplicate launch is folded back into the

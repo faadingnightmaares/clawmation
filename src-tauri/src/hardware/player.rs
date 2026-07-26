@@ -15,6 +15,8 @@
 //! `MacroPlayer` split. Detection lives behind that closure; this file owns only
 //! the poll/timeout/action orchestration.
 
+use std::collections::BTreeSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -32,6 +34,25 @@ use crate::models::macro_def::{InputEventType, Macro, MacroEvent};
 /// config. Boxed and `Send + Sync` so the play thread can own it; `play_macro`
 /// builds one over `core::Vision`, the vision-agent runner passes `None`.
 pub type CheckpointDetect = Box<dyn Fn(&Value) -> Vec<Detection> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackOutcome {
+    Completed { iterations: u64 },
+    Stopped,
+    Failed(String),
+}
+
+impl PlaybackOutcome {
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Completed { .. } => "completed",
+            Self::Stopped => "stopped",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+const MAX_CRITICAL_LATENESS: Duration = Duration::from_millis(250);
 
 /// Whether repetition `iteration` (1-based) should run, given the loop settings.
 ///
@@ -65,6 +86,112 @@ fn has_button_edges(events: &[MacroEvent]) -> bool {
     events
         .iter()
         .any(|e| matches!(e.event_type, InputEventType::MouseDown | InputEventType::MouseUp))
+}
+
+fn valid_button(button: &str) -> bool {
+    matches!(
+        button.to_ascii_lowercase().as_str(),
+        "left" | "primary" | "right" | "secondary" | "middle" | "center" | "x1" | "x2"
+    )
+}
+
+fn validate_inputs(macro_def: &Macro, target_resolution: (u32, u32), speed: f64) -> Result<(), String> {
+    macro_def.validate_for_playback()?;
+    if target_resolution.0 == 0 || target_resolution.1 == 0 {
+        return Err("target resolution must be non-zero".to_string());
+    }
+    if !speed.is_finite() || speed <= 0.0 || speed > 100.0 {
+        return Err("playback speed must be finite and between 0 and 100".to_string());
+    }
+    if has_button_edges(&macro_def.events)
+        && macro_def
+            .events
+            .iter()
+            .any(|event| event.event_type == InputEventType::MouseClick)
+    {
+        return Err(
+            "macro mixes legacy MOUSE_CLICK events with explicit MOUSE_DOWN/MOUSE_UP edges; \
+             repair or re-record it to avoid duplicate or missing clicks"
+                .to_string(),
+        );
+    }
+    for (index, event) in macro_def.events.iter().enumerate() {
+        if matches!(
+            event.event_type,
+            InputEventType::MouseClick | InputEventType::MouseDown | InputEventType::MouseUp
+        ) && !valid_button(&event.button)
+        {
+            return Err(format!(
+                "event {index} uses unsupported mouse button '{}'",
+                event.button
+            ));
+        }
+        if matches!(
+            event.event_type,
+            InputEventType::KeyPress | InputEventType::KeyDown | InputEventType::KeyUp
+        ) && crate::hardware::input::resolve_vk(&event.key).is_none()
+        {
+            return Err(format!("event {index} uses unsupported key '{}'", event.key));
+        }
+    }
+    Ok(())
+}
+
+fn is_critical(event_type: InputEventType) -> bool {
+    matches!(
+        event_type,
+        InputEventType::MouseClick
+            | InputEventType::MouseDown
+            | InputEventType::MouseUp
+            | InputEventType::KeyPress
+            | InputEventType::KeyDown
+            | InputEventType::KeyUp
+            | InputEventType::Scroll
+    )
+}
+
+fn checkpoint_stops_on_timeout(cfg: &Value) -> bool {
+    cfg.get("on_timeout")
+        .and_then(Value::as_str)
+        .map(|policy| policy != "continue")
+        .unwrap_or(true)
+}
+
+struct HeldInputs<'a> {
+    controller: &'a InputController,
+    buttons: BTreeSet<String>,
+    keys: BTreeSet<String>,
+}
+
+impl<'a> HeldInputs<'a> {
+    fn new(controller: &'a InputController) -> Self {
+        Self {
+            controller,
+            buttons: BTreeSet::new(),
+            keys: BTreeSet::new(),
+        }
+    }
+
+    fn release_all(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        for key in std::mem::take(&mut self.keys) {
+            if let Err(error) = self.controller.try_key_up(&key) {
+                failures.push(error.to_string());
+            }
+        }
+        for button in std::mem::take(&mut self.buttons) {
+            if let Err(error) = self.controller.try_mouse_up(None, &button) {
+                failures.push(error.to_string());
+            }
+        }
+        failures
+    }
+}
+
+impl Drop for HeldInputs<'_> {
+    fn drop(&mut self) {
+        let _ = self.release_all();
+    }
 }
 
 /// Scale a recorded point to the target resolution, truncating toward zero like
@@ -127,6 +254,8 @@ struct PlayerShared {
     paused: Mutex<bool>,
     /// Signaled on resume/stop to wake a paused loop.
     pause_cv: Condvar,
+    /// Terminal result written by the playback thread and consumed by `wait`.
+    outcome: Mutex<Option<PlaybackOutcome>>,
 }
 
 impl PlayerShared {
@@ -139,6 +268,7 @@ impl PlayerShared {
             total_reps: AtomicU64::new(1),
             paused: Mutex::new(false),
             pause_cv: Condvar::new(),
+            outcome: Mutex::new(None),
         }
     }
 
@@ -148,10 +278,17 @@ impl PlayerShared {
     /// `stop()` setting the flag under the same lock before notifying) closes
     /// the lost-wakeup race: a stop that lands between the predicate check and
     /// the `wait` can't be missed.
-    fn wait_while_paused(&self) {
+    fn wait_while_paused(&self) -> Duration {
+        let started = Instant::now();
         let mut paused = self.paused.lock().unwrap();
+        let was_paused = *paused;
         while *paused && !self.stop_flag.load(Ordering::SeqCst) {
             paused = self.pause_cv.wait(paused).unwrap();
+        }
+        if was_paused {
+            started.elapsed()
+        } else {
+            Duration::ZERO
         }
     }
 
@@ -213,7 +350,7 @@ fn play_loop(
     target_resolution: (u32, u32),
     speed: f64,
     checkpoint: Option<CheckpointDetect>,
-) {
+) -> PlaybackOutcome {
     // Replays in the physical pixels the recorder captured: hold
     // Per-Monitor-V2 for the whole playback thread, the same idiom as the
     // recorder's hook thread (see `hardware::dpi`).
@@ -232,7 +369,10 @@ fn play_loop(
     let events = &macro_def.events;
 
     let mut iteration: u64 = 0;
-    loop {
+    let mut held = HeldInputs::new(&controller);
+    let mut outcome = PlaybackOutcome::Completed { iterations: 0 };
+
+    'iterations: loop {
         iteration += 1;
         if !should_run_iteration(loop_count, loop_enabled, iteration) {
             break;
@@ -247,26 +387,42 @@ fn play_loop(
         let _timer = HiResTimer::begin();
         let _no_accel = NoAcceleration::new();
 
-        // Fresh absolute timeline per iteration: each event fires at
-        // t0 + timestamp/speed. t0 is deliberately NOT rebased on pause/resume,
-        // so events queued during a pause fire in a catch-up burst on resume,
-        // a preserved quirk the guard engine depends on (see MIGRATION-NOTES).
+        // Fresh absolute timeline per iteration. Pauses, explicit waits and
+        // checkpoints extend `timeline_shift`; resuming never releases a burst
+        // of overdue clicks.
         let t0 = Instant::now();
+        let mut timeline_shift = Duration::ZERO;
         let mut prev: Option<(i32, i32)> = None;
 
-        for event in events {
+        for (event_index, event) in events.iter().enumerate() {
             if shared.stop_flag.load(Ordering::SeqCst) {
-                break;
+                outcome = PlaybackOutcome::Stopped;
+                break 'iterations;
             }
-            shared.wait_while_paused();
+            timeline_shift += shared.wait_while_paused();
             if shared.stop_flag.load(Ordering::SeqCst) {
-                break;
+                outcome = PlaybackOutcome::Stopped;
+                break 'iterations;
             }
 
-            shared.wait_until(t0 + Duration::from_secs_f64(event.timestamp / speed));
+            let target = t0 + timeline_shift + Duration::from_secs_f64(event.timestamp / speed);
+            shared.wait_until(target);
+            if shared.stop_flag.load(Ordering::SeqCst) {
+                outcome = PlaybackOutcome::Stopped;
+                break 'iterations;
+            }
 
             if button_edges && event.event_type == InputEventType::MouseClick {
                 continue;
+            }
+            let lateness = Instant::now().saturating_duration_since(target);
+            if is_critical(event.event_type) && lateness > MAX_CRITICAL_LATENESS {
+                outcome = PlaybackOutcome::Failed(format!(
+                    "event {event_index} ({:?}) was {} ms late; stopped before sending a catch-up input",
+                    event.event_type,
+                    lateness.as_millis()
+                ));
+                break 'iterations;
             }
             // Vision checkpoint: run only when a detector is wired AND the event
             // carries a non-empty config, mirroring Python's
@@ -282,60 +438,153 @@ fn play_loop(
                         .as_ref()
                         .filter(|c| matches!(c, Value::Object(m) if !m.is_empty())),
                 ) {
-                    run_checkpoint(&shared, &controller, detect, cfg, x_scale, y_scale);
+                    let started = Instant::now();
+                    match run_checkpoint(&shared, &controller, detect, cfg, x_scale, y_scale) {
+                        Ok(CheckpointOutcome::Reached) => {}
+                        Ok(CheckpointOutcome::Stopped) => {
+                            outcome = PlaybackOutcome::Stopped;
+                            break 'iterations;
+                        }
+                        Ok(CheckpointOutcome::TimedOut) if checkpoint_stops_on_timeout(cfg) => {
+                            outcome = PlaybackOutcome::Failed(format!(
+                                "checkpoint at event {event_index} timed out; no further repetitions were sent"
+                            ));
+                            break 'iterations;
+                        }
+                        Ok(CheckpointOutcome::TimedOut) => {}
+                        Err(error) => {
+                            outcome =
+                                PlaybackOutcome::Failed(format!("checkpoint at event {event_index} failed: {error}"));
+                            break 'iterations;
+                        }
+                    }
+                    timeline_shift += started.elapsed();
                 }
                 continue;
             }
 
-            match event.event_type {
-                // Mouse moves replay as relative deltas (after the first, which
-                // seeds the absolute position) so camera-drag Raw Input tracks.
-                InputEventType::MouseMove => {
-                    let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
-                    match prev {
-                        Some((px, py)) => {
-                            let (dx, dy) = (x - px, y - py);
-                            if dx != 0 || dy != 0 {
-                                controller.move_relative(dx, dy);
+            let delivered = (|| {
+                match event.event_type {
+                    // Mouse moves replay as relative deltas (after the first, which
+                    // seeds the absolute position) so camera-drag Raw Input tracks.
+                    InputEventType::MouseMove => {
+                        let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                        match prev {
+                            Some((px, py)) => {
+                                let (dx, dy) = (x - px, y - py);
+                                if dx != 0 || dy != 0 {
+                                    controller.try_move_relative(dx, dy)?;
+                                }
+                                // Relative input preserves Raw Input for game camera
+                                // movement, but Windows may scale the visible cursor
+                                // path at non-100% display scaling. Reconcile it to
+                                // the recorded physical point after every segment so
+                                // drift can never accumulate into a missed click.
+                                controller.try_sync_cursor_to(x, y)?;
                             }
-                            // Relative input preserves Raw Input for game camera
-                            // movement, but Windows may scale the visible cursor
-                            // path at non-100% display scaling. Reconcile it to
-                            // the recorded physical point after every segment so
-                            // drift can never accumulate into a missed click.
-                            controller.sync_cursor_to(x, y);
+                            None => controller.try_move_to(x, y)?,
                         }
-                        None => controller.move_to(x, y),
+                        prev = Some((x, y));
+                        Ok(())
                     }
-                    prev = Some((x, y));
+                    // Reconcile with SetCursorPos immediately before each button
+                    // edge, then send ONLY the button. SetCursorPos does not inject
+                    // a relative Raw Input delta, so right-click-drag camera tracking
+                    // keeps the recorded movement while UI clicks land exactly.
+                    InputEventType::MouseDown => {
+                        let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                        controller.try_sync_cursor_to(x, y)?;
+                        controller.try_mouse_down(None, &event.button)?;
+                        held.buttons.insert(event.button.to_ascii_lowercase());
+                        prev = Some((x, y));
+                        Ok(())
+                    }
+                    InputEventType::MouseUp => {
+                        let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                        controller.try_sync_cursor_to(x, y)?;
+                        controller.try_mouse_up(None, &event.button)?;
+                        held.buttons.remove(&event.button.to_ascii_lowercase());
+                        prev = Some((x, y));
+                        Ok(())
+                    }
+                    InputEventType::MouseClick => {
+                        let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                        controller.try_sync_cursor_to(x, y)?;
+                        controller.try_mouse_down(None, &event.button)?;
+                        held.buttons.insert(event.button.to_ascii_lowercase());
+                        controller.try_mouse_up(None, &event.button)?;
+                        held.buttons.remove(&event.button.to_ascii_lowercase());
+                        prev = Some((x, y));
+                        Ok(())
+                    }
+                    InputEventType::KeyPress => {
+                        controller.try_key_down(&event.key)?;
+                        held.keys.insert(event.key.to_ascii_lowercase());
+                        controller.try_key_up(&event.key)?;
+                        held.keys.remove(&event.key.to_ascii_lowercase());
+                        Ok(())
+                    }
+                    InputEventType::KeyDown => {
+                        controller.try_key_down(&event.key)?;
+                        held.keys.insert(event.key.to_ascii_lowercase());
+                        Ok(())
+                    }
+                    InputEventType::KeyUp => {
+                        controller.try_key_up(&event.key)?;
+                        held.keys.remove(&event.key.to_ascii_lowercase());
+                        Ok(())
+                    }
+                    InputEventType::Scroll => {
+                        let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
+                        controller.try_scroll(event.delta as i32, Some((x, y)))
+                    }
+                    InputEventType::Wait => {
+                        if event.duration > 0.0 {
+                            let wait = Duration::from_secs_f64(event.duration / speed);
+                            shared.wait_until(Instant::now() + wait);
+                            timeline_shift += wait;
+                        }
+                        Ok(())
+                    }
+                    InputEventType::Checkpoint => Ok(()),
                 }
-                // Reconcile with SetCursorPos immediately before each button
-                // edge, then send ONLY the button. SetCursorPos does not inject
-                // a relative Raw Input delta, so right-click-drag camera tracking
-                // keeps the recorded movement while UI clicks land exactly.
-                InputEventType::MouseDown => {
-                    let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
-                    controller.sync_cursor_to(x, y);
-                    controller.mouse_down(None, &event.button);
-                    prev = Some((x, y));
-                }
-                InputEventType::MouseUp => {
-                    let (x, y) = scale_point(event.x, event.y, x_scale, y_scale);
-                    controller.sync_cursor_to(x, y);
-                    controller.mouse_up(None, &event.button);
-                    prev = Some((x, y));
-                }
-                // Keys, scroll, wait, and legacy clicks (when no edges exist).
-                _ => controller.replay_event(event, 0, 0, x_scale, y_scale),
+            })();
+            if let Err(error) = delivered {
+                outcome = PlaybackOutcome::Failed(format!(
+                    "input delivery failed at event {event_index} ({:?}): {error}",
+                    event.event_type
+                ));
+                break 'iterations;
             }
         }
 
         if shared.stop_flag.load(Ordering::SeqCst) {
+            outcome = PlaybackOutcome::Stopped;
             break;
         }
+        let release_failures = held.release_all();
+        if !release_failures.is_empty() {
+            outcome = PlaybackOutcome::Failed(format!(
+                "could not release held input(s) at repetition {iteration}: {}",
+                release_failures.join("; ")
+            ));
+            break;
+        }
+        outcome = PlaybackOutcome::Completed { iterations: iteration };
     }
 
-    shared.playing.store(false, Ordering::SeqCst);
+    let release_failures = held.release_all();
+    if !release_failures.is_empty() {
+        let release_message = format!(
+            "could not release held input(s) while ending playback: {}",
+            release_failures.join("; ")
+        );
+        outcome = match outcome {
+            PlaybackOutcome::Failed(message) => PlaybackOutcome::Failed(format!("{message}; {release_message}")),
+            _ => PlaybackOutcome::Failed(release_message),
+        };
+    }
+    outcome
 }
 
 /// Execute one vision checkpoint: the orchestration half of Python's
@@ -344,6 +593,27 @@ fn play_loop(
 /// and the resulting click/drag/key. The Python player logs checkpoint state
 /// (skips, timeouts, hold) only to stderr, never the UI, so those lines are
 /// dropped here; a timed-out checkpoint just returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointOutcome {
+    Reached,
+    TimedOut,
+    Stopped,
+}
+
+fn detect_checked(detect: &CheckpointDetect, cfg: &Value) -> Result<Vec<Detection>, String> {
+    catch_unwind(AssertUnwindSafe(|| detect(cfg))).map_err(|payload| {
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| format!("screen detector panicked: {s}"))
+            .or_else(|| {
+                payload
+                    .downcast_ref::<String>()
+                    .map(|s| format!("screen detector panicked: {s}"))
+            })
+            .unwrap_or_else(|| "screen detector panicked".to_string())
+    })
+}
+
 fn run_checkpoint(
     shared: &PlayerShared,
     controller: &InputController,
@@ -351,13 +621,12 @@ fn run_checkpoint(
     cfg: &Value,
     x_scale: f64,
     y_scale: f64,
-) {
+) -> Result<CheckpointOutcome, String> {
     let mode = cfg.get("mode").and_then(Value::as_str).unwrap_or("wait_for");
     let timeout = cfg.get("timeout").and_then(Value::as_f64).unwrap_or(10.0);
 
     if mode == "hold_follow" {
-        hold_follow(shared, controller, cfg, detect, x_scale, y_scale, timeout);
-        return;
+        return hold_follow(shared, controller, cfg, detect, x_scale, y_scale, timeout);
     }
 
     // wait_for: poll until the target appears or the timeout elapses.
@@ -367,11 +636,11 @@ fn run_checkpoint(
         if Instant::now() >= deadline || shared.stop_flag.load(Ordering::SeqCst) {
             break None;
         }
-        shared.wait_while_paused();
+        let _ = shared.wait_while_paused();
         if shared.stop_flag.load(Ordering::SeqCst) {
-            return;
+            return Ok(CheckpointOutcome::Stopped);
         }
-        let matches = detect(cfg);
+        let matches = detect_checked(detect, cfg)?;
         if let Some(m) = matches.into_iter().next() {
             break Some(m);
         }
@@ -379,7 +648,8 @@ fn run_checkpoint(
     };
     let found = match found {
         Some(f) => f,
-        None => return,
+        None if shared.stop_flag.load(Ordering::SeqCst) => return Ok(CheckpointOutcome::Stopped),
+        None => return Ok(CheckpointOutcome::TimedOut),
     };
 
     let top_left_x = found.x - found.w / 2;
@@ -415,11 +685,15 @@ fn run_checkpoint(
                         arr[3].as_f64().unwrap_or(0.0),
                         x_scale,
                         y_scale,
-                    );
+                    )?;
                 }
             }
         }
-        return;
+        return if shared.stop_flag.load(Ordering::SeqCst) {
+            Ok(CheckpointOutcome::Stopped)
+        } else {
+            Ok(CheckpointOutcome::Reached)
+        };
     }
 
     // Single surgical point: click the exact pixel offset from the match top-left,
@@ -429,12 +703,10 @@ fn run_checkpoint(
             ((top_left_x as f64 + o[0].as_f64().unwrap_or(0.0)) * x_scale) as i32,
             ((top_left_y as f64 + o[1].as_f64().unwrap_or(0.0)) * y_scale) as i32,
         ),
-        _ => (
-            (found.x as f64 * x_scale) as i32,
-            (found.y as f64 * y_scale) as i32,
-        ),
+        _ => ((found.x as f64 * x_scale) as i32, (found.y as f64 * y_scale) as i32),
     };
-    do_action(controller, cfg, click_x, click_y);
+    do_action(controller, cfg, click_x, click_y)?;
+    Ok(CheckpointOutcome::Reached)
 }
 
 /// Drag along a drawn line from (sx,sy) to (ex,ey), in crop offsets from the
@@ -454,14 +726,14 @@ fn trace_line(
     ey: f64,
     x_scale: f64,
     y_scale: f64,
-) {
+) -> Result<(), String> {
     let button = cfg.get("button").and_then(Value::as_str).unwrap_or("left");
 
     // Key action can't sweep, so press the key and return.
     if cfg.get("action").and_then(Value::as_str) == Some("key") {
         if let Some(key) = cfg.get("key").and_then(Value::as_str).filter(|k| !k.is_empty()) {
-            controller.key_press(key);
-            return;
+            controller.try_key_press(key).map_err(|e| e.to_string())?;
+            return Ok(());
         }
     }
 
@@ -474,19 +746,23 @@ fn trace_line(
     };
 
     let (start_x, start_y) = screen(0.0);
-    controller.move_to(start_x, start_y);
-    controller.mouse_down(None, button);
-    for i in 1..=dist {
-        if shared.stop_flag.load(Ordering::SeqCst) {
-            break;
+    controller.try_move_to(start_x, start_y).map_err(|e| e.to_string())?;
+    controller.try_mouse_down(None, button).map_err(|e| e.to_string())?;
+    let trace_result = (|| -> Result<(), String> {
+        for i in 1..=dist {
+            if shared.stop_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            let (px, py) = screen(i as f64 / dist as f64);
+            controller.try_move_to(px, py).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_secs_f64(0.008));
         }
-        let (px, py) = screen(i as f64 / dist as f64);
-        controller.move_to(px, py);
-        std::thread::sleep(Duration::from_secs_f64(0.008)); // smooth cadence so the game tracks the drag
-    }
-    let (end_x, end_y) = screen(1.0);
-    controller.move_to(end_x, end_y);
-    controller.mouse_up(None, button);
+        let (end_x, end_y) = screen(1.0);
+        controller.try_move_to(end_x, end_y).map_err(|e| e.to_string())
+    })();
+    let release_result = controller.try_mouse_up(None, button).map_err(|e| e.to_string());
+    trace_result?;
+    release_result
 }
 
 /// Hold a button and continuously move the cursor to the detected target,
@@ -501,51 +777,69 @@ fn hold_follow(
     x_scale: f64,
     y_scale: f64,
     timeout: f64,
-) {
+) -> Result<CheckpointOutcome, String> {
     let hold_button = cfg.get("hold_button").and_then(Value::as_str).unwrap_or("left");
     let release_when = cfg.get("release_when").and_then(Value::as_str).unwrap_or("lost");
     let poll = cfg.get("poll").and_then(Value::as_f64).unwrap_or(0.05);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
 
-    controller.mouse_down(None, hold_button);
+    controller
+        .try_mouse_down(None, hold_button)
+        .map_err(|e| e.to_string())?;
     let mut last_seen = false;
-    while Instant::now() < deadline && !shared.stop_flag.load(Ordering::SeqCst) {
-        shared.wait_while_paused();
-        if shared.stop_flag.load(Ordering::SeqCst) {
-            break;
-        }
-        let matches = detect(cfg);
-        if let Some(m) = matches.first() {
-            let tx = (m.x as f64 * x_scale) as i32;
-            let ty = (m.y as f64 * y_scale) as i32;
-            controller.move_to(tx, ty);
-            last_seen = true;
-            // Release when the target is present.
-            if release_when == "found" {
+    let mut condition_met = false;
+    let follow_result = (|| -> Result<(), String> {
+        while Instant::now() < deadline && !shared.stop_flag.load(Ordering::SeqCst) {
+            let _ = shared.wait_while_paused();
+            if shared.stop_flag.load(Ordering::SeqCst) {
                 break;
             }
-        } else if release_when == "lost" && last_seen {
-            // Release when the target disappears.
-            break;
+            let matches = detect_checked(detect, cfg)?;
+            if let Some(m) = matches.first() {
+                let tx = (m.x as f64 * x_scale) as i32;
+                let ty = (m.y as f64 * y_scale) as i32;
+                controller.try_move_to(tx, ty).map_err(|e| e.to_string())?;
+                last_seen = true;
+                // Release when the target is present.
+                if release_when == "found" {
+                    condition_met = true;
+                    break;
+                }
+            } else if release_when == "lost" && last_seen {
+                // Release when the target disappears.
+                condition_met = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_secs_f64(poll));
         }
-        std::thread::sleep(Duration::from_secs_f64(poll));
+        Ok(())
+    })();
+    let release_result = controller.try_mouse_up(None, hold_button).map_err(|e| e.to_string());
+    follow_result?;
+    release_result?;
+    if shared.stop_flag.load(Ordering::SeqCst) {
+        Ok(CheckpointOutcome::Stopped)
+    } else if condition_met {
+        Ok(CheckpointOutcome::Reached)
+    } else {
+        Ok(CheckpointOutcome::TimedOut)
     }
-    controller.mouse_up(None, hold_button);
 }
 
 /// The wait_for action once the target is found: click the pixel, press a key, or
 /// (action `none`) do nothing. A `key` action with no key set is a no-op, exactly
 /// as Python's `if action == "key" and cfg.get("key")` guarded.
-fn do_action(controller: &InputController, cfg: &Value, x: i32, y: i32) {
+fn do_action(controller: &InputController, cfg: &Value, x: i32, y: i32) -> Result<(), String> {
     let action = cfg.get("action").and_then(Value::as_str).unwrap_or("click");
     if action == "key" {
         if let Some(key) = cfg.get("key").and_then(Value::as_str).filter(|k| !k.is_empty()) {
-            controller.key_press(key);
+            controller.try_key_press(key).map_err(|e| e.to_string())?;
         }
     } else if action == "click" {
         let button = cfg.get("button").and_then(Value::as_str).unwrap_or("left");
-        controller.click(x, y, button);
+        controller.try_click(x, y, button).map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 /// Plays back recorded macros with coordinate scaling, on a background thread.
@@ -580,6 +874,10 @@ impl MacroPlayer {
         self.shared.total_reps.load(Ordering::SeqCst)
     }
 
+    pub fn validate(&self, macro_def: &Macro, target_resolution: (u32, u32), speed: f64) -> Result<(), String> {
+        validate_inputs(macro_def, target_resolution, speed)
+    }
+
     /// Start playback on a background thread. A no-op if a macro is already
     /// playing (Python logs "Already playing, stop first" and returns).
     ///
@@ -593,10 +891,11 @@ impl MacroPlayer {
         target_resolution: (u32, u32),
         speed: f64,
         checkpoint: Option<CheckpointDetect>,
-    ) {
+    ) -> Result<(), String> {
         if self.is_playing() {
-            return;
+            return Err("a macro is already playing".to_string());
         }
+        validate_inputs(&macro_def, target_resolution, speed)?;
         // Reap the previous (finished or stopped) thread before starting a new
         // one, so at most one play thread ever touches `shared`. `is_playing`
         // being false here means the old thread has stopped or is exiting, so
@@ -605,6 +904,7 @@ impl MacroPlayer {
             let _ = handle.join();
         }
 
+        *self.shared.outcome.lock().unwrap() = None;
         self.shared.stop_flag.store(false, Ordering::SeqCst);
         *self.shared.paused.lock().unwrap() = false;
         self.shared.playing.store(true, Ordering::SeqCst);
@@ -618,9 +918,25 @@ impl MacroPlayer {
 
         let shared = Arc::clone(&self.shared);
         let handle = std::thread::spawn(move || {
-            play_loop(shared, macro_def, target_resolution, speed, checkpoint)
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                play_loop(Arc::clone(&shared), macro_def, target_resolution, speed, checkpoint)
+            }));
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    let reason = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    PlaybackOutcome::Failed(format!("playback thread panicked: {reason}"))
+                }
+            };
+            shared.playing.store(false, Ordering::SeqCst);
+            *shared.outcome.lock().unwrap() = Some(outcome);
         });
         *self.thread.lock().unwrap() = Some(handle);
+        Ok(())
     }
 
     pub fn stop(&self) {
@@ -632,7 +948,6 @@ impl MacroPlayer {
             self.shared.stop_flag.store(true, Ordering::SeqCst);
         }
         self.shared.pause_cv.notify_all();
-        self.shared.playing.store(false, Ordering::SeqCst);
     }
 
     pub fn pause(&self) {
@@ -662,11 +977,21 @@ impl MacroPlayer {
     /// Block until playback finishes. Python's `wait()` takes an optional
     /// timeout, but every call site in this app uses the no-arg form (verified),
     /// so this is a plain join.
-    pub fn wait(&self) {
+    pub fn wait(&self) -> PlaybackOutcome {
         let handle = self.thread.lock().unwrap().take();
         if let Some(handle) = handle {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                self.shared.playing.store(false, Ordering::SeqCst);
+                return PlaybackOutcome::Failed("playback thread terminated unexpectedly".to_string());
+            }
         }
+        self.shared.outcome.lock().unwrap().take().unwrap_or_else(|| {
+            if self.shared.stop_flag.load(Ordering::SeqCst) {
+                PlaybackOutcome::Stopped
+            } else {
+                PlaybackOutcome::Failed("playback ended without an outcome".to_string())
+            }
+        })
     }
 }
 
@@ -701,6 +1026,96 @@ mod tests {
             assert!(should_run_iteration(3, false, it));
         }
         assert!(!should_run_iteration(3, false, 4));
+    }
+
+    #[test]
+    fn checkpoint_timeout_is_fail_closed_unless_explicitly_overridden() {
+        assert!(checkpoint_stops_on_timeout(&serde_json::json!({})));
+        assert!(checkpoint_stops_on_timeout(
+            &serde_json::json!({ "on_timeout": "stop" })
+        ));
+        assert!(!checkpoint_stops_on_timeout(
+            &serde_json::json!({ "on_timeout": "continue" })
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_unknown_inputs_and_unsafe_speed() {
+        let mut key = move_event(0, 0, 0.0);
+        key.event_type = InputEventType::KeyPress;
+        key.key = "definitely_not_a_key".to_string();
+        let bad_key = Macro {
+            name: "bad-key".to_string(),
+            events: vec![key],
+            ..Default::default()
+        };
+        assert!(validate_inputs(&bad_key, (1920, 1080), 1.0)
+            .unwrap_err()
+            .contains("unsupported key"));
+
+        let mut click = move_event(0, 0, 0.0);
+        click.event_type = InputEventType::MouseClick;
+        click.button = "mystery".to_string();
+        let bad_button = Macro {
+            name: "bad-button".to_string(),
+            events: vec![click],
+            ..Default::default()
+        };
+        assert!(validate_inputs(&bad_button, (1920, 1080), 1.0)
+            .unwrap_err()
+            .contains("unsupported mouse button"));
+
+        let valid = Macro {
+            name: "valid".to_string(),
+            events: vec![move_event(0, 0, 0.0)],
+            ..Default::default()
+        };
+        assert!(validate_inputs(&valid, (1920, 1080), f64::NAN).is_err());
+        assert!(validate_inputs(&valid, (0, 1080), 1.0).is_err());
+    }
+
+    #[test]
+    fn preflight_rejects_ambiguous_mixed_click_encodings() {
+        let mut click = move_event(10, 10, 0.0);
+        click.event_type = InputEventType::MouseClick;
+        click.button = "left".to_string();
+        let mut down = move_event(10, 10, 0.1);
+        down.event_type = InputEventType::MouseDown;
+        down.button = "left".to_string();
+        let mixed = Macro {
+            name: "mixed-click-encoding".to_string(),
+            events: vec![click, down],
+            ..Default::default()
+        };
+
+        assert!(validate_inputs(&mixed, (1920, 1080), 1.0)
+            .unwrap_err()
+            .contains("mixes legacy MOUSE_CLICK"));
+    }
+
+    #[test]
+    fn pause_gate_reports_time_to_shift_out_of_the_timeline() {
+        let shared = Arc::new(PlayerShared::new());
+        *shared.paused.lock().unwrap() = true;
+        let resumer = Arc::clone(&shared);
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            *resumer.paused.lock().unwrap() = false;
+            resumer.pause_cv.notify_all();
+        });
+        let paused_for = shared.wait_while_paused();
+        thread.join().unwrap();
+        assert!(
+            paused_for >= Duration::from_millis(15),
+            "pause duration is rebased instead of causing catch-up: {paused_for:?}"
+        );
+    }
+
+    #[test]
+    fn playback_outcomes_map_to_honest_history_statuses() {
+        assert_eq!(PlaybackOutcome::Completed { iterations: 1 }.status(), "completed");
+        assert_eq!(PlaybackOutcome::Stopped.status(), "stopped");
+        assert_eq!(PlaybackOutcome::Failed("delivery".to_string()).status(), "failed");
     }
 
     #[test]
@@ -811,9 +1226,9 @@ mod tests {
 
         let player = MacroPlayer::new();
         let start = Instant::now();
-        player.play(macro_def, (1000, 1000), 1.0, None);
+        player.play(macro_def, (1000, 1000), 1.0, None).unwrap();
         assert!(player.is_playing(), "playing immediately after play()");
-        player.wait();
+        assert_eq!(player.wait(), PlaybackOutcome::Completed { iterations: 2 });
         let elapsed = start.elapsed();
 
         assert!(!player.is_playing(), "finished after wait()");
@@ -870,8 +1285,8 @@ mod tests {
         // recorded inter-event delays; pacing is the other test's job.
         let player = MacroPlayer::new();
         let events = macro_def.events.clone();
-        player.play(macro_def, physical, 8.0, None);
-        player.wait();
+        player.play(macro_def, physical, 8.0, None).unwrap();
+        assert!(matches!(player.wait(), PlaybackOutcome::Completed { iterations: 1 }));
         assert!(!player.is_playing(), "playback finished");
 
         // Deliberately UNGUARDED readback: the process-wide raise must make this

@@ -51,7 +51,7 @@ pub fn list_checkpoints(name: String) -> Value {
 /// insertion point, but the *returned* index is the un-clamped value, so an
 /// out-of-range request reports (and inserts at the end under) that number, a
 /// faithful quirk of the source.
-fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, checkpoint: Value) -> Value {
+fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, mut checkpoint: Value) -> Value {
     let stem = strip_json(name);
     let path = macros_dir.join(format!("{stem}.json"));
     if !path.exists() {
@@ -61,6 +61,11 @@ fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, checkpoint: Valu
         Ok(m) => m,
         Err(e) => return json!({ "ok": false, "error": e.to_string() }),
     };
+    if let Value::Object(config) = &mut checkpoint {
+        config
+            .entry("on_timeout".to_string())
+            .or_insert_with(|| Value::String("stop".to_string()));
+    }
 
     let n = macro_def.events.len() as i64;
     let mut index = index;
@@ -70,9 +75,7 @@ fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, checkpoint: Valu
     // Interpolate the timestamp between the surrounding events. `round4` matches
     // Python's `to_dict` rounding on save; the model serializes the timestamp
     // verbatim, so a fresh event must be pre-rounded to stay byte-identical.
-    let ts = if macro_def.events.is_empty() {
-        0.0
-    } else if index <= 0 {
+    let ts = if macro_def.events.is_empty() || index <= 0 {
         0.0
     } else if index >= n {
         macro_def.events.last().unwrap().timestamp + 0.01
@@ -193,6 +196,11 @@ mod tests {
         let m = Macro::load(&path).unwrap();
         assert_eq!(m.events[2].event_type, InputEventType::Checkpoint);
         assert_eq!(m.events[2].timestamp, 0.101, "prev (0.1) + 0.001");
+        assert_eq!(
+            m.events[2].checkpoint.as_ref().unwrap()["on_timeout"],
+            json!("stop"),
+            "new checkpoints fail closed unless explicitly overridden"
+        );
         assert_eq!(m.events.len(), 4);
     }
 
@@ -287,7 +295,10 @@ mod tests {
         let cps = r["checkpoints"].as_array().unwrap();
         assert_eq!(cps.len(), 1, "empty-config checkpoint is filtered out");
         assert_eq!(cps[0]["index"], json!(1));
-        assert_eq!(cps[0]["checkpoint"], json!({ "mode": "wait_for" }));
+        assert_eq!(
+            cps[0]["checkpoint"],
+            json!({ "mode": "wait_for", "on_timeout": "stop" })
+        );
     }
 
     #[test]

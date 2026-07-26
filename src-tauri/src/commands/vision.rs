@@ -133,9 +133,12 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
             // Bare player: the vision-agent runner passes no checkpoint detector,
             // so macro checkpoint steps are silent no-ops, faithful to Python's
             // detector-less `MacroPlayer(controller)` at ui_app.py:2415.
-            core.player.play(macro_def, core.resolve_screen(), 1.0, None);
-            core.player.wait();
-            Ok(())
+            core.player.play(macro_def, core.resolve_screen(), 1.0, None)?;
+            match core.player.wait() {
+                crate::hardware::player::PlaybackOutcome::Completed { .. } => Ok(()),
+                crate::hardware::player::PlaybackOutcome::Stopped => Err("Macro playback was stopped".to_string()),
+                crate::hardware::player::PlaybackOutcome::Failed(error) => Err(error),
+            }
         })
     };
     VisionAgent::new(detect, act, on_event, run_macro)

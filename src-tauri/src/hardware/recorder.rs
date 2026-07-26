@@ -560,6 +560,7 @@ impl MacroRecorder {
             name: format!("recording_{secs}"),
             record_resolution: self.resolution,
             created_at,
+            recording_duration: Some(round4(total_elapsed)),
             events,
             ..Macro::default()
         }

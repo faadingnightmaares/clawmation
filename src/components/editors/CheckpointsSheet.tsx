@@ -57,6 +57,7 @@ interface CheckpointDraft {
   action: "click" | "key" | "none";
   key: string;
   releaseWhen: "lost" | "found";
+  onTimeout: "stop" | "continue";
   timeout: number | string;
 }
 
@@ -76,6 +77,7 @@ function freshDraft(): CheckpointDraft {
     action: "click",
     key: "",
     releaseWhen: "lost",
+    onTimeout: "stop",
     timeout: 10,
   };
 }
@@ -201,6 +203,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
       min_area: 40,
       hold_button: "left",
       release_when: draft.releaseWhen,
+      on_timeout: draft.onTimeout,
       poll: draft.mode === "hold_follow" ? 0.02 : 0.05,
     };
     setBusy(true);
@@ -470,6 +473,25 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
                 className="h-9 w-16"
               />
               <span className="text-xs text-muted-foreground">seconds</span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-muted/25 p-3">
+              <span className="text-xs font-medium text-muted-foreground">If time runs out</span>
+              <Select
+                value={draft.onTimeout}
+                onValueChange={(v) => patch({ onTimeout: v as CheckpointDraft["onTimeout"] })}
+              >
+                <SelectTrigger size="sm" className="min-w-[180px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="stop">stop the macro (safer)</SelectItem>
+                  <SelectItem value="continue">continue anyway</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-muted-foreground">
+                Stopping prevents a missed screen state from becoming another bad repetition.
+              </span>
             </div>
 
             <Button className={cn("w-full")} onClick={add} disabled={busy}>

@@ -28,6 +28,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// `false` means the platform refused. Windows 10 before build 2004 is the
 /// documented case, and a caller that needs the guarantee has to fall back to
 /// hiding the window for real.
+///
+/// `HWND` is an opaque Windows handle represented by windows-sys as a raw
+/// pointer. This function never dereferences it; validity is checked by Windows.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn set_excluded(hwnd: *mut c_void, excluded: bool) -> bool {
     if hwnd.is_null() {
         return false;

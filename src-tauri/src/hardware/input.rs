@@ -19,21 +19,21 @@
 //! negligible and the result is behaviorally identical.
 
 use std::ffi::c_void;
+use std::fmt;
 use std::mem::size_of;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Foundation::{GetLastError, POINT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SetCursorPos, SystemParametersInfoW, SM_CXSCREEN,
-    SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SPI_GETMOUSE, SPI_GETMOUSESPEED, SPI_SETMOUSE, SPI_SETMOUSESPEED,
+    GetCursorPos, GetSystemMetrics, SetCursorPos, SystemParametersInfoW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETMOUSE, SPI_GETMOUSESPEED, SPI_SETMOUSE,
+    SPI_SETMOUSESPEED,
 };
 
 use crate::hardware::dpi::PerMonitorAware;
@@ -41,6 +41,30 @@ use crate::models::macro_def::{InputEventType, MacroEvent};
 
 /// One wheel notch, as Win32 defines it.
 const WHEEL_DELTA: i32 = 120;
+const SEND_ATTEMPTS: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputError {
+    pub operation: &'static str,
+    pub requested: usize,
+    pub accepted: usize,
+    pub attempts: usize,
+    pub os_error: u32,
+}
+
+impl fmt::Display for InputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} failed: Windows accepted {}/{} input(s) after {} attempt(s) (OS error {})",
+            self.operation, self.accepted, self.requested, self.attempts, self.os_error
+        )
+    }
+}
+
+impl std::error::Error for InputError {}
+
+pub type InputResult<T = ()> = Result<T, InputError>;
 
 // ── Pure helpers (unit-tested without hardware) ──────────────────────────────
 
@@ -72,6 +96,13 @@ fn button_flags(button: &str, down: bool) -> u32 {
                 MOUSEEVENTF_MIDDLEUP
             }
         }
+        "x1" | "x2" => {
+            if down {
+                MOUSEEVENTF_XDOWN
+            } else {
+                MOUSEEVENTF_XUP
+            }
+        }
         _ => {
             if down {
                 MOUSEEVENTF_LEFTDOWN
@@ -80,6 +111,21 @@ fn button_flags(button: &str, down: bool) -> u32 {
             }
         }
     }
+}
+
+fn button_data(button: &str) -> i32 {
+    match button.to_ascii_lowercase().as_str() {
+        "x1" => 1,
+        "x2" => 2,
+        _ => 0,
+    }
+}
+
+fn supported_button(button: &str) -> bool {
+    matches!(
+        button.to_ascii_lowercase().as_str(),
+        "left" | "primary" | "right" | "secondary" | "middle" | "center" | "x1" | "x2"
+    )
 }
 
 /// Named pynput keys → virtual-key code. Alphanumerics (`a`-`z`, `0`-`9`) are
@@ -114,6 +160,9 @@ fn vk_lookup(k: &str) -> Option<u16> {
         "delete" => 0x2E,
         "cmd" | "cmd_l" | "win" => 0x5B,
         "cmd_r" => 0x5C,
+        "menu" => 0x5D,
+        "num_lock" => 0x90,
+        "scroll_lock" => 0x91,
         "shift_l" => 0xA0,
         "shift_r" => 0xA1,
         "ctrl_l" => 0xA2,
@@ -132,6 +181,14 @@ fn vk_lookup(k: &str) -> Option<u16> {
         "f10" => 0x79,
         "f11" => 0x7A,
         "f12" => 0x7B,
+        "f13" => 0x7C,
+        "f14" => 0x7D,
+        "f15" => 0x7E,
+        "f16" => 0x7F,
+        "f17" => 0x80,
+        "f18" => 0x81,
+        "f19" => 0x82,
+        "f20" => 0x83,
         ";" => 0xBA,
         "=" => 0xBB,
         "," => 0xBC,
@@ -247,15 +304,64 @@ fn virtual_screen() -> (i32, i32, i32, i32) {
     }
 }
 
-fn send(inputs: &[INPUT]) {
+fn send_with<F>(inputs: &[INPUT], operation: &'static str, mut inject: F) -> InputResult
+where
+    F: FnMut(&[INPUT]) -> (usize, u32),
+{
     if inputs.is_empty() {
-        return;
+        return Ok(());
     }
-    // A short send is best-effort (a foreground app can block injection); the
-    // Python port only debug-logs it, so we likewise proceed.
-    unsafe {
-        SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32);
+
+    let mut accepted = 0usize;
+    let mut last_error = 0u32;
+    for attempt in 1..=SEND_ATTEMPTS {
+        let remaining = &inputs[accepted..];
+        let (sent, error) = inject(remaining);
+        let sent = sent.min(remaining.len());
+        accepted += sent;
+        last_error = error;
+        if accepted == inputs.len() {
+            return Ok(());
+        }
+        if attempt < SEND_ATTEMPTS {
+            std::thread::yield_now();
+        }
     }
+    Err(InputError {
+        operation,
+        requested: inputs.len(),
+        accepted,
+        attempts: SEND_ATTEMPTS,
+        os_error: last_error,
+    })
+}
+
+fn send(inputs: &[INPUT], operation: &'static str) -> InputResult {
+    send_with(inputs, operation, |remaining| unsafe {
+        let sent = SendInput(remaining.len() as u32, remaining.as_ptr(), size_of::<INPUT>() as i32) as usize;
+        (sent, GetLastError())
+    })
+}
+
+fn set_cursor_pos(x: i32, y: i32) -> InputResult {
+    let mut last_error = 0;
+    for attempt in 1..=SEND_ATTEMPTS {
+        let ok = unsafe { SetCursorPos(x, y) };
+        if ok != 0 {
+            return Ok(());
+        }
+        last_error = unsafe { GetLastError() };
+        if attempt < SEND_ATTEMPTS {
+            std::thread::yield_now();
+        }
+    }
+    Err(InputError {
+        operation: "SetCursorPos",
+        requested: 1,
+        accepted: 0,
+        attempts: SEND_ATTEMPTS,
+        os_error: last_error,
+    })
 }
 
 fn mouse_input(flags: u32, dx: i32, dy: i32, data: i32) -> INPUT {
@@ -276,7 +382,12 @@ fn mouse_input(flags: u32, dx: i32, dy: i32, data: i32) -> INPUT {
 
 fn key_input(vk: u16, up: bool) -> INPUT {
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
-    let flags = KEYEVENTF_SCANCODE | if up { KEYEVENTF_KEYUP } else { 0 };
+    let extended = matches!(
+        vk,
+        0x21..=0x2E | 0x5B..=0x5D | 0x90 | 0xA3 | 0xA5
+    );
+    let flags =
+        KEYEVENTF_SCANCODE | if up { KEYEVENTF_KEYUP } else { 0 } | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -300,15 +411,9 @@ fn key_input(vk: u16, up: bool) -> INPUT {
 fn get_mouse_settings() -> Option<(i32, i32)> {
     unsafe {
         let mut speed: i32 = 10;
-        let ok_speed = SystemParametersInfoW(
-            SPI_GETMOUSESPEED,
-            0,
-            &mut speed as *mut i32 as *mut c_void,
-            0,
-        );
+        let ok_speed = SystemParametersInfoW(SPI_GETMOUSESPEED, 0, &mut speed as *mut i32 as *mut c_void, 0);
         let mut accel: [i32; 3] = [0, 0, 0];
-        let ok_accel =
-            SystemParametersInfoW(SPI_GETMOUSE, 0, accel.as_mut_ptr() as *mut c_void, 0);
+        let ok_accel = SystemParametersInfoW(SPI_GETMOUSE, 0, accel.as_mut_ptr() as *mut c_void, 0);
         if ok_speed == 0 || ok_accel == 0 {
             return None;
         }
@@ -390,21 +495,26 @@ impl InputController {
     /// DirectInput apps ignore `SendInput` mouse moves entirely, and without it
     /// the cursor doesn't move.
     pub fn move_to(&self, x: i32, y: i32) {
+        let _ = self.try_move_to(x, y);
+    }
+
+    pub fn try_move_to(&self, x: i32, y: i32) -> InputResult {
         // Physical coordinates in, physical placement out (see `PerMonitorAware`):
         // without this a scaled display re-expands the recorded physical point by
         // the DPI factor and the cursor lands past its target.
         let _aware = PerMonitorAware::new();
         let (ox, oy, w, h) = virtual_screen();
         let (ax, ay) = to_absolute(x, y, ox, oy, w, h);
-        send(&[mouse_input(
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-            ax,
-            ay,
-            0,
-        )]);
-        unsafe {
-            SetCursorPos(x, y);
-        }
+        send(
+            &[mouse_input(
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                ax,
+                ay,
+                0,
+            )],
+            "absolute mouse move",
+        )?;
+        set_cursor_pos(x, y)
     }
 
     /// Move the cursor by a relative delta.
@@ -417,14 +527,18 @@ impl InputController {
     /// visible cursor *and* generates `WM_INPUT`, so no `SetCursorPos` is needed
     /// (that would double the movement).
     pub fn move_relative(&self, dx: i32, dy: i32) {
+        let _ = self.try_move_relative(dx, dy);
+    }
+
+    pub fn try_move_relative(&self, dx: i32, dy: i32) -> InputResult {
         if dx == 0 && dy == 0 {
-            return;
+            return Ok(());
         }
         // `MOUSEINPUT::dx`/`dy` are Raw Input counts, not screen coordinates.
         // Preserve the recorded delta for game camera movement; the player
         // separately reconciles the visible cursor to its physical target.
         let (dx, dy) = crate::hardware::dpi::relative_counts(dx, dy);
-        send(&[mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0)]);
+        send(&[mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0)], "relative mouse move")
     }
 
     /// Reconcile the visible cursor with a recorded physical target without
@@ -432,11 +546,9 @@ impl InputController {
     /// first so Raw Input consumers receive the recorded movement; this call
     /// removes any cursor drift introduced by display scaling, pointer speed,
     /// acceleration, rounding, or a game temporarily recentering the pointer.
-    pub(crate) fn sync_cursor_to(&self, x: i32, y: i32) {
+    pub(crate) fn try_sync_cursor_to(&self, x: i32, y: i32) -> InputResult {
         let _aware = PerMonitorAware::new();
-        unsafe {
-            SetCursorPos(x, y);
-        }
+        set_cursor_pos(x, y)
     }
 
     /// The smallest motion that still counts as mouse activity: 1px out and 1px
@@ -520,42 +632,116 @@ impl InputController {
     }
 
     pub fn mouse_down(&self, pos: Option<(i32, i32)>, button: &str) {
-        if let Some((x, y)) = pos {
-            self.move_to(x, y);
+        let _ = self.try_mouse_down(pos, button);
+    }
+
+    pub fn try_mouse_down(&self, pos: Option<(i32, i32)>, button: &str) -> InputResult {
+        if !supported_button(button) {
+            return Err(InputError {
+                operation: "mouse button down (unknown button)",
+                requested: 1,
+                accepted: 0,
+                attempts: 0,
+                os_error: 0,
+            });
         }
-        send(&[mouse_input(button_flags(button, true), 0, 0, 0)]);
+        if let Some((x, y)) = pos {
+            self.try_move_to(x, y)?;
+        }
+        send(
+            &[mouse_input(button_flags(button, true), 0, 0, button_data(button))],
+            "mouse button down",
+        )
     }
 
     pub fn mouse_up(&self, pos: Option<(i32, i32)>, button: &str) {
-        if let Some((x, y)) = pos {
-            self.move_to(x, y);
+        let _ = self.try_mouse_up(pos, button);
+    }
+
+    pub fn try_mouse_up(&self, pos: Option<(i32, i32)>, button: &str) -> InputResult {
+        if !supported_button(button) {
+            return Err(InputError {
+                operation: "mouse button up (unknown button)",
+                requested: 1,
+                accepted: 0,
+                attempts: 0,
+                os_error: 0,
+            });
         }
-        send(&[mouse_input(button_flags(button, false), 0, 0, 0)]);
+        if let Some((x, y)) = pos {
+            self.try_move_to(x, y)?;
+        }
+        send(
+            &[mouse_input(button_flags(button, false), 0, 0, button_data(button))],
+            "mouse button up",
+        )
     }
 
     pub fn click(&self, x: i32, y: i32, button: &str) {
-        self.move_to(x, y);
-        send(&[
-            mouse_input(button_flags(button, true), 0, 0, 0),
-            mouse_input(button_flags(button, false), 0, 0, 0),
-        ]);
+        let _ = self.try_click(x, y, button);
+    }
+
+    pub fn try_click(&self, x: i32, y: i32, button: &str) -> InputResult {
+        self.try_move_to(x, y)?;
+        self.try_mouse_down(None, button)?;
+        match self.try_mouse_up(None, button) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A failed release is the dangerous half of a click. Make one
+                // additional best-effort release before surfacing the failure.
+                let _ = self.try_mouse_up(None, button);
+                Err(error)
+            }
+        }
     }
 
     pub fn key_press(&self, key: &str) {
-        self.key_down(key);
-        self.key_up(key);
+        let _ = self.try_key_press(key);
+    }
+
+    pub fn try_key_press(&self, key: &str) -> InputResult {
+        self.try_key_down(key)?;
+        match self.try_key_up(key) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = self.try_key_up(key);
+                Err(error)
+            }
+        }
     }
 
     pub fn key_down(&self, key: &str) {
-        if let Some(vk) = resolve_vk(key) {
-            send(&[key_input(vk, false)]);
-        }
+        let _ = self.try_key_down(key);
+    }
+
+    pub fn try_key_down(&self, key: &str) -> InputResult {
+        let Some(vk) = resolve_vk(key) else {
+            return Err(InputError {
+                operation: "key down (unknown key)",
+                requested: 1,
+                accepted: 0,
+                attempts: 0,
+                os_error: 0,
+            });
+        };
+        send(&[key_input(vk, false)], "key down")
     }
 
     pub fn key_up(&self, key: &str) {
-        if let Some(vk) = resolve_vk(key) {
-            send(&[key_input(vk, true)]);
-        }
+        let _ = self.try_key_up(key);
+    }
+
+    pub fn try_key_up(&self, key: &str) -> InputResult {
+        let Some(vk) = resolve_vk(key) else {
+            return Err(InputError {
+                operation: "key up (unknown key)",
+                requested: 1,
+                accepted: 0,
+                attempts: 0,
+                os_error: 0,
+            });
+        };
+        send(&[key_input(vk, true)], "key up")
     }
 
     /// Type a string one character at a time (`InputController.type_text`). Each
@@ -574,10 +760,17 @@ impl InputController {
 
     /// Positive `clicks` scrolls up.
     pub fn scroll(&self, clicks: i32, pos: Option<(i32, i32)>) {
+        let _ = self.try_scroll(clicks, pos);
+    }
+
+    pub fn try_scroll(&self, clicks: i32, pos: Option<(i32, i32)>) -> InputResult {
         if let Some((x, y)) = pos {
-            self.move_to(x, y);
+            self.try_move_to(x, y)?;
         }
-        send(&[mouse_input(MOUSEEVENTF_WHEEL, 0, 0, clicks * WHEEL_DELTA)]);
+        send(
+            &[mouse_input(MOUSEEVENTF_WHEEL, 0, 0, clicks * WHEEL_DELTA)],
+            "mouse wheel",
+        )
     }
 
     pub fn wait(&self, seconds: f64) {
@@ -589,29 +782,36 @@ impl InputController {
     /// Replay a single recorded event with an optional coordinate transform
     /// (offset + scale), mirroring `InputController.replay_event`. `CHECKPOINT`
     /// events are handled by the player, not here, so they're a no-op.
-    pub fn replay_event(
+    pub fn replay_event(&self, event: &MacroEvent, x_offset: i32, y_offset: i32, x_scale: f64, y_scale: f64) {
+        let _ = self.try_replay_event(event, x_offset, y_offset, x_scale, y_scale);
+    }
+
+    pub fn try_replay_event(
         &self,
         event: &MacroEvent,
         x_offset: i32,
         y_offset: i32,
         x_scale: f64,
         y_scale: f64,
-    ) {
+    ) -> InputResult {
         let x = (event.x as f64 * x_scale) as i32 + x_offset;
         let y = (event.y as f64 * y_scale) as i32 + y_offset;
 
         match event.event_type {
-            InputEventType::MouseMove => self.move_to(x, y),
-            InputEventType::MouseDown => self.mouse_down(Some((x, y)), &event.button),
-            InputEventType::MouseUp => self.mouse_up(Some((x, y)), &event.button),
+            InputEventType::MouseMove => self.try_move_to(x, y),
+            InputEventType::MouseDown => self.try_mouse_down(Some((x, y)), &event.button),
+            InputEventType::MouseUp => self.try_mouse_up(Some((x, y)), &event.button),
             // Legacy macros: a synthetic click = down+up at the point.
-            InputEventType::MouseClick => self.click(x, y, &event.button),
-            InputEventType::KeyPress => self.key_press(&event.key),
-            InputEventType::KeyDown => self.key_down(&event.key),
-            InputEventType::KeyUp => self.key_up(&event.key),
-            InputEventType::Scroll => self.scroll(event.delta as i32, Some((x, y))),
-            InputEventType::Wait => self.wait(event.duration),
-            InputEventType::Checkpoint => {}
+            InputEventType::MouseClick => self.try_click(x, y, &event.button),
+            InputEventType::KeyPress => self.try_key_press(&event.key),
+            InputEventType::KeyDown => self.try_key_down(&event.key),
+            InputEventType::KeyUp => self.try_key_up(&event.key),
+            InputEventType::Scroll => self.try_scroll(event.delta as i32, Some((x, y))),
+            InputEventType::Wait => {
+                self.wait(event.duration);
+                Ok(())
+            }
+            InputEventType::Checkpoint => Ok(()),
         }
     }
 }
@@ -646,6 +846,8 @@ mod tests {
         assert_eq!(button_flags("secondary", false), MOUSEEVENTF_RIGHTUP);
         assert_eq!(button_flags("middle", true), MOUSEEVENTF_MIDDLEDOWN);
         assert_eq!(button_flags("center", false), MOUSEEVENTF_MIDDLEUP);
+        assert_eq!(button_flags("x1", true), MOUSEEVENTF_XDOWN);
+        assert_eq!(button_flags("x2", false), MOUSEEVENTF_XUP);
         // Unknown / empty falls back to left, like Python's `_button_flags`.
         assert_eq!(button_flags("", true), MOUSEEVENTF_LEFTDOWN);
         assert_eq!(button_flags("bogus", false), MOUSEEVENTF_LEFTUP);
@@ -666,6 +868,8 @@ mod tests {
         assert_eq!(resolve_vk("ctrl"), Some(0x11));
         assert_eq!(resolve_vk("f9"), Some(0x78));
         assert_eq!(resolve_vk("f12"), Some(0x7B));
+        assert_eq!(resolve_vk("f20"), Some(0x83));
+        assert_eq!(resolve_vk("num_lock"), Some(0x90));
         // `Key.`-prefixed pynput name.
         assert_eq!(resolve_vk("Key.space"), Some(0x20));
         // OEM punctuation (standing in for the pydirectinput fallback).
@@ -710,6 +914,34 @@ mod tests {
             let v = r.uniform(-3.0, 5.0);
             assert!((-3.0..5.0).contains(&v), "uniform out of range: {v}");
         }
+    }
+
+    #[test]
+    fn send_retries_only_the_unsent_suffix_after_a_partial_batch() {
+        let inputs = [
+            mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0, 0),
+            mouse_input(MOUSEEVENTF_LEFTUP, 0, 0, 0),
+        ];
+        let mut lengths = Vec::new();
+        let mut calls = 0;
+        send_with(&inputs, "test click", |remaining| {
+            lengths.push(remaining.len());
+            calls += 1;
+            (1, 0)
+        })
+        .unwrap();
+        assert_eq!(lengths, vec![2, 1], "accepted down is never resent");
+    }
+
+    #[test]
+    fn send_surfaces_exhausted_delivery_with_native_context() {
+        let inputs = [mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0, 0)];
+        let error = send_with(&inputs, "test", |_| (0, 5)).unwrap_err();
+        assert_eq!(error.requested, 1);
+        assert_eq!(error.accepted, 0);
+        assert_eq!(error.attempts, SEND_ATTEMPTS);
+        assert_eq!(error.os_error, 5);
+        assert!(error.to_string().contains("Windows accepted 0/1"));
     }
 
     /// Moves the *real* cursor, so it's ignored by default. Run explicitly with

@@ -29,14 +29,14 @@ use crate::engine::stats::PlayStats;
 use crate::hardware::capture::{Frame, ScreenCapture};
 use crate::hardware::input::InputController;
 use crate::hardware::ocr;
-use crate::hardware::player::{CheckpointDetect, MacroPlayer};
+use crate::hardware::player::{CheckpointDetect, MacroPlayer, PlaybackOutcome};
 use crate::hardware::preview;
 use crate::hardware::recorder::MacroRecorder;
 use crate::hardware::vision::{is_full_region, region_pixels, Detection, Detector, VisionError};
 use crate::logbuf::LogBuffer;
 use crate::models::config::MacroConfig;
 use crate::models::guard::{Guard, GuardFile};
-use crate::models::macro_def::Macro;
+use crate::models::macro_def::{InputEventType, Macro};
 use crate::models::step::Step;
 use crate::notify::Notifier;
 use crate::paths;
@@ -49,6 +49,9 @@ pub struct Runtime {
     /// When the current recording/playing run started; drives `elapsed` and the
     /// completion-duration stat.
     pub mode_since: Option<Instant>,
+    /// Retained through an emergency mode reset so playback history can still
+    /// be finalized with the real duration.
+    pub play_started: Option<Instant>,
     pub last_macro: String,
     pub recorded_count: i64,
     pub indicator_alive: bool,
@@ -59,6 +62,7 @@ impl Default for Runtime {
         Self {
             mode: "idle".to_string(),
             mode_since: None,
+            play_started: None,
             last_macro: String::new(),
             recorded_count: 0,
             indicator_alive: false,
@@ -797,33 +801,16 @@ impl Core {
         }
     }
 
-    /// Record the mode and the instant it began, sync the recording-indicator
-    /// overlay, then fire the completion toast (`Api._set_mode`). Every mode
-    /// transition funnels through here, so any playing→idle edge (natural finish,
-    /// manual stop, emergency stop, or a step run ending) shows "Playback
-    /// Complete" when `notify_on_complete` is set, exactly as the source does, and
-    /// the pixel-cat shows/hides on the same edges via `_sync_indicator`.
+    /// Record the mode and the instant it began, then sync the recording
+    /// indicator. A success toast is emitted only after the player returns an
+    /// explicit completed outcome.
     pub fn set_mode(&self, mode: &str) {
-        let (prev_mode, last_macro) = {
+        {
             let mut rt = self.runtime.lock().unwrap();
-            let prev = rt.mode.clone();
             rt.mode = mode.to_string();
             rt.mode_since = Some(Instant::now());
-            (prev, rt.last_macro.clone())
-        };
-        // Show/hide the pixel-cat overlay: `_set_mode`'s `_sync_indicator()`, right
-        // after the mode flips and before the completion toast.
-        self.indicator.sync(mode);
-        if prev_mode == "playing"
-            && mode == "idle"
-            && self.config.lock().unwrap().notify_on_complete
-        {
-            let name = if last_macro.is_empty() { "macro" } else { &last_macro };
-            self.notifier.notify(
-                "Clawmation: Playback Complete",
-                &format!("'{name}' finished"),
-            );
         }
+        self.indicator.sync(mode);
     }
 
     // ── Global hotkeys (TinyTask-style) ──────────────────────────────────────
@@ -1013,6 +1000,19 @@ impl Core {
         if !path.exists() {
             return json!({ "ok": false, "error": format!("Not found: {stem}") });
         }
+        match crate::migrations::ensure_macro_current(&path) {
+            Ok(true) => self.emit(
+                "warn",
+                format!(
+                    "Upgraded legacy macro '{stem}' and restored a 10-second loop boundary (backup kept)"
+                ),
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                self.emit("err", format!("Could not safely upgrade {stem}: {error}"));
+                return json!({ "ok": false, "error": error });
+            }
+        }
         let mut macro_def = match Macro::load(&path) {
             Ok(m) => m,
             Err(e) => {
@@ -1038,6 +1038,19 @@ impl Core {
 
         let macro_name = macro_def.name.clone();
         let events = macro_def.events.len();
+        let target = self.resolve_screen();
+        if let Err(error) = self.player.validate(&macro_def, target, speed) {
+            self.emit("err", format!("Refused to play {macro_name}: {error}"));
+            return json!({ "ok": false, "error": error });
+        }
+        if repeat != 1 && !has_fail_closed_checkpoint(&macro_def) {
+            self.emit(
+                "warn",
+                format!(
+                    "Safety: '{macro_name}' repeats without a fail-closed screen checkpoint; delivery failures will stop it, but the game result cannot be verified"
+                ),
+            );
+        }
 
         self.runtime.lock().unwrap().last_macro = macro_name.clone();
         // Recorded at play-start so a stopped macro still counts; the duration and
@@ -1047,11 +1060,11 @@ impl Core {
         // Eager capture open: Python's `cap = self._get_capture()` runs before
         // the mode flip and the "Playing" log, so "Capture ready" lands there and
         // a live detector backs any checkpoints. `start_guards` then no-ops.
-        let target = self.resolve_screen();
         let backend = self.config.lock().unwrap().capture_backend.clone();
         self.vision.ensure_ready(target.0 as i64, target.1 as i64, &backend);
 
         self.set_mode("playing");
+        self.runtime.lock().unwrap().play_started = Some(Instant::now());
         let repeat_msg = if repeat == 0 { "inf".to_string() } else { repeat.to_string() };
         let speed_msg = if speed != 1.0 { format!("{}x", py_float(speed)) } else { "1x".to_string() };
         self.emit(
@@ -1069,7 +1082,13 @@ impl Core {
             let vision = self.vision.clone();
             Box::new(move |cfg: &Value| vision.detect_checkpoint(cfg))
         };
-        self.player.play(macro_def, target, speed, Some(checkpoint));
+        if let Err(error) = self.player.play(macro_def, target, speed, Some(checkpoint)) {
+            self.play_stats.update_last_run(&macro_name, 0.0, "failed");
+            self.runtime.lock().unwrap().play_started = None;
+            self.set_mode("idle");
+            self.emit("err", format!("Could not start {macro_name}: {error}"));
+            return json!({ "ok": false, "error": error });
+        }
         // Armed for the whole run, not just for guards: the checkpoints wired
         // above detect too, and they are the ones a macro built around a picture
         // spends its time waiting on.
@@ -1111,20 +1130,23 @@ impl Core {
         self.detections.set("guards", false);
     }
 
-    /// Wait out the playback thread, then reset to idle and record completion:
-    /// `Api._watch_playback`. The `mode == "playing"` guard means a concurrent
-    /// `stop_playback` (which sets idle first) wins, so exactly one of
-    /// `Playback finished` / `Playback stopped` is logged.
+    /// Wait out the playback thread, persist its honest terminal outcome, then
+    /// reset the managed playback mode. Emergency stops may already have reset a
+    /// different subsystem's mode, so outcome handling is unconditional.
     fn watch_playback(&self) {
-        self.player.wait();
+        let outcome = self.player.wait();
         self.stop_guards();
         // Runs on every exit (finished, stopped, or panicked out of the player),
         // so this is the one place the overlay has to come down.
         self.detections.set("play", false);
         let (playing, duration, last) = {
-            let rt = self.runtime.lock().unwrap();
+            let mut rt = self.runtime.lock().unwrap();
             let playing = rt.mode == "playing";
-            let duration = rt.mode_since.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let duration = rt
+                .play_started
+                .take()
+                .map(|s| s.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
             let last = if rt.last_macro.is_empty() {
                 "unknown".to_string()
             } else {
@@ -1132,10 +1154,28 @@ impl Core {
             };
             (playing, duration, last)
         };
+        self.play_stats
+            .update_last_run(&last, duration, outcome.status());
         if playing {
-            self.play_stats.update_last_run(&last, duration, "completed");
             self.set_mode("idle");
-            self.emit("ok", "Playback finished");
+        }
+        match outcome {
+            PlaybackOutcome::Completed { iterations } => {
+                self.emit(
+                    "ok",
+                    format!("Playback finished after {iterations} repetition(s)"),
+                );
+                if self.config.lock().unwrap().notify_on_complete {
+                    self.notifier.notify(
+                        "Clawmation: Playback Complete",
+                        &format!("'{last}' finished"),
+                    );
+                }
+            }
+            PlaybackOutcome::Stopped => self.emit("warn", "Playback stopped"),
+            PlaybackOutcome::Failed(error) => {
+                self.emit("err", format!("Playback failed: {error}"))
+            }
         }
     }
 
@@ -1145,8 +1185,7 @@ impl Core {
         if playing {
             self.stop_guards();
             self.player.stop();
-            self.set_mode("idle");
-            self.emit("warn", "Playback stopped");
+            self.emit("warn", "Stopping playback...");
             json!({ "ok": true })
         } else {
             json!({ "ok": false, "error": "Not playing" })
@@ -1256,6 +1295,19 @@ fn execute_ai_action(controller: &InputController, action: crate::engine::ai::Ac
     }
 }
 
+fn has_fail_closed_checkpoint(macro_def: &Macro) -> bool {
+    macro_def.events.iter().any(|input| {
+        input.event_type == InputEventType::Checkpoint
+            && input
+                .checkpoint
+                .as_ref()
+                .is_some_and(|cfg| {
+                    matches!(cfg, Value::Object(map) if !map.is_empty())
+                        && cfg.get("on_timeout").and_then(Value::as_str) != Some("continue")
+                })
+    })
+}
+
 /// Resolve `play_macro`'s `repeat` argument. `None` reads the macro's saved loop
 /// settings; a value coerces through Python's `int()` rules, with `""`/`∞`
 /// meaning infinite (0).
@@ -1295,13 +1347,13 @@ fn py_int(v: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_full_region, is_text_guard, py_int, region_pixels, resolve_repeat, text_roi, Sighting,
-        Vision, SIGHTING_TTL_MS,
+        has_fail_closed_checkpoint, is_full_region, is_text_guard, py_int, region_pixels,
+        resolve_repeat, text_roi, Sighting, Vision, SIGHTING_TTL_MS,
     };
     use crate::hardware::capture::Frame;
     use crate::logbuf::LogBuffer;
     use crate::models::guard::Guard;
-    use crate::models::macro_def::Macro;
+    use crate::models::macro_def::{InputEventType, Macro, MacroEvent};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -1426,5 +1478,44 @@ mod tests {
         assert_eq!(resolve_repeat(Some(&json!(3)), &m), 3);
         assert_eq!(resolve_repeat(Some(&json!(2.9)), &m), 2); // int() truncates
         assert_eq!(resolve_repeat(Some(&json!("abc")), &m), 1); // int() raises → fallback 1
+    }
+
+    #[test]
+    fn only_a_fail_closed_checkpoint_can_verify_a_repeating_run() {
+        let checkpoint = |policy: Option<&str>, populated: bool| MacroEvent {
+            event_type: InputEventType::Checkpoint,
+            timestamp: 0.0,
+            x: 0,
+            y: 0,
+            button: "left".to_string(),
+            key: String::new(),
+            delta: 0,
+            duration: 0.0,
+            checkpoint: Some(match policy {
+                Some(policy) => json!({ "on_timeout": policy }),
+                None if populated => json!({ "mode": "wait_for" }),
+                None => json!({}),
+            }),
+        };
+        let safe = Macro {
+            events: vec![checkpoint(Some("stop"), true)],
+            ..Default::default()
+        };
+        assert!(has_fail_closed_checkpoint(&safe));
+        let migrated_default = Macro {
+            events: vec![checkpoint(None, true)],
+            ..Default::default()
+        };
+        assert!(has_fail_closed_checkpoint(&migrated_default));
+        let unsafe_continue = Macro {
+            events: vec![checkpoint(Some("continue"), true)],
+            ..Default::default()
+        };
+        assert!(!has_fail_closed_checkpoint(&unsafe_continue));
+        let empty = Macro {
+            events: vec![checkpoint(None, false)],
+            ..Default::default()
+        };
+        assert!(!has_fail_closed_checkpoint(&empty));
     }
 }

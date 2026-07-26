@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::config::DEFAULT_RESOLUTION;
 
+/// Current on-disk macro schema. Missing versions deserialize as v1 so startup
+/// migration can distinguish legacy recordings from files created by this app.
+pub const CURRENT_MACRO_FORMAT_VERSION: u32 = 2;
+pub const LEGACY_MACRO_FORMAT_VERSION: u32 = 1;
+
 /// Input event kinds, serialized by name (e.g. `"MOUSE_MOVE"`), matching
 /// Python's `InputEventType.name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,10 +74,16 @@ pub struct Macro {
     // Required: Python reads `d["name"]`, so a nameless file fails to load and
     // `list_macros` skips it. No serde default keeps that behavior.
     pub name: String,
+    #[serde(default = "legacy_format_version")]
+    pub format_version: u32,
     #[serde(default = "default_resolution")]
     pub record_resolution: (u32, u32),
     #[serde(default)]
     pub created_at: f64,
+    /// Exact active recording length for v2+ files. Legacy files have only the
+    /// final event timestamp and are repaired conservatively during migration.
+    #[serde(default)]
+    pub recording_duration: Option<f64>,
     // Python coerces a hand-written `null` in these four back to the default
     // (`if not isinstance(x, ...): x = default`); `null_default` reproduces that.
     #[serde(default, deserialize_with = "crate::util::null_default", rename = "loop")]
@@ -91,12 +102,18 @@ fn default_resolution() -> (u32, u32) {
     DEFAULT_RESOLUTION
 }
 
+fn legacy_format_version() -> u32 {
+    LEGACY_MACRO_FORMAT_VERSION
+}
+
 impl Default for Macro {
     fn default() -> Self {
         Self {
             name: String::new(),
+            format_version: CURRENT_MACRO_FORMAT_VERSION,
             record_resolution: DEFAULT_RESOLUTION,
             created_at: 0.0,
+            recording_duration: None,
             loop_enabled: false,
             loop_count: 0,
             category: String::new(),
@@ -109,7 +126,80 @@ impl Default for Macro {
 impl Macro {
     /// Duration in seconds = timestamp of the last event (0.0 when empty).
     pub fn duration(&self) -> f64 {
-        self.events.last().map(|e| e.timestamp).unwrap_or(0.0)
+        let recorded = self
+            .recording_duration
+            .filter(|d| d.is_finite() && *d >= 0.0)
+            .unwrap_or(0.0);
+        let edited = self.events.last().map(|e| e.timestamp).unwrap_or(0.0);
+        recorded.max(edited)
+    }
+
+    /// Reject a corrupt or unsupported timeline before it can inject input.
+    /// Errors include the event index so a hand-edited file is repairable.
+    pub fn validate_for_playback(&self) -> Result<(), String> {
+        const MAX_EVENTS: usize = 2_000_000;
+        const MAX_DURATION_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
+
+        if self.format_version == 0 || self.format_version > CURRENT_MACRO_FORMAT_VERSION {
+            return Err(format!(
+                "unsupported macro format {} (this app supports up to {})",
+                self.format_version, CURRENT_MACRO_FORMAT_VERSION
+            ));
+        }
+        if self.record_resolution.0 == 0 || self.record_resolution.1 == 0 {
+            return Err("recording resolution must be non-zero".to_string());
+        }
+        if self.events.is_empty() {
+            return Err("macro has no events".to_string());
+        }
+        if self.events.len() > MAX_EVENTS {
+            return Err(format!(
+                "macro has too many events ({}; maximum {})",
+                self.events.len(),
+                MAX_EVENTS
+            ));
+        }
+
+        let mut previous = 0.0;
+        for (index, event) in self.events.iter().enumerate() {
+            if !event.timestamp.is_finite() || event.timestamp < 0.0 {
+                return Err(format!("event {index} has an invalid timestamp"));
+            }
+            if index > 0 && event.timestamp < previous {
+                return Err(format!(
+                    "event {index} timestamp {:.4} is before event {} timestamp {:.4}",
+                    event.timestamp,
+                    index - 1,
+                    previous
+                ));
+            }
+            if event.timestamp > MAX_DURATION_SECONDS {
+                return Err(format!("event {index} exceeds the maximum seven-day timeline"));
+            }
+            if !event.duration.is_finite() || event.duration < 0.0 {
+                return Err(format!("event {index} has an invalid duration"));
+            }
+            if let Some(cfg) = event.checkpoint.as_ref() {
+                for field in ["timeout", "poll"] {
+                    if let Some(value) = cfg.get(field) {
+                        let Some(number) = value.as_f64() else {
+                            return Err(format!("event {index} checkpoint field '{field}' must be a number"));
+                        };
+                        if !number.is_finite() || number < 0.0 {
+                            return Err(format!("event {index} checkpoint field '{field}' is invalid"));
+                        }
+                    }
+                }
+            }
+            previous = event.timestamp;
+        }
+
+        if let Some(duration) = self.recording_duration {
+            if !duration.is_finite() || duration < 0.0 {
+                return Err("recording duration must be finite and non-negative".to_string());
+            }
+        }
+        Ok(())
     }
 
     pub fn load(path: &Path) -> serde_json::Result<Self> {
@@ -185,5 +275,47 @@ mod tests {
             text.contains("\"created_at\": 1784659227.4523795"),
             "created_at preserved exactly"
         );
+    }
+
+    #[test]
+    fn missing_version_loads_as_legacy_but_new_macros_are_current() {
+        let legacy: Macro =
+            serde_json::from_str(r#"{"name":"old","record_resolution":[1920,1080],"events":[]}"#).unwrap();
+        assert_eq!(legacy.format_version, LEGACY_MACRO_FORMAT_VERSION);
+        assert_eq!(Macro::default().format_version, CURRENT_MACRO_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn playback_validation_rejects_non_monotonic_and_non_finite_timelines() {
+        let event = |timestamp| MacroEvent {
+            event_type: InputEventType::Wait,
+            timestamp,
+            x: 0,
+            y: 0,
+            button: "left".to_string(),
+            key: String::new(),
+            delta: 0,
+            duration: 0.0,
+            checkpoint: None,
+        };
+        let backwards = Macro {
+            name: "bad".to_string(),
+            events: vec![event(2.0), event(1.0)],
+            ..Default::default()
+        };
+        assert!(backwards
+            .validate_for_playback()
+            .unwrap_err()
+            .contains("event 1 timestamp"));
+
+        let non_finite = Macro {
+            name: "bad".to_string(),
+            events: vec![event(f64::NAN)],
+            ..Default::default()
+        };
+        assert!(non_finite
+            .validate_for_playback()
+            .unwrap_err()
+            .contains("invalid timestamp"));
     }
 }
