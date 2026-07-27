@@ -292,6 +292,21 @@ impl PlayerShared {
         }
     }
 
+    /// Wait for at most `duration`, waking immediately when `stop()` notifies
+    /// the shared condition variable. Taking the pause lock around the predicate
+    /// closes the same lost-wakeup window as `wait_while_paused`.
+    fn wait_interruptibly(&self, duration: Duration) -> bool {
+        let guard = self.paused.lock().unwrap();
+        if self.stop_flag.load(Ordering::SeqCst) {
+            return false;
+        }
+        let _ = self
+            .pause_cv
+            .wait_timeout_while(guard, duration, |_| !self.stop_flag.load(Ordering::SeqCst))
+            .unwrap();
+        !self.stop_flag.load(Ordering::SeqCst)
+    }
+
     /// Wait until `target`. Sleep the long part of the gap and busy-wait the
     /// final ~1-2ms so event timing stays sub-millisecond on Windows' coarse
     /// sleep grid. Mirrors `_wait_until`; returns early on a stop request.
@@ -307,7 +322,9 @@ impl PlayerShared {
             let remaining = target - now;
             if remaining > Duration::from_micros(2000) {
                 // Sleep most of the gap; leave ~1ms for the final spin.
-                std::thread::sleep(remaining - Duration::from_micros(1000));
+                if !self.wait_interruptibly(remaining - Duration::from_micros(1000)) {
+                    return;
+                }
             } else {
                 // Busy-wait the last ~1-2ms for sub-ms accuracy.
                 while Instant::now() < target {
@@ -644,7 +661,7 @@ fn run_checkpoint(
         if let Some(m) = matches.into_iter().next() {
             break Some(m);
         }
-        std::thread::sleep(Duration::from_secs_f64(poll));
+        let _ = shared.wait_interruptibly(Duration::from_secs_f64(poll));
     };
     let found = match found {
         Some(f) => f,
@@ -810,7 +827,7 @@ fn hold_follow(
                 condition_met = true;
                 break;
             }
-            std::thread::sleep(Duration::from_secs_f64(poll));
+            let _ = shared.wait_interruptibly(Duration::from_secs_f64(poll));
         }
         Ok(())
     })();
@@ -1109,6 +1126,26 @@ mod tests {
             paused_for >= Duration::from_millis(15),
             "pause duration is rebased instead of causing catch-up: {paused_for:?}"
         );
+    }
+
+    #[test]
+    fn long_timeline_wait_wakes_immediately_on_stop() {
+        let shared = Arc::new(PlayerShared::new());
+        let waiter = Arc::clone(&shared);
+        let started = Instant::now();
+        let thread = std::thread::spawn(move || {
+            waiter.wait_until(Instant::now() + Duration::from_secs(5));
+        });
+
+        std::thread::sleep(Duration::from_millis(20));
+        {
+            let _guard = shared.paused.lock().unwrap();
+            shared.stop_flag.store(true, Ordering::SeqCst);
+        }
+        shared.pause_cv.notify_all();
+        thread.join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_millis(300));
     }
 
     #[test]

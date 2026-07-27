@@ -140,7 +140,7 @@ export function CommandBar({ status, view, navigate }: CommandBarProps) {
         onClick={() => navigate("settings")}
         aria-label="Settings"
         aria-current={view === "settings" ? "page" : undefined}
-        title="Settings  ·  Alt+5"
+        title="Settings  ·  Alt+6"
         className={cn(
           view === "settings"
             ? "bg-secondary text-foreground hover:bg-secondary"

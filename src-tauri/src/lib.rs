@@ -39,14 +39,19 @@ pub fn run() {
     let migration = migrations::migrate_legacy_macros(&paths::macros_dir());
     if let Some(summary) = migration.summary() {
         app_state.core.emit(
-            if migration.errors.is_empty() { "ok" } else { "warn" },
+            if migration.errors.is_empty() {
+                "ok"
+            } else {
+                "warn"
+            },
             summary,
         );
     }
     for error in migration.errors {
-        app_state
-            .core
-            .emit("err", format!("Macro upgrade left a file unchanged: {error}"));
+        app_state.core.emit(
+            "err",
+            format!("Macro upgrade left a file unchanged: {error}"),
+        );
     }
 
     tauri::Builder::default()
@@ -109,8 +114,16 @@ pub fn run() {
             // keeping `get_status`'s report honest (`_indicator is not None`).
             match shell::indicator::create(&handle) {
                 Ok(()) => {
-                    app.state::<AppState>().core.indicator.attach(handle.clone());
-                    app.state::<AppState>().core.runtime.lock().unwrap().indicator_alive = true;
+                    app.state::<AppState>()
+                        .core
+                        .indicator
+                        .attach(handle.clone());
+                    app.state::<AppState>()
+                        .core
+                        .runtime
+                        .lock()
+                        .unwrap()
+                        .indicator_alive = true;
                 }
                 Err(e) => eprintln!("Clawmation: recording indicator unavailable: {e}"),
             }
@@ -118,7 +131,11 @@ pub fn run() {
             // detection loop arms it, and optional: without it the triggers run
             // exactly as before, just unwatched.
             match shell::detections::create(&handle) {
-                Ok(()) => app.state::<AppState>().core.detections.attach(handle.clone()),
+                Ok(()) => app
+                    .state::<AppState>()
+                    .core
+                    .detections
+                    .attach(handle.clone()),
                 Err(e) => eprintln!("Clawmation: detection overlay unavailable: {e}"),
             }
             // The macro launcher (the play hotkey's Raycast-style picker), built
@@ -196,6 +213,10 @@ pub fn run() {
             commands::ai::steps_save,
             commands::ai::steps_run,
             commands::ai::steps_test,
+            commands::ai::node_graph_load,
+            commands::ai::node_graph_validate,
+            commands::ai::node_graph_save,
+            commands::ai::node_graph_run,
             commands::record::start_record,
             commands::record::stop_record,
             commands::record::pause_record,

@@ -664,6 +664,73 @@ export function stepsTest(step: Step): Promise<StepTestResult> {
   return invoke<StepTestResult>("steps_test", { step });
 }
 
+// Directed node graphs
+
+export interface GraphPosition {
+  x: number;
+  y: number;
+}
+
+export type GraphNodeType =
+  | "start"
+  | "action"
+  | "vision"
+  | "branch"
+  | "loop"
+  | "sub_macro"
+  | "stop";
+
+export interface GraphNode {
+  id: string;
+  type: GraphNodeType;
+  label: string;
+  position: GraphPosition;
+  enabled: boolean;
+  config: Record<string, unknown>;
+}
+
+export interface GraphEdge {
+  id: string;
+  from: string;
+  output: string;
+  to: string;
+}
+
+export interface NodeGraph {
+  version: number;
+  name: string;
+  entry: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface NodeGraphValidation {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface NodeGraphLoadResult extends OpResult {
+  graph?: NodeGraph;
+  source?: "saved" | "imported";
+}
+
+export function nodeGraphLoad(macroName: string): Promise<NodeGraphLoadResult> {
+  return invoke<NodeGraphLoadResult>("node_graph_load", { macroName });
+}
+
+export function nodeGraphValidate(graph: NodeGraph): Promise<NodeGraphValidation> {
+  return invoke<NodeGraphValidation>("node_graph_validate", { graph });
+}
+
+export function nodeGraphSave(macroName: string, graph: NodeGraph): Promise<OpResult> {
+  return invoke<OpResult>("node_graph_save", { macroName, graph });
+}
+
+export function nodeGraphRun(graph: NodeGraph): Promise<OpResult> {
+  return invoke<OpResult>("node_graph_run", { graph });
+}
+
 // ─── Schedules ───
 
 /** A saved schedule row. Fields beyond these pass through untyped. */

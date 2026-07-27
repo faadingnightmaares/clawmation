@@ -44,6 +44,12 @@ struct Bindings {
 /// shortcut that will never fire. A blank key is unbound on purpose, not a
 /// failure.
 pub fn register_from_config(app: &AppHandle) -> Vec<String> {
+    // Hold the bindings lock across the entire OS unregister/register
+    // transaction. Settings can save and resume almost simultaneously; without
+    // this lock two transactions can interleave and leave every slot empty even
+    // though the keys were persisted correctly.
+    let bindings = app.state::<HotkeyBindings>();
+    let mut b = bindings.inner.lock().unwrap();
     let _ = app.global_shortcut().unregister_all();
 
     let (rec, play, stop) = {
@@ -56,8 +62,6 @@ pub fn register_from_config(app: &AppHandle) -> Vec<String> {
         )
     };
 
-    let bindings = app.state::<HotkeyBindings>();
-    let mut b = bindings.inner.lock().unwrap();
     b.record = register_one(app, &rec);
     b.play = register_one(app, &play);
     b.stop = register_one(app, &stop);
@@ -74,9 +78,13 @@ pub fn register_from_config(app: &AppHandle) -> Vec<String> {
 /// shortcuts are exclusive, so pressing an already-bound key would fire its
 /// action instead of reaching the webview to be captured.
 pub fn suspend(app: &AppHandle) {
-    let _ = app.global_shortcut().unregister_all();
+    // Serialize suspension with registration for the same reason as
+    // `register_from_config`: unregistering must never land halfway through a
+    // concurrent save/resume transaction.
     let bindings = app.state::<HotkeyBindings>();
-    *bindings.inner.lock().unwrap() = Bindings::default();
+    let mut b = bindings.inner.lock().unwrap();
+    let _ = app.global_shortcut().unregister_all();
+    *b = Bindings::default();
 }
 
 fn register_one(app: &AppHandle, key: &str) -> Option<Shortcut> {

@@ -47,16 +47,19 @@ impl Indicator {
     /// `NativeIndicator.set_state`'s show/hide branch. The page reads mode and
     /// elapsed straight off `get_status`, so this only toggles window visibility;
     /// an unattached handle (pre-`setup`, or tests) no-ops.
-    pub fn sync(&self, mode: &str) {
+    pub fn sync(&self, mode: &str, enabled: bool) {
         let app = match self.app.lock().unwrap().clone() {
             Some(app) => app,
             None => return,
         };
         if let Some(win) = app.get_webview_window(LABEL) {
-            let active = matches!(mode, "recording" | "playing" | "paused");
-            let _ = if active { win.show() } else { win.hide() };
+            let _ = if should_show(mode, enabled) { win.show() } else { win.hide() };
         }
     }
+}
+
+fn should_show(mode: &str, enabled: bool) -> bool {
+    enabled && matches!(mode, "recording" | "playing" | "paused")
 }
 
 /// Build the overlay once: hidden, top-right of the primary monitor. The builder
@@ -100,4 +103,17 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         let _ = win.set_position(LogicalPosition::new(x, 0.0));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_show;
+
+    #[test]
+    fn preference_hides_the_cat_even_while_active() {
+        assert!(should_show("playing", true));
+        assert!(should_show("recording", true));
+        assert!(!should_show("playing", false));
+        assert!(!should_show("idle", true));
+    }
 }

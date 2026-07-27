@@ -16,6 +16,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
 };
 
+const FOCUS_ATTEMPTS: usize = 4;
+const FOCUS_RETRY_DELAY: Duration = Duration::from_millis(45);
+const FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(180);
+const INPUT_RELEASE_ATTEMPTS: usize = 3;
+const INPUT_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(20);
+const JUMP_HOLD: Duration = Duration::from_millis(140);
+const WALK_HOLD: Duration = Duration::from_millis(180);
+const KEY_SETTLE_DELAY: Duration = Duration::from_millis(35);
+const CAMERA_BUTTON_SETTLE: Duration = Duration::from_millis(40);
+const CAMERA_TRAVEL_SETTLE: Duration = Duration::from_millis(60);
+const CAMERA_DELTA: i32 = 24;
+
 use crate::engine::anti_afk::{AntiAfkAction, AntiAfkPlatform};
 use crate::hardware::input::InputController;
 
@@ -54,7 +66,7 @@ unsafe extern "system" fn collect_window(hwnd: HWND, data: LPARAM) -> BOOL {
     if is_selectable(visible, !owner.is_null(), &title, pid, own_pid) {
         let windows = &mut *(data as *mut Vec<SelectableWindow>);
         windows.push(SelectableWindow {
-            id: hwnd_to_id(hwnd),
+            id: selectable_window_id(hwnd, pid),
             title,
             pid,
         });
@@ -80,56 +92,89 @@ fn hwnd_to_id(hwnd: HWND) -> String {
     format!("{:X}", hwnd as usize)
 }
 
+fn selectable_window_id(hwnd: HWND, pid: u32) -> String {
+    format!("{}:{pid}", hwnd_to_id(hwnd))
+}
+
 fn id_to_hwnd(id: &str) -> Option<HWND> {
-    usize::from_str_radix(id, 16)
+    let raw = id.split(':').next().unwrap_or(id);
+    let raw = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
+    usize::from_str_radix(raw, 16)
         .ok()
         .map(|value| value as HWND)
 }
 
+fn id_process_id(id: &str) -> Option<u32> {
+    id.split_once(':')?.1.parse().ok()
+}
+
 pub fn is_window_id(id: &str) -> bool {
-    id_to_hwnd(id).is_some_and(|hwnd| unsafe { IsWindow(hwnd) != 0 })
+    id_to_hwnd(id).is_some_and(|hwnd| unsafe {
+        if IsWindow(hwnd) == 0 {
+            return false;
+        }
+        match id_process_id(id) {
+            Some(expected_pid) => {
+                let mut pid = 0;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                pid == expected_pid
+            }
+            None => true,
+        }
+    })
 }
 
 pub fn foreground_window_id() -> Option<String> {
     let hwnd = unsafe { GetForegroundWindow() };
-    (!hwnd.is_null()).then(|| hwnd_to_id(hwnd))
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    Some(selectable_window_id(hwnd, pid))
 }
 
 pub fn focus_window_id(id: &str) -> Result<(), String> {
     let hwnd = id_to_hwnd(id).ok_or_else(|| "invalid window id".to_string())?;
-    if unsafe { IsWindow(hwnd) } == 0 {
+    if !is_window_id(id) {
         return Err("window is no longer available".to_string());
     }
 
-    let focused = unsafe {
-        if IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_RESTORE);
-        }
+    for _ in 0..FOCUS_ATTEMPTS {
+        let requested = unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
 
-        let foreground = GetForegroundWindow();
-        let current_thread = GetCurrentThreadId();
-        let foreground_thread = if !foreground.is_null() {
-            GetWindowThreadProcessId(foreground, null_mut())
-        } else {
-            0
+            let foreground = GetForegroundWindow();
+            let current_thread = GetCurrentThreadId();
+            let foreground_thread = if !foreground.is_null() {
+                GetWindowThreadProcessId(foreground, null_mut())
+            } else {
+                0
+            };
+            let attached = foreground_thread != 0
+                && foreground_thread != current_thread
+                && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+
+            let _ = BringWindowToTop(hwnd);
+            let ok = SetForegroundWindow(hwnd) != 0;
+
+            if attached {
+                let _ = AttachThreadInput(current_thread, foreground_thread, 0);
+            }
+            ok
         };
-        let attached = foreground_thread != 0
-            && foreground_thread != current_thread
-            && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
 
-        let _ = BringWindowToTop(hwnd);
-        let ok = SetForegroundWindow(hwnd) != 0;
-
-        if attached {
-            let _ = AttachThreadInput(current_thread, foreground_thread, 0);
+        if requested && unsafe { GetForegroundWindow() == hwnd } {
+            return Ok(());
         }
-        ok
-    };
-
-    if !focused {
-        return Err("Windows refused to focus the selected window".to_string());
+        std::thread::sleep(FOCUS_RETRY_DELAY);
     }
-    Ok(())
+    Err("Windows refused to focus the selected window".to_string())
 }
 
 pub struct NativeAntiAfkPlatform {
@@ -157,7 +202,7 @@ impl AntiAfkPlatform for NativeAntiAfkPlatform {
 
     fn focus_window(&self, id: &str) -> Result<(), String> {
         focus_window_id(id)?;
-        std::thread::sleep(Duration::from_millis(180));
+        std::thread::sleep(FOCUS_SETTLE_DELAY);
         Ok(())
     }
 
@@ -210,14 +255,10 @@ fn perform_input_action(
     walk_right: &AtomicBool,
 ) -> Result<(), String> {
     match action {
-        AntiAfkAction::Jump => hold_key(input, "space", Duration::from_millis(140)),
+        AntiAfkAction::Jump => hold_key(input, "space", JUMP_HOLD),
         AntiAfkAction::Walk => {
             let right = walk_right.fetch_xor(true, Ordering::Relaxed);
-            hold_key(
-                input,
-                if right { "d" } else { "a" },
-                Duration::from_millis(180),
-            )
+            hold_key(input, if right { "d" } else { "a" }, WALK_HOLD)
         }
         AntiAfkAction::Camera => camera_nudge(input),
         AntiAfkAction::Random => Err("random action was not resolved".to_string()),
@@ -225,30 +266,59 @@ fn perform_input_action(
 }
 
 fn hold_key(input: &dyn AntiAfkInput, key: &str, duration: Duration) -> Result<(), String> {
-    input.key_down(key)?;
+    // Clear any stale key state left by a previous interrupted cycle before
+    // sending the next press. Some games ignore a keydown while they still
+    // believe the key is held, which otherwise makes every other cycle flaky.
+    let _ = release_with_retry(|| input.key_up(key), input);
+    input.wait(KEY_SETTLE_DELAY);
+    if let Err(error) = input.key_down(key) {
+        let _ = release_with_retry(|| input.key_up(key), input);
+        return Err(error);
+    }
     input.wait(duration);
-    input.key_up(key)
+    release_with_retry(|| input.key_up(key), input)
 }
 
 fn camera_nudge(input: &dyn AntiAfkInput) -> Result<(), String> {
     input.mouse_down("right")?;
-    input.wait(Duration::from_millis(40));
+    input.wait(CAMERA_BUTTON_SETTLE);
     let movement = input
-        .move_relative(24, 0)
-        .map(|()| input.wait(Duration::from_millis(60)))
-        .and_then(|()| input.move_relative(-24, 0));
-    let release = input.mouse_up("right");
+        .move_relative(CAMERA_DELTA, 0)
+        .map(|()| input.wait(CAMERA_TRAVEL_SETTLE))
+        .and_then(|()| input.move_relative(-CAMERA_DELTA, 0));
+    let release = release_with_retry(|| input.mouse_up("right"), input);
     movement.and(release)
+}
+
+fn release_with_retry<F>(mut release: F, input: &dyn AntiAfkInput) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let mut last_error = None;
+    for attempt in 0..INPUT_RELEASE_ATTEMPTS {
+        match release() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < INPUT_RELEASE_ATTEMPTS {
+                    input.wait(INPUT_RELEASE_RETRY_DELAY);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "input release failed".to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{atomic::AtomicUsize, Mutex};
 
     #[derive(Default)]
     struct MockInput {
         events: Mutex<Vec<String>>,
+        key_up_failures: AtomicUsize,
+        mouse_up_failures: AtomicUsize,
     }
 
     impl MockInput {
@@ -265,6 +335,19 @@ mod tests {
 
         fn key_up(&self, key: &str) -> Result<(), String> {
             self.events.lock().unwrap().push(format!("up:{key}"));
+            if self
+                .key_up_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err("simulated key release failure".to_string());
+            }
             Ok(())
         }
 
@@ -281,6 +364,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("mouse_up:{button}"));
+            if self
+                .mouse_up_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err("simulated mouse release failure".to_string());
+            }
             Ok(())
         }
 
@@ -304,6 +400,16 @@ mod tests {
     }
 
     #[test]
+    fn selectable_window_ids_bind_the_handle_to_its_process() {
+        let hwnd = 0x1234_ABCDusize as HWND;
+        let id = selectable_window_id(hwnd, 4242);
+
+        assert_eq!(id, "1234ABCD:4242");
+        assert_eq!(id_to_hwnd(&id), Some(hwnd));
+        assert_eq!(id_process_id(&id), Some(4242));
+    }
+
+    #[test]
     fn selection_excludes_hidden_owned_untitled_and_own_process_windows() {
         assert!(is_selectable(true, false, "Game", 22, 11));
         assert!(!is_selectable(false, false, "Game", 22, 11));
@@ -318,7 +424,10 @@ mod tests {
 
         perform_input_action(&input, AntiAfkAction::Jump, &AtomicBool::new(true)).unwrap();
 
-        assert_eq!(input.take(), ["down:space", "wait:140", "up:space"]);
+        assert_eq!(
+            input.take(),
+            ["up:space", "wait:35", "down:space", "wait:140", "up:space"]
+        );
     }
 
     #[test]
@@ -331,7 +440,10 @@ mod tests {
 
         assert_eq!(
             input.take(),
-            ["down:d", "wait:180", "up:d", "down:a", "wait:180", "up:a"]
+            [
+                "up:d", "wait:35", "down:d", "wait:180", "up:d", "up:a", "wait:35", "down:a",
+                "wait:180", "up:a"
+            ]
         );
     }
 
@@ -349,6 +461,55 @@ mod tests {
                 "move:24:0",
                 "wait:60",
                 "move:-24:0",
+                "mouse_up:right"
+            ]
+        );
+    }
+
+    #[test]
+    fn key_release_is_retried_after_transient_input_errors() {
+        let input = MockInput {
+            key_up_failures: AtomicUsize::new(2),
+            ..Default::default()
+        };
+
+        perform_input_action(&input, AntiAfkAction::Jump, &AtomicBool::new(true)).unwrap();
+
+        assert_eq!(
+            input.take(),
+            [
+                "up:space",
+                "wait:20",
+                "up:space",
+                "wait:20",
+                "up:space",
+                "wait:35",
+                "down:space",
+                "wait:140",
+                "up:space"
+            ]
+        );
+    }
+
+    #[test]
+    fn camera_release_is_retried_after_transient_input_errors() {
+        let input = MockInput {
+            mouse_up_failures: AtomicUsize::new(1),
+            ..Default::default()
+        };
+
+        perform_input_action(&input, AntiAfkAction::Camera, &AtomicBool::new(true)).unwrap();
+
+        assert_eq!(
+            input.take(),
+            [
+                "mouse_down:right",
+                "wait:40",
+                "move:24:0",
+                "wait:60",
+                "move:-24:0",
+                "mouse_up:right",
+                "wait:20",
                 "mouse_up:right"
             ]
         );

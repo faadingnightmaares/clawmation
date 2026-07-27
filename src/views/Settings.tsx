@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   Bell,
   BookOpen,
+  Cat,
   FolderOpen,
   Info,
   Keyboard,
@@ -41,7 +42,7 @@ import { Guide } from "./Guide";
 import type { ViewProps } from "./types";
 
 type HotkeyKey = "hotkey_record" | "hotkey_play" | "hotkey_stop";
-type SwitchKey = "notify_on_complete" | "notify_on_schedule";
+type SwitchKey = "indicator_on_top" | "notify_on_complete" | "notify_on_schedule";
 
 const DEFAULT_CONFIG: ConfigDto = {
   capture_backend: "",
@@ -263,6 +264,19 @@ export function Settings(props: ViewProps) {
                     onChange={(v) => void toggle("notify_on_schedule", v)}
                   />
                 </div>
+              </Section>
+
+              <Section
+                icon={Cat}
+                title="Cat indicator"
+                hint="Control the small status cat that appears while Clawmation is active."
+              >
+                <SwitchRow
+                  id="indicator_on_top"
+                  title="Show cat indicator while running"
+                  checked={config.indicator_on_top}
+                  onChange={(v) => void toggle("indicator_on_top", v)}
+                />
               </Section>
 
               <Section icon={FolderOpen} title="Your files" hint="Everything Clawmation saves stays right here on your PC.">

@@ -5,9 +5,11 @@
 //! focus-jump-restore contract deterministic to test without moving a real
 //! window.
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fmt, fmt::Formatter};
 
 use serde::{Deserialize, Serialize};
 
@@ -107,7 +109,8 @@ impl AntiAfkService {
         let random_state = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos() as u64;
+            .as_nanos() as u64
+            | 0x9E37_79B9_7F4A_7C15;
         let shared = Arc::new(Shared {
             state: Mutex::new(WorkerState {
                 enabled: false,
@@ -134,7 +137,7 @@ impl AntiAfkService {
     }
 
     pub fn get(&self) -> AntiAfkSnapshot {
-        self.shared.state.lock().unwrap().snapshot()
+        lock_state(&self.shared).snapshot()
     }
 
     pub fn update(
@@ -153,7 +156,11 @@ impl AntiAfkService {
         }
 
         let now = Instant::now();
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = lock_state(&self.shared);
+        if enabled == Some(true) && target_id.is_none() && state.target_id.is_none() {
+            return Err("select a game or app window first".to_string());
+        }
+
         if let Some(id) = target_id {
             state.target_id = Some(id);
             state.error = None;
@@ -171,9 +178,6 @@ impl AntiAfkService {
         }
 
         let newly_enabled = enabled == Some(true) && !state.enabled;
-        if enabled == Some(true) && state.target_id.is_none() {
-            return Err("select a game or app window first".to_string());
-        }
         if let Some(value) = enabled {
             state.enabled = value;
             state.error = None;
@@ -203,7 +207,7 @@ impl AntiAfkService {
 impl Drop for AntiAfkService {
     fn drop(&mut self) {
         {
-            let mut state = self.shared.state.lock().unwrap();
+            let mut state = lock_state(&self.shared);
             state.shutdown = true;
         }
         self.shared.changed.notify_all();
@@ -213,6 +217,10 @@ impl Drop for AntiAfkService {
     }
 }
 
+fn lock_state(shared: &Shared) -> MutexGuard<'_, WorkerState> {
+    shared.state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn interval_duration(minutes: u32) -> Duration {
     Duration::from_secs(u64::from(minutes) * 60)
 }
@@ -220,7 +228,7 @@ fn interval_duration(minutes: u32) -> Duration {
 fn worker_loop(shared: Arc<Shared>, platform: Arc<dyn AntiAfkPlatform>) {
     loop {
         let (target, action) = {
-            let mut state = shared.state.lock().unwrap();
+            let mut state = lock_state(&shared);
             loop {
                 if state.shutdown {
                     return;
@@ -235,17 +243,25 @@ fn worker_loop(shared: Arc<Shared>, platform: Arc<dyn AntiAfkPlatform>) {
                     }
                     (true, Some(_), Some(due)) => {
                         let wait = due.saturating_duration_since(Instant::now());
-                        let (next, _) = shared.changed.wait_timeout(state, wait).unwrap();
+                        let (next, _) = shared
+                            .changed
+                            .wait_timeout(state, wait)
+                            .unwrap_or_else(PoisonError::into_inner);
                         state = next;
                     }
-                    _ => state = shared.changed.wait(state).unwrap(),
+                    _ => {
+                        state = shared
+                            .changed
+                            .wait(state)
+                            .unwrap_or_else(PoisonError::into_inner)
+                    }
                 }
             }
         };
 
-        let result = perform_anti_afk(platform.as_ref(), &target, action);
+        let result = perform_anti_afk_safe(platform.as_ref(), &target, action);
 
-        let mut state = shared.state.lock().unwrap();
+        let mut state = lock_state(&shared);
         if state.enabled {
             state.next_fire = Some(Instant::now() + interval_duration(state.interval_min));
             match result {
@@ -270,6 +286,15 @@ fn worker_loop(shared: Arc<Shared>, platform: Arc<dyn AntiAfkPlatform>) {
 enum ActionError {
     TargetUnavailable,
     Operation(String),
+}
+
+impl fmt::Display for ActionError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TargetUnavailable => formatter.write_str("the selected window is unavailable"),
+            Self::Operation(error) => formatter.write_str(error),
+        }
+    }
 }
 
 fn resolve_action(configured: AntiAfkAction, state: &mut u64) -> AntiAfkAction {
@@ -309,7 +334,28 @@ fn perform_anti_afk(
         .map(|id| platform.focus_window(&id).map_err(ActionError::Operation))
         .unwrap_or(Ok(()));
 
-    action_result.and(restore_result)
+    match (action_result.err(), restore_result.err()) {
+        (None, None) => Ok(()),
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (Some(action_error), Some(restore_error)) => Err(ActionError::Operation(format!(
+            "{action_error}; restoring the previous window failed: {restore_error}"
+        ))),
+    }
+}
+
+fn perform_anti_afk_safe(
+    platform: &dyn AntiAfkPlatform,
+    target: &str,
+    action: AntiAfkAction,
+) -> Result<(), ActionError> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        perform_anti_afk(platform, target, action)
+    })) {
+        Ok(result) => result,
+        Err(_) => Err(ActionError::Operation(
+            "Anti-AFK input operation panicked and was recovered".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +369,26 @@ mod tests {
         previous: Option<String>,
         action_error: bool,
         target_focus_error: bool,
+    }
+
+    struct PanicPlatform;
+
+    impl AntiAfkPlatform for PanicPlatform {
+        fn is_window(&self, _id: &str) -> bool {
+            panic!("simulated platform panic");
+        }
+
+        fn foreground_window(&self) -> Option<String> {
+            None
+        }
+
+        fn focus_window(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn perform_action(&self, _action: AntiAfkAction) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     impl AntiAfkPlatform for MockPlatform {
@@ -380,6 +446,31 @@ mod tests {
 
         assert_eq!(error, "select a game or app window first");
         assert!(!service.get().enabled);
+    }
+
+    #[test]
+    fn rejected_enable_does_not_partially_apply_other_settings() {
+        let (platform, _) = mock(true, None);
+        let service = AntiAfkService::new(platform, DEFAULT_INTERVAL_MIN, AntiAfkAction::Jump);
+
+        assert!(service
+            .update(None, Some(7), Some(AntiAfkAction::Camera), Some(true))
+            .is_err());
+
+        let state = service.get();
+        assert_eq!(state.interval_min, DEFAULT_INTERVAL_MIN);
+        assert_eq!(state.action, AntiAfkAction::Jump);
+        assert!(!state.enabled);
+    }
+
+    #[test]
+    fn platform_panics_are_reported_without_killing_the_worker_path() {
+        assert_eq!(
+            perform_anti_afk_safe(&PanicPlatform, "target", AntiAfkAction::Jump),
+            Err(ActionError::Operation(
+                "Anti-AFK input operation panicked and was recovered".to_string()
+            ))
+        );
     }
 
     #[test]

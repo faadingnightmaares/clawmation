@@ -48,6 +48,8 @@ pub fn update_config(app: AppHandle, state: State<AppState>, patch: Value) -> Va
                 || o.contains_key("hotkey_stop")
         })
         .unwrap_or(false);
+    let indicator_changed =
+        patch.as_object().is_some_and(|o| o.contains_key("indicator_on_top"));
 
     let mut guard = state.core.config.lock().unwrap();
 
@@ -79,6 +81,9 @@ pub fn update_config(app: AppHandle, state: State<AppState>, patch: Value) -> Va
     } else {
         Vec::new()
     };
+    if indicator_changed {
+        state.core.sync_indicator();
+    }
     state.emit("ok", "Settings saved");
     json!({ "ok": true, "unbound": unbound })
 }

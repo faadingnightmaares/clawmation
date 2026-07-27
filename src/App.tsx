@@ -9,6 +9,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Home } from "@/views/Home";
 import { Macros } from "@/views/Macros";
+import { Nodes } from "@/views/Nodes";
 import { Watch } from "@/views/Watch";
 import { Autopilot } from "@/views/Autopilot";
 import { Settings } from "@/views/Settings";
@@ -20,6 +21,8 @@ function renderView(view: ViewId, props: ViewProps) {
       return <Home {...props} />;
     case "macros":
       return <Macros {...props} />;
+    case "nodes":
+      return <Nodes {...props} />;
     case "vision":
       return <Watch {...props} />;
     case "autopilot":
@@ -33,18 +36,23 @@ export default function App() {
   const status = useStatus();
   const [view, setView] = useState<ViewId>("macros");
 
-  // Alt+1..5 jump straight to a view (index into NAV order), unless typing in a
+  // Alt+1..6 jump straight to a view (index into NAV order), unless typing in a
   // field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) {
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        t?.isContentEditable
+      ) {
         return;
       }
       const i = Number(e.key) - 1;
-      if (i >= 0 && i < NAV.length) {
+      if (i >= 0 && i < NAV.length && !NAV[i].disabled) {
         e.preventDefault();
         setView(NAV[i].id);
       }
@@ -60,8 +68,10 @@ export default function App() {
     let alive = true;
     let unlisten: (() => void) | undefined;
     void onUpdateAvailable((info) => {
-      notifyAction(`Clawmation ${info.latest} is out; you’re on ${info.current}.`, "Show me", () =>
-        setView("settings"),
+      notifyAction(
+        `Clawmation ${info.latest} is out; you’re on ${info.current}.`,
+        "Show me",
+        () => setView("settings"),
       );
     })
       .then((off) => {
@@ -77,12 +87,22 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full flex-col">
+      <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden">
         <CommandBar status={status} view={view} navigate={setView} />
-        <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-5xl px-6 py-8 md:px-8">
-            {renderView(view, { status, navigate: setView })}
-          </div>
+        <main
+          className={
+            view === "nodes"
+              ? "min-h-0 flex-1 overflow-hidden"
+              : "flex-1 overflow-y-auto"
+          }
+        >
+          {view === "nodes" ? (
+            renderView(view, { status, navigate: setView })
+          ) : (
+            <div className="mx-auto w-full max-w-5xl px-6 py-8 md:px-8">
+              {renderView(view, { status, navigate: setView })}
+            </div>
+          )}
         </main>
       </div>
       <Toaster position="bottom-right" />

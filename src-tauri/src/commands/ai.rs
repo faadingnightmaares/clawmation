@@ -14,6 +14,7 @@ use tauri::{State, Window};
 
 use crate::commands::window::with_window_out_of_frame;
 use crate::models::macro_def::Macro;
+use crate::models::node_graph::NodeGraph;
 use crate::models::step::{macro_to_steps as convert, AIMacro, Step};
 use crate::paths;
 use crate::state::AppState;
@@ -21,6 +22,10 @@ use crate::state::AppState;
 /// AI macros live under `macros/ai/`, mirroring Python's `AI_DIR = MACROS_DIR/"ai"`.
 fn ai_dir() -> std::path::PathBuf {
     paths::macros_dir().join("ai")
+}
+
+fn nodes_dir() -> std::path::PathBuf {
+    paths::macros_dir().join("nodes")
 }
 
 #[tauri::command(async)]
@@ -33,7 +38,10 @@ pub fn steps_save(state: State<AppState>, macro_name: String, steps: Vec<Value>)
     let result = steps_save_in(&ai_dir(), &macro_name, steps);
     if result["ok"] == json!(true) {
         let count = result["count"].as_u64().unwrap_or(0);
-        state.emit("ok", format!("Saved step macro '{macro_name}' ({count} steps)"));
+        state.emit(
+            "ok",
+            format!("Saved step macro '{macro_name}' ({count} steps)"),
+        );
         json!({ "ok": true })
     } else {
         let err = result["error"].as_str().unwrap_or("").to_string();
@@ -52,6 +60,45 @@ pub fn steps_run(state: State<AppState>, steps: Vec<Value>) -> Value {
 #[tauri::command(async)]
 pub fn steps_test(state: State<AppState>, window: Window, step: Value) -> Value {
     with_window_out_of_frame(&window, || state.core.steps_test(step))
+}
+
+#[tauri::command(async)]
+pub fn node_graph_load(macro_name: String) -> Value {
+    node_graph_load_in(&paths::macros_dir(), &macro_name)
+}
+
+#[tauri::command(async)]
+pub fn node_graph_validate(graph: Value) -> Value {
+    match serde_json::from_value::<NodeGraph>(graph) {
+        Ok(graph) => json!(graph.validate()),
+        Err(error) => json!({
+            "ok": false,
+            "errors": [format!("Bad node graph: {error}")],
+            "warnings": [],
+        }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn node_graph_save(state: State<AppState>, macro_name: String, graph: Value) -> Value {
+    let result = node_graph_save_in(&nodes_dir(), &macro_name, graph);
+    if result["ok"] == json!(true) {
+        state.emit("ok", format!("Saved node graph '{macro_name}'"));
+    } else {
+        state.emit(
+            "err",
+            format!(
+                "Node graph save failed: {}",
+                result["error"].as_str().unwrap_or("invalid graph")
+            ),
+        );
+    }
+    result
+}
+
+#[tauri::command(async)]
+pub fn node_graph_run(state: State<AppState>, graph: Value) -> Value {
+    state.core.node_graph_run(graph)
 }
 
 // ── Pure implementations (unit-tested against a temp dir) ────────────────────
@@ -101,11 +148,61 @@ fn steps_save_in(ai_dir: &Path, macro_name: &str, steps: Vec<Value>) -> Value {
         Err(e) => return json!({ "ok": false, "error": e.to_string() }),
     };
     let count = step_objs.len();
-    let m = AIMacro { name: macro_name.to_string(), steps: step_objs, ..Default::default() };
+    let m = AIMacro {
+        name: macro_name.to_string(),
+        steps: step_objs,
+        ..Default::default()
+    };
     let path = ai_dir.join(format!("{macro_name}.json"));
     match m.save_to(&path) {
         Ok(()) => json!({ "ok": true, "count": count }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+fn node_graph_load_in(macros_dir: &Path, macro_name: &str) -> Value {
+    let graph_path = macros_dir.join("nodes").join(format!("{macro_name}.json"));
+    if graph_path.exists() {
+        return match NodeGraph::load(&graph_path) {
+            Ok(graph) => json!({ "ok": true, "graph": graph, "source": "saved" }),
+            Err(error) => json!({ "ok": false, "error": error }),
+        };
+    }
+
+    let steps_result = macro_to_steps_in(macros_dir, macro_name);
+    if steps_result["ok"] != json!(true) {
+        return steps_result;
+    }
+    let steps: Result<Vec<Step>, _> = serde_json::from_value(steps_result["steps"].clone());
+    match steps {
+        Ok(steps) => json!({
+            "ok": true,
+            "graph": NodeGraph::from_steps(macro_name, steps),
+            "source": "imported",
+        }),
+        Err(error) => json!({ "ok": false, "error": error.to_string() }),
+    }
+}
+
+fn node_graph_save_in(nodes_dir: &Path, macro_name: &str, graph: Value) -> Value {
+    let mut graph: NodeGraph = match serde_json::from_value(graph) {
+        Ok(graph) => graph,
+        Err(error) => return json!({ "ok": false, "error": error.to_string() }),
+    };
+    graph.name = macro_name.to_string();
+    let report = graph.validate();
+    if !report.ok {
+        return json!({
+            "ok": false,
+            "error": report.errors.join("; "),
+            "errors": report.errors,
+            "warnings": report.warnings,
+        });
+    }
+    let path = nodes_dir.join(format!("{macro_name}.json"));
+    match graph.save_to(&path) {
+        Ok(()) => json!({ "ok": true, "warnings": report.warnings }),
+        Err(error) => json!({ "ok": false, "error": error }),
     }
 }
 
@@ -229,5 +326,51 @@ mod tests {
         let r = steps_save_in(&dir, "bad", steps);
         assert_eq!(r["ok"], json!(false));
         assert!(r["error"].as_str().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn node_graph_load_imports_legacy_steps_then_prefers_saved_graph() {
+        let macros = temp_dir("node_load");
+        let name = "__test___node_load";
+        let recorded = Macro {
+            name: name.into(),
+            events: vec![
+                ev(InputEventType::MouseDown, 0.1, 5, 6),
+                ev(InputEventType::MouseUp, 0.2, 5, 6),
+            ],
+            ..Default::default()
+        };
+        recorded
+            .save_to(&macros.join(format!("{name}.json")))
+            .unwrap();
+
+        let imported = node_graph_load_in(&macros, name);
+        assert_eq!(imported["ok"], true);
+        assert_eq!(imported["source"], "imported");
+        assert_eq!(imported["graph"]["nodes"].as_array().unwrap().len(), 3);
+
+        let saved: NodeGraph = serde_json::from_value(imported["graph"].clone()).unwrap();
+        saved
+            .save_to(&macros.join("nodes").join(format!("{name}.json")))
+            .unwrap();
+        let reopened = node_graph_load_in(&macros, name);
+        assert_eq!(reopened["source"], "saved");
+    }
+
+    #[test]
+    fn node_graph_save_rejects_invalid_edges() {
+        let dir = temp_dir("node_save_bad");
+        let result = node_graph_save_in(
+            &dir,
+            "bad",
+            json!({
+                "version": 1,
+                "entry": "start",
+                "nodes": [{"id":"start","type":"start"}],
+                "edges": [{"id":"e","from":"start","output":"next","to":"missing"}]
+            }),
+        );
+        assert_eq!(result["ok"], false);
+        assert!(result["error"].as_str().unwrap().contains("missing target"));
     }
 }

@@ -14,6 +14,7 @@ pub mod ai;
 pub mod anti_afk;
 pub mod chains;
 pub mod guards;
+pub mod node_graph;
 pub mod scheduler;
 pub mod stats;
 pub mod vision_agent;

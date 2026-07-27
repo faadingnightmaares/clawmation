@@ -6,6 +6,7 @@
 //! a faithful port of `Api.emergency_stop`.
 
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use tauri::State;
 
 use crate::state::AppState;
@@ -38,6 +39,7 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
     let mut stopped: Vec<&str> = Vec::new();
     let managed_playback =
         core.runtime.lock().unwrap().mode == "playing" && core.player.is_playing();
+    let managed_steps = core.node_running.swap(false, Ordering::SeqCst);
 
     if let Some(recorder) = core.recorder.lock().unwrap().as_mut() {
         if recorder.is_recording() {
@@ -49,6 +51,10 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
         core.player.stop();
         stopped.push("playback");
     }
+    if managed_steps {
+        stopped.push("steps/nodes");
+    }
+    core.stop_guards();
     // A running chain keeps firing macro after macro on its own thread; flag it
     // to halt after the current one. With the player stopped above (the in-flight
     // macro dies), this ends the whole chain rather than just the macro it was on.
@@ -81,7 +87,7 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
     // mode reset. Let it finish that job instead of making "idle" visible while
     // the input thread is still unwinding; recorder/steps/vision-only stops have
     // no such watcher and reset immediately.
-    if !managed_playback {
+    if !managed_playback && !managed_steps {
         core.set_mode("idle");
     }
     let summary = if stopped.is_empty() {

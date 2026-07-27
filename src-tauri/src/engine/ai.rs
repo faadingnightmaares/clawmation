@@ -48,22 +48,43 @@ pub type Detect = Box<dyn Fn(&Step) -> (Vec<Match>, String) + Send + Sync>;
 /// Perform one [`Action`]. Production drives the controller; tests record the call.
 pub type Actuate = Box<dyn Fn(Action) + Send + Sync>;
 
+/// Sleep in short injectable slices so a global stop can interrupt a long delay
+/// instead of waiting for the whole delay to finish.
+fn interruptible_sleep(seconds: f64, actuate: &Actuate, running: &AtomicBool) -> bool {
+    let mut remaining = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+    const SLICE_SECONDS: f64 = 0.05;
+    while remaining > 0.0 {
+        if !running.load(Ordering::SeqCst) {
+            return false;
+        }
+        let slice = remaining.min(SLICE_SECONDS);
+        actuate(Action::Sleep(slice));
+        remaining -= slice;
+    }
+    running.load(Ordering::SeqCst)
+}
+
 /// The outcome of one executed step. Mirrors `ai_macro.StepResult`, spread into
 /// each run-summary result entry.
-struct StepResult {
-    ok: bool,
-    message: String,
-    found_x: i64,
-    found_y: i64,
-    matched: i64,
-    confidence: f64,
-    elapsed: f64,
+pub(crate) struct StepResult {
+    pub(crate) ok: bool,
+    pub(crate) message: String,
+    pub(crate) found_x: i64,
+    pub(crate) found_y: i64,
+    pub(crate) matched: i64,
+    pub(crate) confidence: f64,
+    pub(crate) elapsed: f64,
 }
 
 /// Execute one step through the injected seams (Python's `_execute_step`). The
 /// action steps (`click`/`key`/`type`/`scroll`/`delay`) actuate and report their
 /// intent; `find_click`/`wait_for` detect and act on a hit.
-fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &AtomicBool) -> StepResult {
+pub(crate) fn execute_step(
+    step: &Step,
+    detect: &Detect,
+    actuate: &Actuate,
+    running: &AtomicBool,
+) -> StepResult {
     let t0 = Instant::now();
     let secs = |t: Instant| t.elapsed().as_secs_f64();
 
@@ -121,14 +142,14 @@ fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &Atomi
             }
         }
         "delay" => {
-            // Clamp negative/NaN so `Duration::from_secs_f64` in the actuator can't
-            // panic (a panic in the run thread would leak the mode). Python's
-            // `time.sleep(-x)` raised instead (an error path either way), and the
-            // message still reports the raw value via `str(float)`.
-            actuate(Action::Sleep(step.delay));
+            let completed = interruptible_sleep(step.delay, actuate, running);
             StepResult {
-                ok: true,
-                message: format!("waited {}s", py_float(step.delay)),
+                ok: completed,
+                message: if completed {
+                    format!("waited {}s", py_float(step.delay))
+                } else {
+                    "stopped during delay".to_string()
+                },
                 found_x: -1,
                 found_y: -1,
                 matched: 0,
@@ -186,7 +207,11 @@ fn execute_step(step: &Step, detect: &Detect, actuate: &Actuate, running: &Atomi
             }
             StepResult {
                 ok: false,
-                message: format!("timed out after {}s", py_float(step.timeout)),
+                message: if running.load(Ordering::Relaxed) {
+                    format!("timed out after {}s", py_float(step.timeout))
+                } else {
+                    "stopped while waiting".to_string()
+                },
                 found_x: -1,
                 found_y: -1,
                 matched: 0,
@@ -218,14 +243,28 @@ pub fn run(
     actuate: &Actuate,
 ) -> Value {
     let running = AtomicBool::new(true);
+    run_with_flag(steps, loop_enabled, loop_count, detect, actuate, &running)
+}
+
+/// Cancellable form of [`run`]. The caller owns the flag and can clear it from
+/// the emergency-stop path; natural completion does not mutate it.
+pub fn run_with_flag(
+    steps: &[Step],
+    loop_enabled: bool,
+    loop_count: i64,
+    detect: &Detect,
+    actuate: &Actuate,
+    running: &AtomicBool,
+) -> Value {
     let mut iterations: i64 = 0;
     let max_iter = if loop_enabled { loop_count } else { 1 };
     let mut results: Vec<Value> = Vec::new();
+    let mut halted = false;
 
-    while running.load(Ordering::Relaxed) && iterations < max_iter {
+    while running.load(Ordering::SeqCst) && !halted && iterations < max_iter {
         iterations += 1;
         for (i, step) in steps.iter().enumerate() {
-            if !running.load(Ordering::Relaxed) {
+            if !running.load(Ordering::SeqCst) {
                 break;
             }
             if !step.enabled {
@@ -250,24 +289,27 @@ pub fn run(
             }));
             if !result.ok && step.step_type == "find_click" {
                 // A failed find_click stops the run (target missing).
-                running.store(false, Ordering::Relaxed);
+                halted = true;
                 break;
             }
         }
     }
 
-    running.store(false, Ordering::Relaxed);
+    let cancelled = !running.load(Ordering::SeqCst);
     let passed = results
         .iter()
         .filter(|r| r["ok"].as_bool().unwrap_or(false))
         .count() as i64;
-    let ok = if results.is_empty() {
+    let ok = if cancelled {
+        false
+    } else if results.is_empty() {
         true
     } else {
         results.iter().all(|r| r["ok"].as_bool().unwrap_or(false))
     };
     json!({
         "ok": ok,
+        "cancelled": cancelled,
         "iterations": iterations,
         "steps_run": results.len(),
         "steps_passed": passed,
@@ -277,9 +319,11 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
-    use super::{run, Action, Actuate, Detect, Match};
+    use super::{run, run_with_flag, Action, Actuate, Detect, Match};
     use crate::models::step::Step;
 
     /// An actuator that records every action it is handed.
@@ -409,8 +453,43 @@ mod tests {
         let detect = detect_returning(vec![], "");
         let summary = run(&steps, false, 1, &detect, &actuate);
 
-        assert_eq!(*log.lock().unwrap(), vec![Action::Sleep(2.0)]);
+        let sleep_total: f64 = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|action| match action {
+                Action::Sleep(seconds) => *seconds,
+                other => panic!("unexpected action: {other:?}"),
+            })
+            .sum();
+        assert!((sleep_total - 2.0).abs() < 0.000_001);
         assert_eq!(summary["results"][0]["message"], "waited 2.0s");
+    }
+
+    #[test]
+    fn external_stop_interrupts_a_long_delay_promptly() {
+        let steps =
+            vec![Step { step_type: "delay".into(), delay: 5.0, ..Default::default() }];
+        let detect = detect_returning(vec![], "");
+        let actuate: Actuate = Box::new(|action| {
+            if let Action::Sleep(seconds) = action {
+                std::thread::sleep(Duration::from_secs_f64(seconds));
+            }
+        });
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_running = running.clone();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            run_with_flag(&steps, false, 1, &detect, &actuate, worker_running.as_ref())
+        });
+
+        std::thread::sleep(Duration::from_millis(30));
+        running.store(false, Ordering::SeqCst);
+        let summary = worker.join().unwrap();
+
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["cancelled"], true);
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod chain;
 pub mod config;
 pub mod guard;
 pub mod macro_def;
+pub mod node_graph;
 pub mod schedule;
 pub mod stats;
 pub mod status;

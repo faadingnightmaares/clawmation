@@ -15,7 +15,6 @@ import {
   Plus,
   Search,
   Shield,
-  SlidersHorizontal,
   Square,
   Trash2,
   Upload,
@@ -91,7 +90,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { GuardsSheet } from "@/components/editors/GuardsSheet";
-import { StepsSheet } from "@/components/editors/StepsSheet";
 import { CheckpointsSheet } from "@/components/editors/CheckpointsSheet";
 
 const SPEEDS = ["0.25", "0.5", "1", "1.5", "2", "4"] as const;
@@ -207,7 +205,6 @@ export function Macros({ status }: ViewProps) {
   const [bulkConfirm, setBulkConfirm] = useState(false);
 
   const [guardsFor, setGuardsFor] = useState<string | null>(null);
-  const [stepsFor, setStepsFor] = useState<string | null>(null);
   const [checkpointsFor, setCheckpointsFor] = useState<string | null>(null);
 
   const pendingRename = useRef<string | null>(null);
@@ -797,7 +794,6 @@ export function Macros({ status }: ViewProps) {
               onCategory={(v) => saveCategory(m, v)}
               onNotes={(v) => saveNotes(m, v)}
               onGuards={() => setGuardsFor(m.name)}
-              onSteps={() => setStepsFor(m.name)}
               onCheckpoints={() => setCheckpointsFor(m.name)}
               onDuplicate={() => onDuplicate(m)}
               onSavePreset={() => askSaveAsTemplate(m)}
@@ -897,14 +893,6 @@ export function Macros({ status }: ViewProps) {
           onChanged={load}
         />
       )}
-      {stepsFor && (
-        <StepsSheet
-          macroName={stepsFor}
-          open
-          onOpenChange={(o) => !o && setStepsFor(null)}
-          onChanged={load}
-        />
-      )}
       {checkpointsFor && (
         <CheckpointsSheet
           macroName={checkpointsFor}
@@ -940,7 +928,6 @@ interface MacroRowProps {
   onCategory: (v: string) => void;
   onNotes: (v: string) => void;
   onGuards: () => void;
-  onSteps: () => void;
   onCheckpoints: () => void;
   onDuplicate: () => void;
   onSavePreset: () => void;
@@ -1192,10 +1179,6 @@ function MacroRow(p: MacroRowProps) {
             <Button variant="outline" size="sm" onClick={p.onCheckpoints}>
               <Eye className="size-4" />
               Vision checkpoints
-            </Button>
-            <Button variant="outline" size="sm" onClick={p.onSteps}>
-              <SlidersHorizontal className="size-4" />
-              Fine-tune actions
             </Button>
           </div>
 

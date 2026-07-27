@@ -43,9 +43,9 @@ impl Default for MacroConfig {
             log_level: "INFO".to_string(),
             indicator_on_top: true,
             humanize_clicks: false,
-            hotkey_record: "f9".to_string(),
-            hotkey_play: "f10".to_string(),
-            hotkey_stop: "f12".to_string(),
+            hotkey_record: "f6".to_string(),
+            hotkey_play: "f4".to_string(),
+            hotkey_stop: "f3".to_string(),
             notify_on_schedule: true,
             notify_on_complete: true,
             anti_afk_interval_min: 15,
@@ -79,6 +79,26 @@ impl MacroConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_install_uses_the_documented_hotkeys() {
+        let cfg = MacroConfig::default();
+        assert_eq!(cfg.hotkey_record, "f6");
+        assert_eq!(cfg.hotkey_play, "f4");
+        assert_eq!(cfg.hotkey_stop, "f3");
+    }
+
+    #[test]
+    fn saved_custom_hotkeys_are_never_replaced_by_new_defaults() {
+        let cfg: MacroConfig = serde_yaml::from_str(
+            "hotkey_record: ctrl+shift+r\nhotkey_play: f8\nhotkey_stop: f2\n",
+        )
+        .unwrap();
+
+        assert_eq!(cfg.hotkey_record, "ctrl+shift+r");
+        assert_eq!(cfg.hotkey_play, "f8");
+        assert_eq!(cfg.hotkey_stop, "f2");
+    }
 
     #[test]
     fn real_settings_fixture_loads_and_absent_keys_default() {

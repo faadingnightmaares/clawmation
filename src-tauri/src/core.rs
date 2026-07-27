@@ -37,6 +37,7 @@ use crate::logbuf::LogBuffer;
 use crate::models::config::MacroConfig;
 use crate::models::guard::{Guard, GuardFile};
 use crate::models::macro_def::{InputEventType, Macro};
+use crate::models::node_graph::NodeGraph;
 use crate::models::step::Step;
 use crate::notify::Notifier;
 use crate::paths;
@@ -725,6 +726,8 @@ pub struct Core {
     /// finding. Armed by whichever detection loop is running, so it is up exactly
     /// when there is something to see.
     pub detections: Arc<crate::shell::detections::Detections>,
+    /// Cancellation flag for edited steps and the directed node executor.
+    pub node_running: Arc<AtomicBool>,
 }
 
 impl Core {
@@ -740,6 +743,7 @@ impl Core {
         let notifier = Arc::new(Notifier::new());
         let indicator = Arc::new(crate::shell::indicator::Indicator::new());
         let detections = Arc::new(crate::shell::detections::Detections::new());
+        let node_running = Arc::new(AtomicBool::new(false));
 
         // Guard-engine callbacks capture leaf Arcs only (never `Core`) so a guard
         // pause/resume/click drives the same player and controller a macro plays
@@ -783,6 +787,7 @@ impl Core {
             notifier,
             indicator,
             detections,
+            node_running,
         };
 
         // DPI self-check at startup: probe on a fresh worker thread and log the
@@ -810,7 +815,15 @@ impl Core {
             rt.mode = mode.to_string();
             rt.mode_since = Some(Instant::now());
         }
-        self.indicator.sync(mode);
+        self.sync_indicator();
+    }
+
+    /// Apply the live indicator preference without changing the current mode or
+    /// resetting its elapsed timer.
+    pub fn sync_indicator(&self) {
+        let mode = self.runtime.lock().unwrap().mode.clone();
+        let enabled = self.config.lock().unwrap().indicator_on_top;
+        self.indicator.sync(&mode, enabled);
     }
 
     // ── Global hotkeys (TinyTask-style) ──────────────────────────────────────
@@ -1125,7 +1138,7 @@ impl Core {
         self.emit("ok", format!("{count} guard(s) active during playback"));
     }
 
-    fn stop_guards(&self) {
+    pub(crate) fn stop_guards(&self) {
         self.guard_engine.stop();
         self.detections.set("guards", false);
     }
@@ -1183,6 +1196,7 @@ impl Core {
     pub fn stop_playback(&self) -> Value {
         let playing = self.runtime.lock().unwrap().mode == "playing";
         if playing {
+            self.node_running.store(false, Ordering::SeqCst);
             self.stop_guards();
             self.player.stop();
             self.emit("warn", "Stopping playback...");
@@ -1211,6 +1225,7 @@ impl Core {
             Err(e) => return json!({ "ok": false, "error": format!("Bad steps: {e}") }),
         };
 
+        self.node_running.store(true, Ordering::SeqCst);
         self.set_mode("playing");
         let count = step_objs.len();
         self.emit("play", format!("Running {count} steps"));
@@ -1234,11 +1249,25 @@ impl Core {
             };
 
             core.detections.set("steps", true);
-            let summary = crate::engine::ai::run(&step_objs, false, 1, &detect, &actuate);
+            let summary = crate::engine::ai::run_with_flag(
+                &step_objs,
+                false,
+                1,
+                &detect,
+                &actuate,
+                &core.node_running,
+            );
             core.detections.set("steps", false);
+            core.node_running.store(false, Ordering::SeqCst);
             core.set_mode("idle");
             let ok = summary["ok"].as_bool().unwrap_or(false);
-            let status = if ok { "finished" } else { "stopped (step failed)" };
+            let status = if ok {
+                "finished"
+            } else if summary["cancelled"].as_bool().unwrap_or(false) {
+                "stopped"
+            } else {
+                "stopped (step failed)"
+            };
             let passed = summary["steps_passed"].as_i64().unwrap_or(0);
             let run = summary["steps_run"].as_i64().unwrap_or(0);
             core.emit(
@@ -1256,6 +1285,99 @@ impl Core {
         let (w, h) = self.resolve_screen();
         let backend = self.config.lock().unwrap().capture_backend.clone();
         self.vision.ai_test_step(w as i64, h as i64, &backend, &step)
+    }
+
+    /// Validate and run a directed node graph on the shared controller.
+    pub fn node_graph_run(&self, graph: Value) -> Value {
+        {
+            let mode = self.runtime.lock().unwrap().mode.clone();
+            if mode != "idle" {
+                return json!({ "ok": false, "error": format!("Busy ({mode})") });
+            }
+        }
+        let graph: NodeGraph = match serde_json::from_value(graph) {
+            Ok(graph) => graph,
+            Err(error) => {
+                return json!({ "ok": false, "error": format!("Bad node graph: {error}") })
+            }
+        };
+        let report = graph.validate();
+        if !report.ok {
+            return json!({ "ok": false, "error": report.errors.join("; ") });
+        }
+
+        self.node_running.store(true, Ordering::SeqCst);
+        self.set_mode("playing");
+        self.emit("play", format!("Running node graph '{}'", graph.name));
+
+        let core = self.clone();
+        thread::spawn(move || {
+            let (w, h) = core.resolve_screen();
+            let backend = core.config.lock().unwrap().capture_backend.clone();
+            core.vision.ensure_ready(w as i64, h as i64, &backend);
+
+            let detect: crate::engine::ai::Detect = {
+                let vision = core.vision.clone();
+                Box::new(move |step: &Step| vision.ai_detect(step))
+            };
+            let actuate: crate::engine::ai::Actuate = {
+                let controller = core.controller.clone();
+                Box::new(move |action| execute_ai_action(&controller, action))
+            };
+            let run_sub_macro = |name: &str| -> Result<String, String> {
+                let ai_path = paths::macros_dir().join("ai").join(format!("{name}.json"));
+                let steps = if ai_path.exists() {
+                    crate::models::step::AIMacro::load(&ai_path)
+                        .map_err(|error| error.to_string())?
+                        .steps
+                } else {
+                    let path = paths::macros_dir().join(format!("{name}.json"));
+                    let recorded = Macro::load(&path).map_err(|error| error.to_string())?;
+                    crate::models::step::macro_to_steps(&recorded)
+                };
+                let summary = crate::engine::ai::run_with_flag(
+                    &steps,
+                    false,
+                    1,
+                    &detect,
+                    &actuate,
+                    &core.node_running,
+                );
+                if summary["ok"].as_bool().unwrap_or(false) {
+                    Ok(format!("Sub-macro '{name}' finished"))
+                } else {
+                    Err(format!("Sub-macro '{name}' failed"))
+                }
+            };
+
+            core.detections.set("nodes", true);
+            let summary = crate::engine::node_graph::run(
+                &graph,
+                &detect,
+                &actuate,
+                &run_sub_macro,
+                &core.node_running,
+            );
+            core.detections.set("nodes", false);
+            core.node_running.store(false, Ordering::SeqCst);
+            core.set_mode("idle");
+
+            let ok = summary["ok"].as_bool().unwrap_or(false);
+            let run = summary["nodes_run"].as_u64().unwrap_or(0);
+            core.emit(
+                if ok { "ok" } else { "warn" },
+                if ok {
+                    format!("Node graph finished ({run} nodes)")
+                } else {
+                    format!(
+                        "Node graph stopped: {}",
+                        summary["error"].as_str().unwrap_or("path failed")
+                    )
+                },
+            );
+        });
+
+        json!({ "ok": true })
     }
 }
 

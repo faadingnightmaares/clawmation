@@ -11,8 +11,8 @@ interface ViewSwitchProps {
 }
 
 /**
- * The switch carrying every place you actually work: Home, Macros, Watch,
- * Autopilot. One physical thumb slides between the segments: it stretches
+ * The switch carrying every place you actually work: Home, Macros, Nodes,
+ * Watch, Autopilot. One physical thumb slides between the segments: it stretches
  * across the gap on the way and settles into the target, so the eye tracks a
  * moving object instead of boxes swapping highlight.
  *
@@ -112,7 +112,15 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
     e.preventDefault();
     const step = e.key === "ArrowRight" ? 1 : -1;
     const from = index < 0 ? (step > 0 ? -1 : PRIMARY_VIEWS.length) : index;
-    const next = Math.min(PRIMARY_VIEWS.length - 1, Math.max(0, from + step));
+    let next = from + step;
+    while (
+      next >= 0 &&
+      next < PRIMARY_VIEWS.length &&
+      PRIMARY_VIEWS[next].disabled
+    ) {
+      next += step;
+    }
+    if (next < 0 || next >= PRIMARY_VIEWS.length) return;
     btnRefs.current[next]?.focus();
     navigate(PRIMARY_VIEWS[next].id);
   };
@@ -140,6 +148,9 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
       {PRIMARY_VIEWS.map((v, i) => {
         const active = i === index;
         const accel = NAV.findIndex((n) => n.id === v.id) + 1;
+        const title = v.disabled
+          ? `${v.label} · ${v.badge ?? "Unavailable"}`
+          : `${v.label}  ·  Alt+${accel}`;
         return (
           <button
             key={v.id}
@@ -148,18 +159,29 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
             }}
             type="button"
             aria-current={active ? "page" : undefined}
+            aria-disabled={v.disabled || undefined}
             aria-label={v.label}
-            title={`${v.label}  ·  Alt+${accel}`}
+            title={title}
+            disabled={v.disabled}
             onClick={() => navigate(v.id)}
             className={cn(
               "relative flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors duration-200 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 md:px-3.5",
-              active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+              v.disabled
+                ? "cursor-not-allowed text-muted-foreground/55"
+                : active
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
             )}
           >
             <v.Icon className="size-4" />
-            {/* Four labels don't fit a narrow window: below `md` the icons carry
+            {/* Five labels don't fit a narrow window: below `md` the icons carry
                 it alone, and the thumb re-measures through the ResizeObserver. */}
             <span className="hidden md:inline">{v.label}</span>
+            {v.badge && (
+              <span className="rounded border border-border/70 bg-background/55 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none tracking-wide text-muted-foreground">
+                {v.badge}
+              </span>
+            )}
           </button>
         );
       })}

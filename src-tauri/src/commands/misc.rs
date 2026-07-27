@@ -145,3 +145,35 @@ pub fn check_in_background(app: &AppHandle) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windows_installer_identity_cannot_drift_again() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        assert_eq!(config["identifier"], "com.a7mda.clawmation");
+        assert_eq!(
+            config["bundle"]["windows"]["nsis"]["installerHooks"],
+            "windows/installer-hooks.nsh"
+        );
+    }
+
+    #[test]
+    fn release_versions_stay_in_sync() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tauri: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        let package: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.parent().unwrap().join("package.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(tauri["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(package["version"], env!("CARGO_PKG_VERSION"));
+    }
+}
