@@ -1,5 +1,5 @@
 import { type CSSProperties, useEffect, useState } from "react";
-import { Gamepad2 } from "lucide-react";
+import { IconDeviceGamepad } from "@tabler/icons-react";
 
 import {
   antiAfkGet,
@@ -128,11 +128,14 @@ export function AntiAfkCard() {
   const sliderProgress = ((state.interval_min - 1) / 19) * 100;
 
   return (
-    <section className="rounded-2xl border border-border bg-card p-5">
+    <section
+      id="anti-afk"
+      className="scroll-m-5 rounded-[18px] border border-border/80 bg-card p-6 shadow-[0_12px_34px_rgba(50,35,18,0.045)]"
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-            <Gamepad2 className="size-5" />
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-[13px] bg-primary/10 text-primary">
+            <IconDeviceGamepad className="size-5" strokeWidth={1.8} />
           </div>
           <div>
             <h2 className="text-sm font-semibold text-foreground">Anti-AFK</h2>
@@ -194,10 +197,10 @@ export function AntiAfkCard() {
         </div>
       </div>
 
-      <div className="mt-5 rounded-xl border border-border/70 bg-muted/25 px-4 py-3.5">
+      <div className="mt-5 rounded-[14px] border border-border/70 bg-muted/25 px-4 py-3.5">
         <div className="mb-3 flex items-center justify-between gap-3">
           <Label htmlFor="anti-afk-interval">Action interval</Label>
-          <span className="rounded-full bg-primary/12 px-2.5 py-1 text-xs font-semibold tabular-nums text-primary">
+          <span className="text-xs font-semibold tabular-nums text-primary">
             {state.interval_min} {state.interval_min === 1 ? "minute" : "minutes"}
           </span>
         </div>
@@ -223,7 +226,7 @@ export function AntiAfkCard() {
             void commitInterval([Number(event.currentTarget.value)])
           }
         />
-        <div className="mt-1.5 flex justify-between text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
+        <div className="mt-1.5 flex justify-between text-[10px] font-medium text-muted-foreground/70">
           <span>1 min</span>
           <span>20 min</span>
         </div>

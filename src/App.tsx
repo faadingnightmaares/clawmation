@@ -1,4 +1,11 @@
-import { useEffect, useState } from "react";
+import {
+  Suspense,
+  memo,
+  startTransition,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 
 import { onUpdateAvailable } from "@/api";
 import { notifyAction } from "@/lib/toast";
@@ -11,9 +18,16 @@ import { Home } from "@/views/Home";
 import { Macros } from "@/views/Macros";
 import { Nodes } from "@/views/Nodes";
 import { Watch } from "@/views/Watch";
-import { Autopilot } from "@/views/Autopilot";
 import { Settings } from "@/views/Settings";
 import type { ViewProps } from "@/views/types";
+
+const VIEW_CACHE_LIMIT = 3;
+
+export function updateViewCache(current: ViewId[], next: ViewId): ViewId[] {
+  return [...current.filter((view) => view !== next), next].slice(
+    -VIEW_CACHE_LIMIT,
+  );
+}
 
 function renderView(view: ViewId, props: ViewProps) {
   switch (view) {
@@ -25,16 +39,75 @@ function renderView(view: ViewId, props: ViewProps) {
       return <Nodes {...props} />;
     case "vision":
       return <Watch {...props} />;
-    case "autopilot":
-      return <Autopilot {...props} />;
     case "settings":
       return <Settings {...props} />;
   }
 }
 
+const ViewSurface = memo(function ViewSurface({
+  view,
+  active,
+  status,
+  navigate,
+}: {
+  view: ViewId;
+  active: boolean;
+  status: ViewProps["status"];
+  navigate: ViewProps["navigate"];
+}) {
+  const content = renderView(view, { status, navigate, active });
+  const workspace = view === "nodes" || view === "macros";
+  const contentClass =
+    view === "dashboard" || view === "macros" || view === "vision"
+      ? view === "macros"
+        ? "mx-auto h-full w-full max-w-[2200px] px-5 py-5 md:px-7"
+        : "mx-auto w-full max-w-[1480px] px-5 py-5 md:px-7"
+      : "mx-auto w-full max-w-[1320px] px-5 py-6 md:px-7 md:py-8";
+
+  return (
+    <section
+      data-view-surface={view}
+      data-active={active ? "true" : "false"}
+      aria-hidden={!active}
+      inert={!active}
+      hidden={!active}
+      className={
+        workspace
+          ? "h-full min-h-0 overflow-hidden"
+          : "h-full min-h-0 overflow-y-auto"
+      }
+    >
+      {view === "nodes" ? content : <div className={contentClass}>{content}</div>}
+    </section>
+  );
+}, (previous, next) =>
+  previous.view === next.view &&
+  previous.active === next.active &&
+  previous.navigate === next.navigate &&
+  (!next.active || previous.status === next.status),
+);
+
 export default function App() {
   const status = useStatus();
-  const [view, setView] = useState<ViewId>("macros");
+  const [view, setView] = useState<ViewId>("dashboard");
+  const [contentView, setContentView] = useState<ViewId>("dashboard");
+  const [cachedViews, setCachedViews] = useState<ViewId[]>(["dashboard"]);
+
+  const navigate = useCallback((next: ViewId) => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    // The command bar updates urgently. Mounting or revealing a heavy workspace
+    // is concurrent, so it cannot hold the active-tab feedback behind its work.
+    setView(next);
+    startTransition(() => {
+      setCachedViews((current) => updateViewCache(current, next));
+      setContentView(next);
+    });
+  }, []);
 
   // Alt+1..6 jump straight to a view (index into NAV order), unless typing in a
   // field.
@@ -54,12 +127,12 @@ export default function App() {
       const i = Number(e.key) - 1;
       if (i >= 0 && i < NAV.length && !NAV[i].disabled) {
         e.preventDefault();
-        setView(NAV[i].id);
+        navigate(NAV[i].id);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [navigate]);
 
   // The backend checks for a release once at launch and announces the result
   // here. Settings › About owns the install itself, so the toast just points at
@@ -71,7 +144,7 @@ export default function App() {
       notifyAction(
         `Clawmation ${info.latest} is out; you’re on ${info.current}.`,
         "Show me",
-        () => setView("settings"),
+        () => navigate("settings"),
       );
     })
       .then((off) => {
@@ -83,29 +156,31 @@ export default function App() {
       alive = false;
       unlisten?.();
     };
-  }, []);
+  }, [navigate]);
 
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden">
-        <CommandBar status={status} view={view} navigate={setView} />
-        <main
-          className={
-            view === "nodes"
-              ? "min-h-0 flex-1 overflow-hidden"
-              : "flex-1 overflow-y-auto"
-          }
-        >
-          {view === "nodes" ? (
-            renderView(view, { status, navigate: setView })
-          ) : (
-            <div className="mx-auto w-full max-w-5xl px-6 py-8 md:px-8">
-              {renderView(view, { status, navigate: setView })}
-            </div>
-          )}
+        <CommandBar status={status} view={view} navigate={navigate} />
+        <main className="relative min-h-0 flex-1 overflow-hidden">
+          <Suspense fallback={null}>
+            {cachedViews.map((cachedView) => (
+              <ViewSurface
+                key={cachedView}
+                view={cachedView}
+                active={cachedView === contentView}
+                status={status}
+                navigate={navigate}
+              />
+            ))}
+          </Suspense>
         </main>
       </div>
-      <Toaster position="bottom-right" />
+      <Toaster
+        position="top-right"
+        offset={{ top: 76, right: 20 }}
+        mobileOffset={{ top: 72, right: 12, left: 12 }}
+      />
     </TooltipProvider>
   );
 }

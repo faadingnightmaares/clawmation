@@ -62,8 +62,8 @@ function mockBackend(targetId: string | null = null) {
   });
 }
 
-function view() {
-  return render(<Home status={null} navigate={() => {}} />);
+function view(status: Status | null = null, navigate = () => {}) {
+  return render(<Home status={status} navigate={navigate} />);
 }
 
 describe("Home Anti-AFK controls", () => {
@@ -74,7 +74,9 @@ describe("Home Anti-AFK controls", () => {
     mockBackend();
     view();
 
-    expect(await screen.findByText("Anti-AFK")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Anti-AFK" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("15 minutes")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Anti-AFK" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Refresh open windows" })).not.toBeInTheDocument();
@@ -151,5 +153,53 @@ describe("Home Anti-AFK controls", () => {
         expect.objectContaining({ intervalMin: 14 }),
       ),
     );
+  });
+});
+
+describe("Home workspace", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    mockBackend();
+  });
+
+  it("keeps one quick action area and opens Loops from both entry points", async () => {
+    const navigate = vi.fn();
+    view(null, navigate);
+
+    expect(await screen.findAllByLabelText("Quick actions")).toHaveLength(1);
+    fireEvent.click(
+      screen.getByRole("button", { name: /LoopsBuild reusable workflows/i }),
+    );
+    expect(navigate).toHaveBeenCalledWith("nodes");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Build with Loops/i }),
+    );
+    expect(navigate).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the Home hero free of character artwork", async () => {
+    const rendered = view();
+    await screen.findByRole("heading", { name: /Good/ });
+
+    expect(
+      rendered.container.querySelector('img[src*="jester"]'),
+    ).not.toBeInTheDocument();
+    expect(
+      rendered.container.querySelector('img[src*="cat-"]'),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the primary and activity columns on the same desktop baseline", async () => {
+    view();
+
+    expect(await screen.findByTestId("home-primary-column")).toHaveClass(
+      "flex",
+      "h-full",
+    );
+    expect(screen.getByTestId("home-sidebar")).toHaveClass("grid", "h-full");
+    expect(
+      screen.getByRole("region", { name: "Recent activity" }),
+    ).toHaveClass("h-full");
   });
 });

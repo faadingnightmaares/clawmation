@@ -11,7 +11,8 @@ use crate::models::step::Step;
 
 const MAX_TRANSITIONS: usize = 10_000;
 
-pub type RunSubMacro<'a> = dyn Fn(&str) -> Result<String, String> + Send + Sync + 'a;
+pub type RunSubMacro<'a> = dyn Fn(&str, &[Step], i64) -> Result<String, String> + Send + Sync + 'a;
+pub type RunChain<'a> = dyn Fn(&str) -> Result<String, String> + Send + Sync + 'a;
 
 fn next<'a>(edges: &'a [GraphEdge], node: &str, output: &str) -> Option<&'a str> {
     edges
@@ -34,6 +35,7 @@ pub fn run(
     detect: &Detect,
     actuate: &Actuate,
     run_sub_macro: &RunSubMacro<'_>,
+    run_chain: &RunChain<'_>,
     running: &AtomicBool,
 ) -> Value {
     let report = graph.validate();
@@ -161,7 +163,18 @@ pub fn run(
                     .get("macro_name")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                match run_sub_macro(name) {
+                let embedded_steps = node
+                    .config
+                    .get("embedded_steps")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<Vec<Step>>(value).ok())
+                    .unwrap_or_default();
+                let repeat = node
+                    .config
+                    .get("repeat")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1);
+                match run_sub_macro(name, &embedded_steps, repeat) {
                     Ok(message) => {
                         last_ok = true;
                         results.push(result_row(node, true, message));
@@ -173,6 +186,29 @@ pub fn run(
                         "error"
                     }
                 }
+            }
+            "chain" => {
+                let chain_id = node
+                    .config
+                    .get("chain_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match run_chain(chain_id) {
+                    Ok(message) => {
+                        last_ok = true;
+                        results.push(result_row(node, true, message));
+                        "success"
+                    }
+                    Err(message) => {
+                        last_ok = false;
+                        results.push(result_row(node, false, message));
+                        "error"
+                    }
+                }
+            }
+            "note" => {
+                results.push(result_row(node, true, "note"));
+                "next"
             }
             "stop" => {
                 let success = node
@@ -317,7 +353,14 @@ mod tests {
         };
         let (detect, actuate, actions) = seams(false);
         let running = AtomicBool::new(true);
-        let summary = run(&graph, &detect, &actuate, &|_| Ok("done".into()), &running);
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
         assert_eq!(summary["ok"], true);
         assert_eq!(*actions.lock().unwrap(), vec![Action::Click(4, 5)]);
     }
@@ -325,13 +368,15 @@ mod tests {
     #[test]
     fn missing_vision_uses_missing_branch() {
         let graph = NodeGraph {
-            entry: "vision".into(),
+            entry: "start".into(),
             nodes: vec![
+                node("start", "start", json!({})),
                 node("vision", "vision", json!({"step":{"type":"find_click"}})),
                 node("good", "stop", json!({"success":true})),
                 node("bad", "stop", json!({"success":false})),
             ],
             edges: vec![
+                edge("start", "next", "vision"),
                 edge("vision", "found", "good"),
                 edge("vision", "missing", "bad"),
             ],
@@ -339,7 +384,14 @@ mod tests {
         };
         let (detect, actuate, _) = seams(false);
         let running = AtomicBool::new(true);
-        let summary = run(&graph, &detect, &actuate, &|_| Ok("done".into()), &running);
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
         assert_eq!(summary["ok"], false);
         assert_eq!(
             summary["results"].as_array().unwrap().last().unwrap()["node_id"],
@@ -350,13 +402,15 @@ mod tests {
     #[test]
     fn loop_runs_body_exact_count() {
         let graph = NodeGraph {
-            entry: "loop".into(),
+            entry: "start".into(),
             nodes: vec![
+                node("start", "start", json!({})),
                 node("loop", "loop", json!({"count":3})),
                 node("key", "action", json!({"step":{"type":"key","key":"x"}})),
                 node("stop", "stop", json!({"success":true})),
             ],
             edges: vec![
+                edge("start", "next", "loop"),
                 edge("loop", "body", "key"),
                 edge("key", "next", "loop"),
                 edge("loop", "done", "stop"),
@@ -365,7 +419,14 @@ mod tests {
         };
         let (detect, actuate, actions) = seams(false);
         let running = AtomicBool::new(true);
-        let summary = run(&graph, &detect, &actuate, &|_| Ok("done".into()), &running);
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
         assert_eq!(summary["ok"], true);
         assert_eq!(actions.lock().unwrap().len(), 3);
     }
@@ -374,16 +435,115 @@ mod tests {
     fn a_cleared_run_flag_cancels_before_any_node_executes() {
         let graph = NodeGraph {
             entry: "start".into(),
-            nodes: vec![node("start", "start", json!({}))],
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("stop", "stop", json!({"success":true})),
+            ],
+            edges: vec![edge("start", "next", "stop")],
             ..Default::default()
         };
         let (detect, actuate, actions) = seams(false);
         let running = AtomicBool::new(false);
 
-        let summary = run(&graph, &detect, &actuate, &|_| Ok("done".into()), &running);
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
 
         assert_eq!(summary["ok"], false);
         assert_eq!(summary["cancelled"], true);
         assert!(actions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sub_macro_node_passes_its_embedded_snapshot_and_repeat() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "macro",
+                    "sub_macro",
+                    json!({
+                        "macro_name":"Farm",
+                        "repeat":3,
+                        "embedded_steps":[{"id":"click-1","type":"click","x":4,"y":5}]
+                    }),
+                ),
+                node("good", "stop", json!({"success":true})),
+                node("bad", "stop", json!({"success":false})),
+            ],
+            edges: vec![
+                edge("start", "next", "macro"),
+                edge("macro", "success", "good"),
+                edge("macro", "error", "bad"),
+            ],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+        let received = Arc::new(Mutex::new(None));
+        let received_by_runner = received.clone();
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &move |name, steps, repeat| {
+                *received_by_runner.lock().unwrap() =
+                    Some((name.to_string(), steps.to_vec(), repeat));
+                Ok("embedded macro finished".into())
+            },
+            &|_| Ok("chain".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        let received = received.lock().unwrap();
+        let (name, steps, repeat) = received.as_ref().unwrap();
+        assert_eq!(name, "Farm");
+        assert_eq!(*repeat, 3);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_type, "click");
+    }
+
+    #[test]
+    fn chain_node_routes_success_and_failure() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("chain", "chain", json!({"chain_id":"daily"})),
+                node("good", "stop", json!({"success":true})),
+                node("bad", "stop", json!({"success":false})),
+            ],
+            edges: vec![
+                edge("start", "next", "chain"),
+                edge("chain", "success", "good"),
+                edge("chain", "error", "bad"),
+            ],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("macro".into()),
+            &|id| {
+                assert_eq!(id, "daily");
+                Ok("chain finished".into())
+            },
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["results"][0]["message"], "chain finished");
     }
 }

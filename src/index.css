@@ -192,9 +192,262 @@
   ::-webkit-scrollbar-thumb:hover {
     background-color: var(--muted-foreground);
   }
+
+  @keyframes theme-snapshot-out {
+    to {
+      opacity: 0;
+    }
+  }
+
+  @keyframes theme-snapshot-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  html[data-theme-transition]::view-transition-group(root) {
+    animation-duration: 180ms;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  html[data-theme-transition]::view-transition-old(root),
+  html[data-theme-transition]::view-transition-new(root) {
+    mix-blend-mode: normal;
+  }
+
+  html[data-theme-transition]::view-transition-old(root) {
+    animation: theme-snapshot-out 180ms ease-out both;
+  }
+
+  html[data-theme-transition]::view-transition-new(root) {
+    animation: theme-snapshot-in 180ms ease-out both;
+  }
 }
 
 @layer components {
+  @keyframes view-surface-enter {
+    from {
+      opacity: 0.72;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  /*
+   * Never transform a whole view surface. A transformed ancestor becomes the
+   * containing block for fixed menus and dialogs, which offsets them by the
+   * command-bar height. Opacity gives the transition without moving geometry.
+   */
+  [data-view-surface][data-active="true"] {
+    animation: view-surface-enter 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /*
+   * One motion language for every portalled surface. Radix owns placement; the
+   * animation only changes compositor-safe opacity/translation, so opening a
+   * menu never changes the size of its text or icons.
+   */
+  @keyframes ui-floating-in {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 4px, 0);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes ui-floating-out {
+    from {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      opacity: 0;
+      transform: translate3d(0, 3px, 0);
+    }
+  }
+
+  @keyframes ui-overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes ui-overlay-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+
+  @keyframes ui-dialog-in {
+    from {
+      opacity: 0;
+      transform: translate3d(-50%, calc(-50% + 8px), 0);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(-50%, -50%, 0);
+    }
+  }
+
+  @keyframes ui-dialog-out {
+    from {
+      opacity: 1;
+      transform: translate3d(-50%, -50%, 0);
+    }
+    to {
+      opacity: 0;
+      transform: translate3d(-50%, calc(-50% + 6px), 0);
+    }
+  }
+
+  @keyframes ui-sheet-in {
+    0% {
+      transform: translate3d(var(--ui-sheet-from-x), var(--ui-sheet-from-y), 0);
+    }
+    72% {
+      transform: translate3d(var(--ui-sheet-over-x), var(--ui-sheet-over-y), 0);
+    }
+    100% {
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes ui-sheet-out {
+    from { transform: translate3d(0, 0, 0); }
+    to {
+      transform: translate3d(var(--ui-sheet-from-x), var(--ui-sheet-from-y), 0);
+    }
+  }
+
+  .ui-floating-surface[data-state="open"] {
+    animation: ui-floating-in 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .ui-floating-surface[data-state="closed"] {
+    animation: ui-floating-out 105ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  .ui-overlay[data-state="open"] {
+    animation: ui-overlay-in 150ms ease-out both;
+  }
+
+  .ui-overlay[data-state="closed"] {
+    animation: ui-overlay-out 110ms ease-in both;
+  }
+
+  .ui-dialog-surface[data-state="open"] {
+    animation: ui-dialog-in 220ms cubic-bezier(0.2, 0.82, 0.25, 1) both;
+  }
+
+  .ui-dialog-surface[data-state="closed"] {
+    animation: ui-dialog-out 120ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  .ui-sheet-surface[data-side="right"] {
+    --ui-sheet-from-x: 100%;
+    --ui-sheet-from-y: 0;
+    --ui-sheet-over-x: -6px;
+    --ui-sheet-over-y: 0;
+  }
+
+  .ui-sheet-surface[data-side="left"] {
+    --ui-sheet-from-x: -100%;
+    --ui-sheet-from-y: 0;
+    --ui-sheet-over-x: 6px;
+    --ui-sheet-over-y: 0;
+  }
+
+  .ui-sheet-surface[data-side="top"] {
+    --ui-sheet-from-x: 0;
+    --ui-sheet-from-y: -100%;
+    --ui-sheet-over-x: 0;
+    --ui-sheet-over-y: 6px;
+  }
+
+  .ui-sheet-surface[data-side="bottom"] {
+    --ui-sheet-from-x: 0;
+    --ui-sheet-from-y: 100%;
+    --ui-sheet-over-x: 0;
+    --ui-sheet-over-y: -6px;
+  }
+
+  .ui-sheet-surface[data-state="open"] {
+    animation: ui-sheet-in 260ms cubic-bezier(0.2, 0.82, 0.25, 1) both;
+  }
+
+  .ui-sheet-surface[data-state="closed"] {
+    animation: ui-sheet-out 160ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  .macro-list {
+    container-type: inline-size;
+  }
+
+  .macro-row {
+    min-height: 164px;
+  }
+
+  .macro-row-grid {
+    min-height: 162px;
+    grid-template-columns: minmax(180px, 1fr) minmax(190px, 0.9fr);
+  }
+
+  .macro-row-actions {
+    grid-column: 1 / -1;
+  }
+
+  @container (min-width: 700px) {
+    .macro-row {
+      min-height: 104px;
+    }
+
+    .macro-row-grid {
+      min-height: 102px;
+      grid-template-columns:
+        minmax(180px, 1fr)
+        minmax(210px, 0.9fr)
+        auto;
+    }
+
+    .macro-row-actions {
+      grid-column: auto;
+    }
+  }
+
+  .workspace-scrollbar {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color:
+      color-mix(in srgb, var(--primary) 38%, var(--border))
+      transparent;
+  }
+
+  .workspace-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .workspace-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .workspace-scrollbar::-webkit-scrollbar-thumb {
+    min-height: 56px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background:
+      color-mix(in srgb, var(--primary) 38%, var(--border))
+      padding-box;
+  }
+
+  .workspace-scrollbar::-webkit-scrollbar-thumb:hover {
+    background:
+      color-mix(in srgb, var(--primary) 62%, var(--muted-foreground))
+      padding-box;
+  }
+
   .anti-afk-slider {
     width: 100%;
     height: 20px;
@@ -274,5 +527,232 @@
     border-radius: 999px;
     background: var(--card);
     box-shadow: 0 2px 7px rgba(0, 0, 0, 0.28);
+  }
+
+  .node-card {
+    background: color-mix(in srgb, var(--card) 96%, transparent);
+  }
+
+  .node-card--start {
+    border-color: color-mix(in srgb, var(--success) 34%, var(--border));
+    background: color-mix(in srgb, var(--success) 6%, var(--card));
+  }
+
+  .node-card--action,
+  .node-card--loop {
+    border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+    background: color-mix(in srgb, var(--primary) 5%, var(--card));
+  }
+
+  .node-card--macro {
+    border-color: color-mix(in srgb, var(--primary) 78%, var(--border));
+    background: color-mix(in srgb, var(--primary) 7%, var(--card));
+  }
+
+  .node-card--vision {
+    border-color: color-mix(in srgb, rgb(56 189 248) 38%, var(--border));
+    background: color-mix(in srgb, rgb(56 189 248) 6%, var(--card));
+  }
+
+  .node-card--branch {
+    border-color: color-mix(in srgb, rgb(168 85 247) 36%, var(--border));
+    background: color-mix(in srgb, rgb(168 85 247) 6%, var(--card));
+  }
+
+  .node-card--chain {
+    border-color: color-mix(in srgb, rgb(217 119 6) 34%, var(--border));
+    background: color-mix(in srgb, rgb(217 119 6) 5%, var(--card));
+  }
+
+  .node-card--note {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--muted-foreground) 34%, var(--border));
+    background: color-mix(in srgb, var(--muted) 40%, var(--card));
+  }
+
+  .node-card--stop {
+    border-color: color-mix(in srgb, var(--destructive) 34%, var(--border));
+    background: color-mix(in srgb, var(--destructive) 6%, var(--card));
+  }
+
+  .node-card__icon {
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.06);
+  }
+
+  .node-canvas .react-flow__edge-path {
+    stroke: color-mix(in srgb, var(--foreground) 48%, transparent);
+    transition: stroke 120ms ease, stroke-width 120ms ease;
+  }
+
+  .node-canvas .react-flow__edge.selected .react-flow__edge-path,
+  .node-canvas .react-flow__edge:hover .react-flow__edge-path {
+    stroke: var(--primary);
+    stroke-width: 2.2;
+  }
+
+  .node-canvas .react-flow__connection-path {
+    stroke: var(--primary);
+    stroke-width: 2;
+  }
+
+  .node-canvas .node-minimap {
+    margin: 16px;
+    cursor: grab;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--border) 82%, var(--primary));
+    border-radius: 13px;
+    background: var(--card);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, white 28%, transparent),
+      0 10px 26px rgb(0 0 0 / 0.1);
+    transition: opacity 120ms ease, transform 160ms ease;
+  }
+
+  .node-canvas .node-minimap--inspector-open {
+    pointer-events: none;
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+
+  .node-canvas .node-minimap:active {
+    cursor: grabbing;
+  }
+
+  .node-canvas .node-minimap:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--primary) 65%, transparent);
+    outline-offset: 2px;
+  }
+
+  .node-floating-inspector {
+    transform-origin: top right;
+    animation: node-inspector-enter 180ms cubic-bezier(0.2, 0.82, 0.22, 1) both;
+    contain: layout paint;
+  }
+
+  @keyframes node-inspector-enter {
+    from {
+      opacity: 0;
+      transform: translate3d(8px, -4px, 0);
+    }
+
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  .node-canvas .react-flow__handle {
+    transition:
+      box-shadow 120ms ease,
+      filter 120ms ease;
+  }
+
+  .node-canvas .react-flow__handle:hover,
+  .node-canvas .react-flow__handle.connecting {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+    filter: brightness(1.12);
+  }
+
+  .node-canvas .react-flow__node:focus-visible .node-card {
+    outline: 2px solid color-mix(in srgb, var(--primary) 60%, transparent);
+    outline-offset: 3px;
+  }
+
+  .node-canvas .react-flow__edge-text {
+    fill: var(--muted-foreground);
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .node-canvas .react-flow__edge-textbg {
+    fill: var(--background);
+    fill-opacity: 0.92;
+  }
+
+  .node-canvas .react-flow__controls-button {
+    border-color: var(--border);
+    background: var(--card);
+    fill: var(--foreground);
+    color: var(--foreground);
+  }
+
+  .node-canvas .react-flow__controls-button:hover {
+    background: var(--muted);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .node-floating-inspector,
+    .node-canvas .node-minimap {
+      animation: none;
+      transition: none;
+    }
+  }
+
+  /*
+   * A small web glass approximation for the workspace indicator. The material
+   * stays warm and quiet; movement and the single refraction sweep communicate
+   * the state change without adding a permanent glow.
+   */
+  .view-switch-indicator {
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--primary) 27%, var(--border));
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--card) 48%, transparent) 0%,
+        transparent 62%
+      ),
+      color-mix(in srgb, var(--primary) 13%, var(--card));
+    backdrop-filter: blur(10px) saturate(1.14);
+    -webkit-backdrop-filter: blur(10px) saturate(1.14);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, var(--card) 66%, transparent),
+      inset 0 -1px 0 color-mix(in srgb, var(--primary) 8%, transparent),
+      0 4px 10px color-mix(in srgb, var(--primary) 8%, transparent);
+  }
+
+  .view-switch-indicator::after {
+    position: absolute;
+    inset: 1px;
+    border: 1px solid color-mix(in srgb, var(--card) 26%, transparent);
+    border-radius: inherit;
+    content: "";
+  }
+
+  .view-switch-refraction {
+    position: absolute;
+    inset-block: -18%;
+    left: 0;
+    width: 48%;
+    opacity: 0;
+    transform: translateX(-130%);
+    background: linear-gradient(
+      102deg,
+      transparent 5%,
+      color-mix(in srgb, var(--card) 15%, transparent) 30%,
+      color-mix(in srgb, var(--card) 72%, transparent) 49%,
+      color-mix(in srgb, var(--primary) 16%, transparent) 64%,
+      transparent 92%
+    );
+    filter: blur(0.45px);
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .view-switch-indicator {
+      background: color-mix(in srgb, var(--primary) 14%, var(--card));
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-view-surface][data-active="true"],
+    .ui-floating-surface,
+    .ui-overlay,
+    .ui-dialog-surface,
+    .ui-sheet-surface {
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+    }
   }
 }

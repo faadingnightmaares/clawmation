@@ -33,9 +33,8 @@ const view = () => render(<Watch status={null} navigate={() => {}} />);
  *  blocked until then: an untouched draft carries the full colour spectrum, which
  *  matches the whole screen as one blob. */
 async function openEditorAndPickAColour() {
-  fireEvent.click(await screen.findByRole("button", { name: /add the first thing/i }));
   fireEvent.click(await screen.findByRole("button", { name: /pick its colour/i }));
-  await screen.findByText(/colour picked/i);
+  await screen.findByText(/watching for this colour/i);
 }
 
 describe("Watch, saving a trigger", () => {
@@ -77,7 +76,6 @@ describe("Watch, saving a trigger", () => {
     mockBackend(false);
     view();
 
-    fireEvent.click(await screen.findByRole("button", { name: /add the first thing/i }));
     expect(await screen.findByRole("button", { name: /^save trigger$/i })).toBeDisabled();
   });
 });

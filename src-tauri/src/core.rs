@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -34,6 +34,7 @@ use crate::hardware::preview;
 use crate::hardware::recorder::MacroRecorder;
 use crate::hardware::vision::{is_full_region, region_pixels, Detection, Detector, VisionError};
 use crate::logbuf::LogBuffer;
+use crate::models::chain::Chain;
 use crate::models::config::MacroConfig;
 use crate::models::guard::{Guard, GuardFile};
 use crate::models::macro_def::{InputEventType, Macro};
@@ -308,7 +309,9 @@ impl Vision {
     ) {
         let mut items = Vec::new();
         for guard in guards {
-            let Some(dets) = hits.get(&guard.id) else { continue };
+            let Some(dets) = hits.get(&guard.id) else {
+                continue;
+            };
             items.extend(dets.iter().map(|d| Sighting {
                 label: guard.name.clone(),
                 x: d.x - d.w / 2,
@@ -373,7 +376,10 @@ impl Vision {
                 newest = age;
                 screen = s.frame;
             }
-            items.extend(s.items.iter().map(|sighting| Aged { sighting, age_ms: age as u64 }));
+            items.extend(s.items.iter().map(|sighting| Aged {
+                sighting,
+                age_ms: age as u64,
+            }));
         }
         json!({ "screen": [screen.0, screen.1], "items": items })
     }
@@ -385,7 +391,10 @@ impl Vision {
         let key = format!("{}\u{0}{}", guard.id, guard.template_path);
         if self.template_warned.lock().unwrap().insert(key) {
             if let Ok(mut log) = self.log.lock() {
-                log.push("error", format!("Trigger '{}' picture failed: {err}", guard.name));
+                log.push(
+                    "error",
+                    format!("Trigger '{}' picture failed: {err}", guard.name),
+                );
             }
         }
     }
@@ -400,7 +409,11 @@ impl Vision {
     /// Failure is per-region and silent-but-logged, matching `detect_guard`'s
     /// "never raises, returns []" contract: a guard that cannot be read must
     /// not abort the poll cycle.
-    fn detect_text_guards(&self, frame: &Frame, guards: &[&Guard]) -> HashMap<String, Vec<Detection>> {
+    fn detect_text_guards(
+        &self,
+        frame: &Frame,
+        guards: &[&Guard],
+    ) -> HashMap<String, Vec<Detection>> {
         let mut out = HashMap::new();
         if !ocr::available() {
             let mut warned = self.ocr_warned.lock().unwrap();
@@ -480,7 +493,10 @@ impl Vision {
             return Vec::new();
         };
         let hits = self.detector.lock().unwrap().detect_checkpoint(&frame, cfg);
-        let label = cfg.get("name").and_then(Value::as_str).unwrap_or("Checkpoint");
+        let label = cfg
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Checkpoint");
         self.record_step(&frame, label, &hits);
         hits
     }
@@ -495,7 +511,11 @@ impl Vision {
             return (Vec::new(), String::new());
         };
         let (hits, message) = self.detector.lock().unwrap().ai_detect(&frame, step);
-        let label = if step.label.is_empty() { &step.step_type } else { &step.label };
+        let label = if step.label.is_empty() {
+            &step.step_type
+        } else {
+            &step.label
+        };
         self.record_step(&frame, label, &hits);
         (hits.iter().map(to_match).collect(), message)
     }
@@ -617,7 +637,11 @@ impl Vision {
             (Vec::new(), String::new())
         };
 
-        let crosshair = if st.step_type == "click" { Some((st.x, st.y)) } else { None };
+        let crosshair = if st.step_type == "click" {
+            Some((st.x, st.y))
+        } else {
+            None
+        };
         let region = region_pixels(st.region, frame.width as i32, frame.height as i32);
         let preview = preview::annotate_step(&frame, region, &matches, crosshair);
 
@@ -660,7 +684,11 @@ impl Vision {
 
 /// A detection as the AI executor wants it: just the point and how sure we are.
 fn to_match(d: &Detection) -> crate::engine::ai::Match {
-    crate::engine::ai::Match { x: d.x, y: d.y, confidence: d.confidence }
+    crate::engine::ai::Match {
+        x: d.x,
+        y: d.y,
+        confidence: d.confidence,
+    }
 }
 
 /// The dry-run verdict for one step (`steps.py::test_step`), without the preview
@@ -772,7 +800,12 @@ impl Core {
                 }
             })
         };
-        let guard_engine = Arc::new(GuardEngine::new(detect, player_state, actuate, Some(on_fire)));
+        let guard_engine = Arc::new(GuardEngine::new(
+            detect,
+            player_state,
+            actuate,
+            Some(on_fire),
+        ));
 
         let core = Self {
             config,
@@ -933,7 +966,10 @@ impl Core {
         }
         self.set_mode("recording");
         let hk = self.config.lock().unwrap().hotkey_record.to_uppercase();
-        self.emit("rec", format!("Recording started. Press {hk} or Stop to finish"));
+        self.emit(
+            "rec",
+            format!("Recording started. Press {hk} or Stop to finish"),
+        );
         json!({ "ok": true })
     }
 
@@ -970,7 +1006,11 @@ impl Core {
         let (w, h) = macro_def.record_resolution;
         self.emit(
             "ok",
-            format!("Saved {} ({events} events, {:.1}s)", macro_def.name, macro_def.duration()),
+            format!(
+                "Saved {} ({events} events, {:.1}s)",
+                macro_def.name,
+                macro_def.duration()
+            ),
         );
         json!({
             "ok": true,
@@ -994,7 +1034,14 @@ impl Core {
         let paused = recorder.is_paused();
         drop(slot);
         self.set_mode(if paused { "paused" } else { "recording" });
-        self.emit("info", if paused { "Recording paused" } else { "Recording resumed" });
+        self.emit(
+            "info",
+            if paused {
+                "Recording paused"
+            } else {
+                "Recording resumed"
+            },
+        );
         json!({ "ok": true, "paused": paused })
     }
 
@@ -1016,9 +1063,7 @@ impl Core {
         match crate::migrations::ensure_macro_current(&path) {
             Ok(true) => self.emit(
                 "warn",
-                format!(
-                    "Upgraded legacy macro '{stem}' and restored a 10-second loop boundary (backup kept)"
-                ),
+                format!("Upgraded legacy macro '{stem}' and restored a 10-second loop boundary (backup kept)"),
             ),
             Ok(false) => {}
             Err(error) => {
@@ -1074,12 +1119,21 @@ impl Core {
         // the mode flip and the "Playing" log, so "Capture ready" lands there and
         // a live detector backs any checkpoints. `start_guards` then no-ops.
         let backend = self.config.lock().unwrap().capture_backend.clone();
-        self.vision.ensure_ready(target.0 as i64, target.1 as i64, &backend);
+        self.vision
+            .ensure_ready(target.0 as i64, target.1 as i64, &backend);
 
         self.set_mode("playing");
         self.runtime.lock().unwrap().play_started = Some(Instant::now());
-        let repeat_msg = if repeat == 0 { "inf".to_string() } else { repeat.to_string() };
-        let speed_msg = if speed != 1.0 { format!("{}x", py_float(speed)) } else { "1x".to_string() };
+        let repeat_msg = if repeat == 0 {
+            "inf".to_string()
+        } else {
+            repeat.to_string()
+        };
+        let speed_msg = if speed != 1.0 {
+            format!("{}x", py_float(speed))
+        } else {
+            "1x".to_string()
+        };
         self.emit(
             "play",
             format!(
@@ -1186,9 +1240,7 @@ impl Core {
                 }
             }
             PlaybackOutcome::Stopped => self.emit("warn", "Playback stopped"),
-            PlaybackOutcome::Failed(error) => {
-                self.emit("err", format!("Playback failed: {error}"))
-            }
+            PlaybackOutcome::Failed(error) => self.emit("err", format!("Playback failed: {error}")),
         }
     }
 
@@ -1284,11 +1336,12 @@ impl Core {
     pub fn steps_test(&self, step: Value) -> Value {
         let (w, h) = self.resolve_screen();
         let backend = self.config.lock().unwrap().capture_backend.clone();
-        self.vision.ai_test_step(w as i64, h as i64, &backend, &step)
+        self.vision
+            .ai_test_step(w as i64, h as i64, &backend, &step)
     }
 
     /// Validate and run a directed node graph on the shared controller.
-    pub fn node_graph_run(&self, graph: Value) -> Value {
+    pub fn node_graph_run(&self, graph: Value, chains: Vec<Chain>) -> Value {
         {
             let mode = self.runtime.lock().unwrap().mode.clone();
             if mode != "idle" {
@@ -1324,29 +1377,101 @@ impl Core {
                 let controller = core.controller.clone();
                 Box::new(move |action| execute_ai_action(&controller, action))
             };
-            let run_sub_macro = |name: &str| -> Result<String, String> {
-                let ai_path = paths::macros_dir().join("ai").join(format!("{name}.json"));
-                let steps = if ai_path.exists() {
-                    crate::models::step::AIMacro::load(&ai_path)
-                        .map_err(|error| error.to_string())?
-                        .steps
-                } else {
-                    let path = paths::macros_dir().join(format!("{name}.json"));
-                    let recorded = Macro::load(&path).map_err(|error| error.to_string())?;
-                    crate::models::step::macro_to_steps(&recorded)
+            let run_macro =
+                |name: &str, embedded_steps: &[Step], repeat: i64| -> Result<(), String> {
+                    let loaded_steps;
+                    let steps = if embedded_steps.is_empty() {
+                        let ai_path = paths::macros_dir().join("ai").join(format!("{name}.json"));
+                        loaded_steps = if ai_path.exists() {
+                            crate::models::step::AIMacro::load(&ai_path)
+                                .map_err(|error| error.to_string())?
+                                .steps
+                        } else {
+                            let path = paths::macros_dir().join(format!("{name}.json"));
+                            let recorded = Macro::load(&path).map_err(|error| error.to_string())?;
+                            crate::models::step::macro_to_steps(&recorded)
+                        };
+                        loaded_steps.as_slice()
+                    } else {
+                        embedded_steps
+                    };
+                    let summary = crate::engine::ai::run_with_flag(
+                        steps,
+                        repeat > 1,
+                        repeat,
+                        &detect,
+                        &actuate,
+                        &core.node_running,
+                    );
+                    if summary["ok"].as_bool().unwrap_or(false) {
+                        Ok(())
+                    } else {
+                        Err(summary["error"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("Macro '{name}' failed")))
+                    }
                 };
-                let summary = crate::engine::ai::run_with_flag(
-                    &steps,
-                    false,
-                    1,
-                    &detect,
-                    &actuate,
-                    &core.node_running,
-                );
-                if summary["ok"].as_bool().unwrap_or(false) {
-                    Ok(format!("Sub-macro '{name}' finished"))
+            let run_sub_macro =
+                |name: &str, embedded_steps: &[Step], repeat: i64| -> Result<String, String> {
+                    run_macro(name, embedded_steps, repeat)?;
+                    let source = if embedded_steps.is_empty() {
+                        "linked source".to_string()
+                    } else {
+                        format!(
+                            "{} embedded action{}",
+                            embedded_steps.len(),
+                            if embedded_steps.len() == 1 { "" } else { "s" }
+                        )
+                    };
+                    Ok(format!(
+                        "Macro '{name}' finished ({source}, {repeat} run{})",
+                        if repeat == 1 { "" } else { "s" }
+                    ))
+                };
+            let run_chain = |chain_id: &str| -> Result<String, String> {
+                let chain = chains
+                    .iter()
+                    .find(|chain| chain.id == chain_id)
+                    .ok_or_else(|| format!("Chain '{chain_id}' no longer exists"))?;
+                if chain.macro_names.is_empty() {
+                    return Err(format!("Chain '{}' has no macros", chain.name));
+                }
+                let mut iteration = 0_i64;
+                while core.node_running.load(Ordering::SeqCst) {
+                    iteration += 1;
+                    if chain.repeat > 0 && iteration > chain.repeat {
+                        break;
+                    }
+                    for (index, macro_name) in chain.macro_names.iter().enumerate() {
+                        if !core.node_running.load(Ordering::SeqCst) {
+                            return Err("Stopped".to_string());
+                        }
+                        run_macro(macro_name, &[], 1).map_err(|error| {
+                            format!("Chain '{}' failed at '{}': {error}", chain.name, macro_name)
+                        })?;
+                        if index + 1 < chain.macro_names.len() && chain.delay_between > 0.0 {
+                            let deadline =
+                                Instant::now() + Duration::from_secs_f64(chain.delay_between);
+                            while Instant::now() < deadline {
+                                if !core.node_running.load(Ordering::SeqCst) {
+                                    return Err("Stopped".to_string());
+                                }
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                thread::sleep(remaining.min(Duration::from_millis(50)));
+                            }
+                        }
+                    }
+                }
+                if !core.node_running.load(Ordering::SeqCst) {
+                    Err("Stopped".to_string())
                 } else {
-                    Err(format!("Sub-macro '{name}' failed"))
+                    Ok(format!(
+                        "Chain '{}' finished ({} iteration{})",
+                        chain.name,
+                        iteration,
+                        if iteration == 1 { "" } else { "s" }
+                    ))
                 }
             };
 
@@ -1356,6 +1481,7 @@ impl Core {
                 &detect,
                 &actuate,
                 &run_sub_macro,
+                &run_chain,
                 &core.node_running,
             );
             core.detections.set("nodes", false);
@@ -1420,13 +1546,10 @@ fn execute_ai_action(controller: &InputController, action: crate::engine::ai::Ac
 fn has_fail_closed_checkpoint(macro_def: &Macro) -> bool {
     macro_def.events.iter().any(|input| {
         input.event_type == InputEventType::Checkpoint
-            && input
-                .checkpoint
-                .as_ref()
-                .is_some_and(|cfg| {
-                    matches!(cfg, Value::Object(map) if !map.is_empty())
-                        && cfg.get("on_timeout").and_then(Value::as_str) != Some("continue")
-                })
+            && input.checkpoint.as_ref().is_some_and(|cfg| {
+                matches!(cfg, Value::Object(map) if !map.is_empty())
+                    && cfg.get("on_timeout").and_then(Value::as_str) != Some("continue")
+            })
     })
 }
 
@@ -1483,7 +1606,11 @@ mod tests {
     #[test]
     fn the_overlay_sees_every_live_source_and_no_dead_ones() {
         let vision = Vision::new(Arc::new(Mutex::new(LogBuffer::default())));
-        let frame = Frame { bgr: Vec::new(), width: 1920, height: 1080 };
+        let frame = Frame {
+            bgr: Vec::new(),
+            width: 1920,
+            height: 1080,
+        };
         let seen = |label: &str| Sighting {
             label: label.to_string(),
             x: 10,
@@ -1500,12 +1627,20 @@ mod tests {
         assert_eq!(out["screen"], json!([1920, 1080]));
         let items = out["items"].as_array().unwrap();
         assert_eq!(items.len(), 2, "both sources draw at once");
-        assert!(items.iter().all(|i| i["age_ms"].is_u64()), "each box fades on its own clock");
+        assert!(
+            items.iter().all(|i| i["age_ms"].is_u64()),
+            "each box fades on its own clock"
+        );
 
         // A loop that has stopped leaves its last pass behind. It must stop
         // contributing rather than hang on screen for the rest of the session.
-        vision.sightings.lock().unwrap().get_mut("guards").unwrap().at =
-            Instant::now() - Duration::from_millis(SIGHTING_TTL_MS as u64 + 500);
+        vision
+            .sightings
+            .lock()
+            .unwrap()
+            .get_mut("guards")
+            .unwrap()
+            .at = Instant::now() - Duration::from_millis(SIGHTING_TTL_MS as u64 + 500);
         let out = vision.sightings();
         let items = out["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
@@ -1515,16 +1650,29 @@ mod tests {
         vision.publish("steps", &frame, Vec::new());
         let out = vision.sightings();
         assert!(out["items"].as_array().unwrap().is_empty());
-        assert_eq!(out["screen"], json!([0, 0]), "nothing live, nothing to scale by");
+        assert_eq!(
+            out["screen"],
+            json!([0, 0]),
+            "nothing live, nothing to scale by"
+        );
     }
 
     #[test]
     fn region_pixels_matches_python_to_pixels() {
         // Corners, not width/height: `frame[y1:y2, x1:x2]`.
-        assert_eq!(region_pixels([0.0, 0.0, 100.0, 100.0], 2560, 1440), (0, 0, 2560, 1440));
-        assert_eq!(region_pixels([25.0, 50.0, 75.0, 100.0], 2560, 1440), (640, 720, 1920, 1440));
+        assert_eq!(
+            region_pixels([0.0, 0.0, 100.0, 100.0], 2560, 1440),
+            (0, 0, 2560, 1440)
+        );
+        assert_eq!(
+            region_pixels([25.0, 50.0, 75.0, 100.0], 2560, 1440),
+            (640, 720, 1920, 1440)
+        );
         // int() truncates: 33.3% of 100 is 33.3 → 33, never 34.
-        assert_eq!(region_pixels([33.3, 33.3, 66.7, 66.7], 100, 100), (33, 33, 66, 66));
+        assert_eq!(
+            region_pixels([33.3, 33.3, 66.7, 66.7], 100, 100),
+            (33, 33, 66, 66)
+        );
     }
 
     #[test]
@@ -1537,7 +1685,10 @@ mod tests {
 
     #[test]
     fn text_guards_include_the_legacy_spelling() {
-        let g = |method: &str| Guard { method: method.to_string(), ..Default::default() };
+        let g = |method: &str| Guard {
+            method: method.to_string(),
+            ..Default::default()
+        };
         assert!(is_text_guard(&g("ocr")));
         assert!(is_text_guard(&g("text")));
         assert!(!is_text_guard(&g("color")));
@@ -1546,7 +1697,11 @@ mod tests {
 
     #[test]
     fn text_roi_pads_the_region_and_reports_its_origin() {
-        let frame = Frame { bgr: vec![0u8; 200 * 200 * 3], width: 200, height: 200 };
+        let frame = Frame {
+            bgr: vec![0u8; 200 * 200 * 3],
+            width: 200,
+            height: 200,
+        };
         // 60px box: a fifth of it either side, so 20px wider each way.
         let (roi, origin) = text_roi(&frame, 80, 80, 140, 140).unwrap();
         assert_eq!(origin, (60, 60));
@@ -1555,7 +1710,11 @@ mod tests {
 
     #[test]
     fn text_roi_padding_stops_at_the_frame_edge() {
-        let frame = Frame { bgr: vec![0u8; 200 * 200 * 3], width: 200, height: 200 };
+        let frame = Frame {
+            bgr: vec![0u8; 200 * 200 * 3],
+            width: 200,
+            height: 200,
+        };
         // Flush against the top-left: the pad has nowhere to go on those sides,
         // and the origin must still be where the crop actually starts.
         let (roi, origin) = text_roi(&frame, 0, 0, 30, 30).unwrap();
@@ -1581,7 +1740,11 @@ mod tests {
     }
 
     fn macro_with(loop_enabled: bool, loop_count: i64) -> Macro {
-        Macro { loop_enabled, loop_count, ..Default::default() }
+        Macro {
+            loop_enabled,
+            loop_count,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1609,6 +1772,9 @@ mod tests {
             timestamp: 0.0,
             x: 0,
             y: 0,
+            mouse_motion: None,
+            dx: 0,
+            dy: 0,
             button: "left".to_string(),
             key: String::new(),
             delta: 0,

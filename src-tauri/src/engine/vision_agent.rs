@@ -65,6 +65,17 @@ const BURST_FLOOR: Duration = Duration::from_millis(16);
 /// Dwell between the moves of a drag sweep, so a game registers it as a
 /// continuous drag rather than a teleport. Matches [`super::guards`].
 const STROKE_STEP: Duration = Duration::from_millis(8);
+/// Give a game one frame to observe the cursor at the target before pressing.
+/// Roblox can paint the hover state while still dropping a button-down sent in
+/// the same input burst as the move.
+const CLICK_SETTLE: Duration = Duration::from_millis(32);
+/// Keep the button down across multiple game ticks. A zero-duration down/up is
+/// legal Win32 input, but some games coalesce it before their UI sees a press.
+const CLICK_HOLD: Duration = Duration::from_millis(48);
+/// A real key press spans more than one game tick for the same reason as a
+/// mouse press. This is deliberately scoped to autonomous Watch actions;
+/// recorded macros keep their recorded timing.
+const KEY_HOLD: Duration = Duration::from_millis(48);
 
 /// The action a fired trigger performs on screen. The three cursor primitives
 /// exist for the same reason they do in [`super::guards`]: a trigger whose
@@ -75,12 +86,13 @@ const STROKE_STEP: Duration = Duration::from_millis(8);
 /// instead of clicking on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisionAction {
-    KeyPress(String),
-    Click(i64, i64),
+    KeyDown(String),
+    KeyUp(String),
     Nudge(i64, i64),
     MoveTo(i64, i64),
     MouseDown(String),
     MouseUp(String),
+    Pause(Duration),
 }
 
 /// `detect(enabled_triggers) -> {trigger_id: [detections]}`: one batched grab.
@@ -176,7 +188,8 @@ impl VisionAgent {
 
 /// The quiet time a pass costing `cost` has earned itself, per [`IDLE_DUTY`].
 fn idle_after(cost: Duration) -> Duration {
-    cost.mul_f64(1.0 / IDLE_DUTY - 1.0).clamp(MIN_IDLE, MAX_IDLE)
+    cost.mul_f64(1.0 / IDLE_DUTY - 1.0)
+        .clamp(MIN_IDLE, MAX_IDLE)
 }
 
 impl Inner {
@@ -289,9 +302,19 @@ impl Inner {
     fn act_on(&self, trigger: &Guard, best: &Detection) {
         self.fired.fetch_add(1, Ordering::SeqCst);
 
-        if trigger.action == "key" && !trigger.key.is_empty() {
-            (self.act)(VisionAction::KeyPress(trigger.key.clone()));
-            (self.on_event)("act", &format!("'{}' -> pressed {}", trigger.name, trigger.key));
+        if trigger.action == "key" {
+            let key = trigger.key.trim();
+            if key.is_empty() {
+                (self.on_event)(
+                    "error",
+                    &format!("'{}' -> no key is configured", trigger.name),
+                );
+                return;
+            }
+            (self.act)(VisionAction::KeyDown(key.to_string()));
+            (self.act)(VisionAction::Pause(KEY_HOLD));
+            (self.act)(VisionAction::KeyUp(key.to_string()));
+            (self.on_event)("act", &format!("'{}' -> pressed {key}", trigger.name));
         } else if trigger.action == "nudge" {
             // Same target a click would press (a marked point or offset applied
             // to the match), but parked-and-wiggled instead of pressed: the game
@@ -305,7 +328,14 @@ impl Inner {
         } else {
             match plan_action(trigger, best) {
                 Plan::Click(x, y) => {
-                    (self.act)(VisionAction::Click(x, y));
+                    // Emit the press as explicit phases. Besides making the
+                    // behavior testable, this prevents games from collapsing a
+                    // move/down/up burst into a hover with no registered click.
+                    (self.act)(VisionAction::MoveTo(x, y));
+                    (self.act)(VisionAction::Pause(CLICK_SETTLE));
+                    (self.act)(VisionAction::MouseDown("left".to_string()));
+                    (self.act)(VisionAction::Pause(CLICK_HOLD));
+                    (self.act)(VisionAction::MouseUp("left".to_string()));
                     (self.on_event)("act", &format!("'{}' -> clicked ({x}, {y})", trigger.name));
                 }
                 Plan::Drag { tlx, tly, strokes } => {
@@ -470,12 +500,22 @@ mod tests {
         }
     }
 
+    fn click_actions(x: i64, y: i64) -> Vec<VisionAction> {
+        vec![
+            VisionAction::MoveTo(x, y),
+            VisionAction::Pause(CLICK_SETTLE),
+            VisionAction::MouseDown("left".into()),
+            VisionAction::Pause(CLICK_HOLD),
+            VisionAction::MouseUp("left".into()),
+        ]
+    }
+
     #[test]
     fn click_trigger_acts_and_counts() {
         let (agent, actions, events) = harness("t", vec![detection(7, 9)]);
         agent.test_prime(vec![base_trigger("t")]);
         agent.test_tick();
-        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(7, 9)]);
+        assert_eq!(*actions.lock().unwrap(), click_actions(7, 9));
         assert_eq!(agent.fired_count(), 1);
         assert_eq!(
             *events.lock().unwrap(),
@@ -503,7 +543,7 @@ mod tests {
         t.click_offset = vec![4, 3];
         agent.test_prime(vec![t]);
         agent.test_tick();
-        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(84, 193)]);
+        assert_eq!(*actions.lock().unwrap(), click_actions(84, 193));
     }
 
     #[test]
@@ -540,11 +580,30 @@ mod tests {
         agent.test_tick();
         assert_eq!(
             *actions.lock().unwrap(),
-            vec![VisionAction::KeyPress("e".into())]
+            vec![
+                VisionAction::KeyDown("e".into()),
+                VisionAction::Pause(KEY_HOLD),
+                VisionAction::KeyUp("e".into()),
+            ]
         );
         assert_eq!(
             *events.lock().unwrap(),
             vec![("act".into(), "'Watcher' -> pressed e".into())]
+        );
+    }
+
+    #[test]
+    fn key_trigger_without_a_key_never_falls_back_to_clicking() {
+        let (agent, actions, events) = harness("t", vec![detection(50, 60)]);
+        let mut t = base_trigger("t");
+        t.action = "key".into();
+        t.key = "   ".into();
+        agent.test_prime(vec![t]);
+        agent.test_tick();
+        assert!(actions.lock().unwrap().is_empty());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![("error".into(), "'Watcher' -> no key is configured".into())]
         );
     }
 
@@ -558,7 +617,10 @@ mod tests {
         t.action = "nudge".into();
         agent.test_prime(vec![t]);
         agent.test_tick();
-        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Nudge(300, 400)]);
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![VisionAction::Nudge(300, 400)]
+        );
         assert_eq!(
             *events.lock().unwrap(),
             vec![(
@@ -594,10 +656,9 @@ mod tests {
         assert_eq!(agent.test_tick(), BURST_FLOOR);
         thread::sleep(BURST_FLOOR);
         agent.test_tick();
-        assert_eq!(
-            *actions.lock().unwrap(),
-            vec![VisionAction::Click(1, 1), VisionAction::Click(1, 1)]
-        );
+        let mut expected = click_actions(1, 1);
+        expected.extend(click_actions(1, 1));
+        assert_eq!(*actions.lock().unwrap(), expected);
         assert_eq!(agent.fired_count(), 2);
     }
 
@@ -610,7 +671,7 @@ mod tests {
         agent.test_prime(vec![base_trigger("t")]);
         agent.test_tick();
         agent.test_tick();
-        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(1, 1)]);
+        assert_eq!(*actions.lock().unwrap(), click_actions(1, 1));
         assert_eq!(agent.fired_count(), 1);
     }
 
@@ -623,7 +684,7 @@ mod tests {
         let wait = agent.test_tick();
         // Fired once, and the next look is a cooldown away rather than now.
         agent.test_tick();
-        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(1, 1)]);
+        assert_eq!(*actions.lock().unwrap(), click_actions(1, 1));
         assert!(wait > Duration::from_secs(25), "asked to wait {wait:?}");
     }
 
@@ -632,7 +693,10 @@ mod tests {
         // The floor applies to a free detection; a slow one is charged the duty
         // rate, and neither is ever asked to disappear for longer than the cap.
         assert_eq!(idle_after(Duration::ZERO), MIN_IDLE);
-        assert_eq!(idle_after(Duration::from_millis(100)), Duration::from_millis(400));
+        assert_eq!(
+            idle_after(Duration::from_millis(100)),
+            Duration::from_millis(400)
+        );
         assert_eq!(idle_after(Duration::from_secs(9)), MAX_IDLE);
 
         let (agent, actions, _) = harness("other", vec![detection(1, 1)]);
@@ -655,10 +719,22 @@ mod tests {
         let (agent, _actions, events) = make("t", vec![detection(3, 4)], runner);
         let mut t = base_trigger("t");
         t.macro_sequence = vec![
-            MacroSeqItem { name: "grind".into(), repeat: 3 }, // finite → "x3"
-            MacroSeqItem { name: "".into(), repeat: 1 },      // blank → skipped
-            MacroSeqItem { name: "idle".into(), repeat: 0 },  // 0 → "xinf"
-            MacroSeqItem { name: "boom".into(), repeat: 5 },  // fails
+            MacroSeqItem {
+                name: "grind".into(),
+                repeat: 3,
+            }, // finite → "x3"
+            MacroSeqItem {
+                name: "".into(),
+                repeat: 1,
+            }, // blank → skipped
+            MacroSeqItem {
+                name: "idle".into(),
+                repeat: 0,
+            }, // 0 → "xinf"
+            MacroSeqItem {
+                name: "boom".into(),
+                repeat: 5,
+            }, // fails
         ];
         agent.test_prime(vec![t]);
         agent.test_tick();
@@ -714,7 +790,10 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec![
-                ("start".into(), "Vision running, watching for 1 trigger(s)".into()),
+                (
+                    "start".into(),
+                    "Vision running, watching for 1 trigger(s)".into()
+                ),
                 ("stop".into(), "Vision stopped".into()),
             ]
         );

@@ -98,10 +98,18 @@ function describeCheckpoint(c: Json): string {
   return `Waits for ${thing}, then ${act}.`;
 }
 
-export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: EditorSheetProps) {
+export function CheckpointsSheet({
+  macroName,
+  open,
+  onOpenChange,
+  onChanged,
+  inline = false,
+  embedded = false,
+}: EditorSheetProps & { inline?: boolean; embedded?: boolean }) {
   const [checkpoints, setCheckpoints] = useState<CheckpointItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<CheckpointDraft>(freshDraft);
 
   const load = useCallback(async () => {
@@ -119,6 +127,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
   useEffect(() => {
     if (open) {
       setDraft(freshDraft());
+      setAdding(false);
       void load();
     }
   }, [open, load]);
@@ -212,6 +221,7 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
       if (res.ok) {
         notify("success", "Checkpoint added.");
         setDraft(freshDraft());
+        setAdding(false);
         await load();
         onChanged?.();
       } else {
@@ -245,18 +255,17 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
     (draft.click_offset?.length === 2);
   const regionSet = !!draft.region && !(draft.region[0] === 0 && draft.region[1] === 0 && draft.region[2] === 100 && draft.region[3] === 100);
 
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-lg">
-        <SheetHeader className="px-6 pb-2 pr-12 pt-6">
-          <SheetTitle>Checkpoints</SheetTitle>
-          <SheetDescription>
+  const content = (
+    <>
+        {!embedded && <div className="space-y-1 border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-foreground">Vision checkpoints</h3>
+          <p className="text-xs text-muted-foreground">
             Make “{macroName}” wait for the screen to be ready before it carries on. Perfect for loading
             screens, popups, and moving targets.
-          </SheetDescription>
-        </SheetHeader>
+          </p>
+        </div>}
 
-        <div className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
+        <div className={cn("flex-1 space-y-6 overflow-y-auto px-6 py-5", inline && "overflow-visible px-4 py-4")}>
           {/* Existing checkpoints */}
           {loading ? (
             <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
@@ -303,13 +312,14 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
               <div>
                 <p className="text-sm font-semibold text-foreground">No checkpoints yet</p>
                 <p className="mx-auto mt-1 max-w-xs text-sm text-muted-foreground">
-                  Add one below to pause the macro until something you choose shows up on screen.
+                  Add one when this macro needs to wait for something on screen.
                 </p>
               </div>
             </div>
           )}
 
           {/* Add form */}
+          {adding ? (
           <section className="space-y-4 rounded-xl border border-border bg-secondary/30 p-4">
             <h3 className="text-sm font-semibold text-foreground">
               {checkpoints.length ? "Add another" : "Add a checkpoint"}
@@ -494,13 +504,74 @@ export function CheckpointsSheet({ macroName, open, onOpenChange, onChanged }: E
               </span>
             </div>
 
-            <Button className={cn("w-full")} onClick={add} disabled={busy}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-              Add checkpoint
-            </Button>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setDraft(freshDraft());
+                  setAdding(false);
+                }}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button onClick={add} disabled={busy}>
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                Add checkpoint
+              </Button>
+            </div>
           </section>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={() => {
+                setDraft(freshDraft());
+                setAdding(true);
+              }}
+            >
+              <Plus className="size-4" />
+              Add a checkpoint
+            </Button>
+          )}
         </div>
+    </>
+  );
+
+  if (inline) return content;
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-lg">
+        <SheetHeader className="sr-only">
+          <SheetTitle>Vision checkpoints</SheetTitle>
+          <SheetDescription>Configure checkpoints for {macroName}.</SheetDescription>
+        </SheetHeader>
+        {content}
       </SheetContent>
     </Sheet>
+  );
+}
+
+export function CheckpointsEditor({
+  macroName,
+  onChanged,
+  embedded = false,
+}: {
+  macroName: string;
+  onChanged?: () => void;
+  embedded?: boolean;
+}) {
+  return (
+    <CheckpointsSheet
+      macroName={macroName}
+      open
+      inline
+      embedded={embedded}
+      onOpenChange={() => {}}
+      onChanged={onChanged}
+    />
   );
 }

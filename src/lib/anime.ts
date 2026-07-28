@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { animate, stagger } from "animejs";
+import { useLayoutEffect, useRef } from "react";
+import { animate } from "animejs";
 
 /** True when the OS asks for less motion. Every animation here must have a
  *  still fallback that lands on the same final state. */
@@ -15,21 +15,36 @@ export const reducedMotion = () =>
  */
 export function useStaggerIn<T extends HTMLElement>(key?: unknown) {
   const ref = useRef<T>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el || el.children.length === 0) return;
     const kids = Array.from(el.children) as HTMLElement[];
     if (reducedMotion()) {
-      kids.forEach((k) => (k.style.opacity = "1"));
+      kids.forEach((kid) => {
+        kid.style.removeProperty("opacity");
+        kid.style.removeProperty("transform");
+      });
       return;
     }
-    animate(kids, {
+
+    // Layout effects run before paint, so users never see the unanimated list
+    // for one frame. Keep the travel tiny and cap the stagger: a long macro list
+    // should settle as quickly as a short one.
+    const animation = animate(kids, {
       opacity: [0, 1],
-      translateY: [10, 0],
-      duration: 440,
-      delay: stagger(45),
-      ease: "out(3)",
+      translateY: [3, 0],
+      duration: 190,
+      delay: (_target, index) => Math.min(index ?? 0, 4) * 18,
+      ease: "out(4)",
     });
+
+    return () => {
+      animation.cancel();
+      kids.forEach((kid) => {
+        kid.style.removeProperty("opacity");
+        kid.style.removeProperty("transform");
+      });
+    };
   }, [key]);
   return ref;
 }

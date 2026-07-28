@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 
 /**
  * The macro launcher: a Raycast/PowerToys-style palette the play hotkey opens.
- * Lists every macro, every autopilot chain, AND every Watch trigger — macros
+ * Lists every macro, every saved workflow chain, AND every Watch trigger — macros
  * first (most-recently-played on top), then chains by name, then watch triggers.
  * Each macro row shows how long one run takes and its category, plus cumulative
  * time played and play count; each chain row shows how many macros it runs and

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, Square, Copy, X } from "lucide-react";
+import { Minus, Square, Copy, X } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
 

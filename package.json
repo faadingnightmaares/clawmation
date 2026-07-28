@@ -1,7 +1,7 @@
 {
   "name": "clawmation",
   "private": true,
-  "version": "1.1.9",
+  "version": "1.2.0",
   "description": "Macro recorder and player for Windows games, with screen-watching guards",
   "license": "MIT",
   "repository": {
@@ -21,7 +21,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@heroicons/react": "^2.2.0",
     "@phosphor-icons/react": "^2.1.10",
+    "@tabler/icons-react": "^3.45.0",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
@@ -29,6 +31,7 @@
     "animejs": "^4.5.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "iconoir-react": "^7.11.1",
     "lucide-react": "^1.26.0",
     "next-themes": "^0.4.6",
     "radix-ui": "^1.6.5",

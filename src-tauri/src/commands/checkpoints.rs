@@ -21,7 +21,12 @@ fn strip_json(name: &str) -> &str {
 }
 
 #[tauri::command(async)]
-pub fn add_checkpoint(state: State<AppState>, name: String, index: i64, checkpoint: Value) -> Value {
+pub fn add_checkpoint(
+    state: State<AppState>,
+    name: String,
+    index: i64,
+    checkpoint: Value,
+) -> Value {
     let result = add_checkpoint_in(&paths::macros_dir(), &name, index, checkpoint);
     if result["ok"] == json!(true) {
         let stem = strip_json(&name);
@@ -88,6 +93,9 @@ fn add_checkpoint_in(macros_dir: &Path, name: &str, index: i64, mut checkpoint: 
         timestamp: round4(ts),
         x: 0,
         y: 0,
+        mouse_motion: None,
+        dx: 0,
+        dy: 0,
         button: "left".to_string(),
         key: String::new(),
         delta: 0,
@@ -166,6 +174,9 @@ mod tests {
                 timestamp: i as f64 * 0.1,
                 x: 0,
                 y: 0,
+                mouse_motion: None,
+                dx: 0,
+                dy: 0,
                 button: "left".to_string(),
                 key: String::new(),
                 delta: 0,
@@ -173,7 +184,11 @@ mod tests {
                 checkpoint: None,
             })
             .collect();
-        let m = Macro { name: name.to_string(), events, ..Default::default() };
+        let m = Macro {
+            name: name.to_string(),
+            events,
+            ..Default::default()
+        };
         let path = dir.join(format!("{name}.json"));
         m.save_to(&path).unwrap();
         path
@@ -211,10 +226,17 @@ mod tests {
         let path = make_macro(&macros, name, 2); // t = 0.0, 0.1
 
         // index <= 0 → timestamp 0.0, inserted at the front.
-        assert_eq!(add_checkpoint_in(&macros, name, 0, cfg())["index"], json!(0));
+        assert_eq!(
+            add_checkpoint_in(&macros, name, 0, cfg())["index"],
+            json!(0)
+        );
         // index >= n → last timestamp + 0.01, appended.
         let end = add_checkpoint_in(&macros, name, 99, cfg());
-        assert_eq!(end["index"], json!(99), "out-of-range index returned verbatim");
+        assert_eq!(
+            end["index"],
+            json!(99),
+            "out-of-range index returned verbatim"
+        );
         // Negative → append (index becomes n).
         let neg = add_checkpoint_in(&macros, name, -1, cfg());
         let m = Macro::load(&path).unwrap();
@@ -233,7 +255,10 @@ mod tests {
         assert_eq!(r["ok"], json!(true));
         let m = Macro::load(&path).unwrap();
         assert_eq!(m.events.len(), 1);
-        assert_eq!(m.events[0].timestamp, 0.0, "empty macro → t=0.0 regardless of index");
+        assert_eq!(
+            m.events[0].timestamp, 0.0,
+            "empty macro → t=0.0 regardless of index"
+        );
     }
 
     #[test]
@@ -261,7 +286,10 @@ mod tests {
         assert_eq!(r["ok"], json!(true));
         let m = Macro::load(&path).unwrap();
         assert_eq!(m.events.len(), 2, "back to the two moves");
-        assert!(m.events.iter().all(|e| e.event_type != InputEventType::Checkpoint));
+        assert!(m
+            .events
+            .iter()
+            .all(|e| e.event_type != InputEventType::Checkpoint));
 
         // Out-of-range index is the same no-op error.
         let r = remove_checkpoint_in(&macros, name, 99);
@@ -282,6 +310,9 @@ mod tests {
             timestamp: 9.0,
             x: 0,
             y: 0,
+            mouse_motion: None,
+            dx: 0,
+            dy: 0,
             button: "left".to_string(),
             key: String::new(),
             delta: 0,

@@ -2,32 +2,27 @@ import { toast } from "sonner";
 
 export type ToastKind = "info" | "success" | "error" | "warning";
 
-/**
- * One verb for transient feedback across every view, backed by sonner. Replaces
- * the old hand-rolled `pushToast(kind, text)` so callers read the same.
- */
+/** Only interrupt for feedback that needs attention. Routine confirmations are
+ * already visible in the UI state that changed. */
 export function notify(kind: ToastKind, text: string) {
   switch (kind) {
-    case "success":
-      return toast.success(text);
     case "error":
       return toast.error(text);
     case "warning":
       return toast.warning(text);
     default:
-      return toast.info(text);
+      return undefined;
   }
 }
 
-/**
- * Tell the user about something they didn't ask for, with somewhere to go about
- * it. Longer-lived than a plain toast, since the moment isn't one they chose.
- */
-export function notifyAction(text: string, label: string, onClick: () => void) {
-  return toast.info(text, {
-    duration: 12000,
-    action: { label, onClick },
-  });
+/** Passive announcements stay out of the workspace. Users can check updates
+ * from Settings when they choose. */
+export function notifyAction(
+  _text: string,
+  _label: string,
+  _onClick: () => void,
+) {
+  return undefined;
 }
 
 /**

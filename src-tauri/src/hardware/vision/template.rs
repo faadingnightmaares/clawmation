@@ -1,7 +1,7 @@
 //! Template matching: `detection.py::PixelDetector`'s robust tiers, ported.
 //!
-//! A template is preprocessed once into a [`Template`]: CLAHE-equalised for
-//! brightness-invariant correlation, Canny edges for background-invariant
+//! A template is preprocessed once into a [`Template`]: its original grayscale
+//! pixels for normalized correlation, Canny edges for background-invariant
 //! correlation, and an auto-generated content mask that excludes whatever the
 //! crop caught around the UI element. Per frame the search area is preprocessed
 //! once and reused across the whole scale sweep.
@@ -11,7 +11,7 @@
 //! 0. **Temporal coherence**: correlate at native scale in a ±60 px window
 //!    around wherever this template was last seen. Almost every repeat detection
 //!    lands here, and it is the reason a guard polling at 50 ms is affordable.
-//! 1. **Multi-scale CLAHE correlation**, coarse-to-fine with an early exit.
+//! 1. **Multi-scale raw correlation**, coarse-to-fine with an early exit.
 //! 2. **Multi-scale Canny-edge correlation**, at a relaxed threshold.
 //!
 //! Tiers 1 and 2 share one shape, and the shape is the whole story of how often
@@ -63,17 +63,28 @@ const COARSE_MAX_FACTOR: f64 = 0.5;
 /// watcher seconds. Since the coarse pass only nominates and native resolution
 /// judges, the cheaper pass buys back a poll interval that actually catches
 /// things at the price of a slightly noisier shortlist.
-const COARSE_TARGET_PX: f64 = 160_000.0;
+const COARSE_TARGET_PX: f64 = 60_000.0;
 /// A coarse template smaller than this on a side has no shape left to correlate
 /// against, and a nomination made from noise is worse than none: it takes a
 /// shortlist slot from a real one.
 const COARSE_MIN_SIDE: usize = 6;
+/// Native scale gets one higher-detail nomination before the broad ladder.
+/// Flat buttons and glyphs lose their identity at six pixels tall even though
+/// that is enough for textured targets; twelve preserves their structure.
+const NATIVE_MIN_SIDE: usize = 12;
+const NATIVE_PEAKS: usize = 12;
 /// How far under the real threshold a coarse score may sit and still be worth
 /// confirming at native resolution, and the floor that slack stops at.
 const COARSE_SLACK: f64 = 0.25;
 const COARSE_FLOOR: f64 = 0.35;
-/// How many coarse nominations get confirmed at native resolution.
-const SHORTLIST: usize = 3;
+/// How many distinct coarse nominations get confirmed at native resolution.
+/// The old three-slot list was regularly consumed by neighbouring scales of one
+/// look-alike, leaving no room for the real target elsewhere on a full screen.
+const SHORTLIST: usize = 12;
+/// Plausible positions retained from each scale. Native confirmation is cheap
+/// because it runs in a small window, and judging several locations is far more
+/// reliable than trusting one downscaled maximum.
+const PEAKS_PER_SCALE: usize = 4;
 /// A coarse hit this far above threshold ends the sweep.
 const EARLY_EXIT_MARGIN: f64 = 0.05;
 /// Slack around the last known position for the temporal-coherence tier.
@@ -90,6 +101,7 @@ const FULL_NATIVE_BUDGET: u64 = 2_000_000_000;
 pub struct Template {
     pub w: usize,
     pub h: usize,
+    raw: Gray,
     clahe: Gray,
     edges: Gray,
     /// 255 where the UI element is, 0 where the crop caught background. `None`
@@ -105,7 +117,14 @@ impl Template {
     pub fn from_gray(gray: &Gray) -> Self {
         let edges = canny(gray, 50, 150);
         let mask = auto_mask(&edges);
-        Self { w: gray.w, h: gray.h, clahe: Clahe::detector_default().apply(gray), edges, mask }
+        Self {
+            w: gray.w,
+            h: gray.h,
+            raw: gray.clone(),
+            clahe: Clahe::detector_default().apply(gray),
+            edges,
+            mask,
+        }
     }
 }
 
@@ -142,7 +161,11 @@ fn auto_mask(edges: &Gray) -> Option<Gray> {
         y += step_y;
     }
 
-    let content = flood.data.iter().map(|&v| if v == 0 { 255 } else { 0 }).collect();
+    let content = flood
+        .data
+        .iter()
+        .map(|&v| if v == 0 { 255 } else { 0 })
+        .collect();
     // Close the holes inside the element: text interiors, mostly.
     let mask = morph_close_ellipse5(&Gray::from_vec(w, h, content), 2);
 
@@ -170,7 +193,10 @@ impl Default for Matcher {
 
 impl Matcher {
     pub fn new() -> Self {
-        Self { clahe: Clahe::detector_default(), last: HashMap::new() }
+        Self {
+            clahe: Clahe::detector_default(),
+            last: HashMap::new(),
+        }
     }
 
     /// Forget where a template was last seen. Used when its image is replaced,
@@ -243,6 +269,23 @@ impl Matcher {
         }
         let window = search.crop(x1 as i32, y1 as i32, (x2 - x1) as i32, (y2 - y1) as i32)?;
         let hits = match_corr(
+            &window,
+            &tpl.raw,
+            tpl.mask.as_ref(),
+            threshold,
+            ox + x1,
+            oy + y1,
+            label,
+        );
+        if !hits.is_empty() {
+            self.remember(key, &hits[0]);
+            return Some(hits);
+        }
+
+        // A remembered target can undergo a local nonlinear lighting change.
+        // Equalising this small window is cheap and avoids the full-screen CLAHE
+        // mismatch that made cold scans unreliable.
+        let hits = match_corr(
             &self.clahe.apply(&window),
             &tpl.clahe,
             tpl.mask.as_ref(),
@@ -252,10 +295,11 @@ impl Matcher {
             label,
         );
         if hits.is_empty() {
-            return None;
+            None
+        } else {
+            self.remember(key, &hits[0]);
+            Some(hits)
         }
-        self.remember(key, &hits[0]);
-        Some(hits)
     }
 
     /// Tiers 1 and 2: nominate scales on a half-resolution copy, confirm the
@@ -272,15 +316,51 @@ impl Matcher {
         use_edges: bool,
     ) -> Vec<Detection> {
         let (sw, sh) = (search.w as i64, search.h as i64);
+        let edge_frame;
         let (proc, base, mask_base) = if use_edges {
             // Edges are already background-invariant; a mask on top only
             // narrows the evidence.
-            (canny(search, 50, 150), &tpl.edges, None)
+            edge_frame = canny(search, 50, 150);
+            (&edge_frame, &tpl.edges, None)
         } else {
-            (self.clahe.apply(search), &tpl.clahe, tpl.mask.as_ref())
+            // CCOEFF_NORMED already removes linear brightness and contrast
+            // changes. Keeping the original pixels is crucial for flat UI:
+            // CLAHE maps a tiny crop and a full-screen frame with different tile
+            // histograms, so even byte-identical pixels can stop correlating.
+            (search, &tpl.raw, tpl.mask.as_ref())
         };
 
         let factor = coarse_factor(sw, sh, tpl.w.min(tpl.h));
+
+        // Most Watch pictures were captured from this same display and therefore
+        // reappear at (or very near) native scale. Give that overwhelmingly
+        // common case one higher-detail nomination before the cheaper broad
+        // ladder. This is both faster and more reliable than asking a 6px-tall
+        // version of a flat button to compete with every scale and look-alike.
+        if !use_edges {
+            let native_floor =
+                (NATIVE_MIN_SIDE as f64 / tpl.w.min(tpl.h).max(1) as f64).min(COARSE_MAX_FACTOR);
+            let native_factor = factor.max(native_floor);
+            if let Some(hit) = confirm_native(
+                proc,
+                base,
+                mask_base,
+                ox,
+                oy,
+                label,
+                threshold,
+                native_factor,
+            ) {
+                if work(sw, sh, hit.w, hit.h) <= FULL_NATIVE_BUDGET {
+                    let all = match_corr(proc, base, mask_base, threshold, ox, oy, label);
+                    if !all.is_empty() {
+                        return all;
+                    }
+                }
+                return vec![hit];
+            }
+        }
+
         let coarse_w = ((sw as f64 * factor) as usize).max(1);
         let coarse_h = ((sh as f64 * factor) as usize).max(1);
         let coarse = Searched::new(&resize(&proc, coarse_w, coarse_h, Interp::Area));
@@ -303,42 +383,69 @@ impl Matcher {
             if ctw < COARSE_MIN_SIDE || cth < COARSE_MIN_SIDE || ctw > coarse_w || cth > coarse_h {
                 continue;
             }
-            let interp = if scale < 1.0 { Interp::Area } else { Interp::Linear };
+            let interp = if scale < 1.0 {
+                Interp::Area
+            } else {
+                Interp::Linear
+            };
             let small = resize(base, ctw, cth, interp);
             let small_mask = mask_base.map(|m| resize(m, ctw, cth, Interp::Nearest));
             let Some(res) = coarse.ccoeff_normed(&small, small_mask.as_ref()) else {
                 continue;
             };
-            let Some((mx, my, max_val)) = res.best() else {
+            let peaks = res.peaks(coarse_thresh, PEAKS_PER_SCALE);
+            let Some((_, _, max_val)) = peaks.first().copied() else {
                 continue;
             };
-            if max_val < coarse_thresh {
-                continue;
-            }
-
-            let fx = (mx as f64 / factor) as i64;
-            let fy = (my as f64 / factor) as i64;
-            nominate(
-                &mut shortlist,
-                Detection {
+            let mut scale_candidates = Vec::with_capacity(peaks.len());
+            for (mx, my, score) in peaks {
+                let fx = (mx as f64 / factor) as i64;
+                let fy = (my as f64 / factor) as i64;
+                let candidate = Detection {
                     label: label.to_string(),
                     x: ox + fx + full_tw / 2,
                     y: oy + fy + full_th / 2,
                     w: full_tw,
                     h: full_th,
-                    confidence: f64::from(max_val),
+                    confidence: f64::from(score),
                     roi_offset: [ox, oy],
-                },
-            );
+                };
+                nominate(&mut shortlist, candidate.clone());
+                scale_candidates.push(candidate);
+            }
             if max_val >= early {
-                break;
+                // A coarse score alone must never stop the scale ladder: a
+                // look-alike at the wrong scale can score highly after the
+                // downsample and hide the real target. Only native-resolution
+                // confirmation earns the early exit.
+                if let Some(hit) = scale_candidates
+                    .iter()
+                    .filter_map(|cand| {
+                        refine(
+                            proc, base, mask_base, cand, ox, oy, label, threshold, factor,
+                        )
+                    })
+                    .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+                {
+                    if work(sw, sh, hit.w, hit.h) <= FULL_NATIVE_BUDGET {
+                        let (native, mask) =
+                            native_pair(base, mask_base, hit.w as usize, hit.h as usize);
+                        let all =
+                            match_corr(proc, &native, mask.as_ref(), threshold, ox, oy, label);
+                        if !all.is_empty() {
+                            return all;
+                        }
+                    }
+                    return vec![hit];
+                }
             }
         }
 
         let mut confirmed: Option<Detection> = None;
         for cand in &shortlist {
-            let Some(hit) = refine(&proc, base, mask_base, cand, ox, oy, label, threshold, factor)
-            else {
+            let Some(hit) = refine(
+                &proc, base, mask_base, cand, ox, oy, label, threshold, factor,
+            ) else {
                 continue;
             };
             let better = match &confirmed {
@@ -378,13 +485,120 @@ impl Matcher {
 /// to whatever is already there, and because the ladder runs outwards from
 /// native scale that means the rung nearest 1.0 keeps the slot.
 fn nominate(shortlist: &mut Vec<Detection>, det: Detection) {
-    let at =
-        shortlist.iter().position(|d| det.confidence > d.confidence).unwrap_or(shortlist.len());
+    // Neighbouring scale rungs around the same on-screen object are one
+    // nomination, not several. Keep the strongest representative so the list
+    // has room for plausible locations elsewhere on the screen.
+    if let Some(existing) = shortlist.iter_mut().find(|d| {
+        let same_place = (d.x - det.x).abs() * 2 < d.w.max(det.w).max(1)
+            && (d.y - det.y).abs() * 2 < d.h.max(det.h).max(1);
+        let same_scale = (d.w - det.w).abs() * 20 <= d.w.max(det.w).max(1)
+            && (d.h - det.h).abs() * 20 <= d.h.max(det.h).max(1);
+        same_place && same_scale
+    }) {
+        if det.confidence > existing.confidence {
+            *existing = det;
+            shortlist.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        }
+        return;
+    }
+    let at = shortlist
+        .iter()
+        .position(|d| det.confidence > d.confidence)
+        .unwrap_or(shortlist.len());
     if at >= SHORTLIST {
         return;
     }
     shortlist.insert(at, det);
     shortlist.truncate(SHORTLIST);
+}
+
+/// Nominate and immediately verify native scale before the broad scale ladder.
+/// Returning only after native-resolution correlation keeps the coarse score
+/// from weakening the user's configured threshold.
+#[allow(clippy::too_many_arguments)]
+fn confirm_native(
+    proc: &Gray,
+    base: &Gray,
+    mask_base: Option<&Gray>,
+    ox: i64,
+    oy: i64,
+    label: &str,
+    threshold: f64,
+    factor: f64,
+) -> Option<Detection> {
+    let (sw, sh) = (proc.w as i64, proc.h as i64);
+    let coarse_w = ((sw as f64 * factor) as usize).max(1);
+    let coarse_h = ((sh as f64 * factor) as usize).max(1);
+    let tw = base.w as i64;
+    let th = base.h as i64;
+    let ctw = (tw as f64 * factor) as usize;
+    let cth = (th as f64 * factor) as usize;
+    if ctw < COARSE_MIN_SIDE || cth < COARSE_MIN_SIDE || ctw > coarse_w || cth > coarse_h {
+        return None;
+    }
+
+    let coarse = Searched::new(&resize(proc, coarse_w, coarse_h, Interp::Area));
+    let small = resize(base, ctw, cth, Interp::Area);
+    let small_mask = mask_base.map(|m| resize(m, ctw, cth, Interp::Nearest));
+    let scores = coarse.ccoeff_normed(&small, small_mask.as_ref())?;
+    // Near-native verification is deliberately more permissive at the coarse
+    // stage. A one-pixel crop drift can damage a tiny downsample badly, while
+    // native correlation still has enough evidence to judge it correctly.
+    let coarse_thresh = (threshold - 0.4).max(0.25) as f32;
+
+    scores
+        .peaks(coarse_thresh, NATIVE_PEAKS)
+        .into_iter()
+        .filter_map(|(mx, my, score)| {
+            let fx = (mx as f64 / factor) as i64;
+            let fy = (my as f64 / factor) as i64;
+            let cand = Detection {
+                label: label.to_string(),
+                x: ox + fx + tw / 2,
+                y: oy + fy + th / 2,
+                w: tw,
+                h: th,
+                confidence: f64::from(score),
+                roi_offset: [ox, oy],
+            };
+            refine_near_native(
+                proc, base, mask_base, &cand, ox, oy, label, threshold, factor,
+            )
+        })
+        .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+}
+
+/// Verify a native nomination with a few pixel-level crop variants. Screen
+/// pickers and DPI rounding move opposite edges independently, so this is more
+/// faithful than pretending every near-native difference is uniform scaling.
+#[allow(clippy::too_many_arguments)]
+fn refine_near_native(
+    proc: &Gray,
+    base: &Gray,
+    mask_base: Option<&Gray>,
+    cand: &Detection,
+    ox: i64,
+    oy: i64,
+    label: &str,
+    threshold: f64,
+    factor: f64,
+) -> Option<Detection> {
+    const WIDTH_DELTAS: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
+    const HEIGHT_DELTAS: [i64; 5] = [0, 1, -1, 2, -2];
+
+    for &dh in &HEIGHT_DELTAS {
+        for &dw in &WIDTH_DELTAS {
+            let mut variant = cand.clone();
+            variant.w = (cand.w + dw).max(2);
+            variant.h = (cand.h + dh).max(2);
+            if let Some(hit) = refine(
+                proc, base, mask_base, &variant, ox, oy, label, threshold, factor,
+            ) {
+                return Some(hit);
+            }
+        }
+    }
+    None
 }
 
 /// Confirm one nomination at native resolution, in a window around where the
@@ -445,15 +659,23 @@ fn refine_slack(side: i64, factor: f64) -> i64 {
 /// made from a three-pixel-tall smear is worse than no nomination at all.
 fn coarse_factor(sw: i64, sh: i64, tpl_min_side: usize) -> f64 {
     let area = (sw.max(1) as f64) * (sh.max(1) as f64);
-    let floor =
-        (COARSE_MIN_SIDE as f64 / tpl_min_side.max(1) as f64).min(COARSE_MAX_FACTOR);
-    (COARSE_TARGET_PX / area).sqrt().clamp(floor, COARSE_MAX_FACTOR)
+    let floor = (COARSE_MIN_SIDE as f64 / tpl_min_side.max(1) as f64).min(COARSE_MAX_FACTOR);
+    (COARSE_TARGET_PX / area)
+        .sqrt()
+        .clamp(floor, COARSE_MAX_FACTOR)
 }
 
 /// The template and its mask, resized to the size a confirmed detection claims.
 fn native_pair(base: &Gray, mask: Option<&Gray>, tw: usize, th: usize) -> (Gray, Option<Gray>) {
-    let interp = if tw < base.w { Interp::Area } else { Interp::Linear };
-    (resize(base, tw, th, interp), mask.map(|m| resize(m, tw, th, Interp::Nearest)))
+    let interp = if tw < base.w {
+        Interp::Area
+    } else {
+        Interp::Linear
+    };
+    (
+        resize(base, tw, th, interp),
+        mask.map(|m| resize(m, tw, th, Interp::Nearest)),
+    )
 }
 
 /// The pixel-product a correlation is linear in: output positions times
@@ -475,9 +697,9 @@ fn suppress_overlaps(mut dets: Vec<Detection>) -> Vec<Detection> {
     let mut kept: Vec<Detection> = Vec::new();
     for d in dets {
         // Centres less than half a template apart cannot be two of anything.
-        let same = kept.iter().any(|k| {
-            (k.x - d.x).abs() * 2 < d.w.max(1) && (k.y - d.y).abs() * 2 < d.h.max(1)
-        });
+        let same = kept
+            .iter()
+            .any(|k| (k.x - d.x).abs() * 2 < d.w.max(1) && (k.y - d.y).abs() * 2 < d.h.max(1));
         if !same {
             kept.push(d);
         }
@@ -558,8 +780,32 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let inside = x >= 4 && y >= 4 && x + 4 < w && y + 4 < h;
-                let v = if inside { 40 + ((x * 13 + y * 7) % 180) as u8 } else { 12 };
+                let v = if inside {
+                    40 + ((x * 13 + y * 7) % 180) as u8
+                } else {
+                    12
+                };
                 g.set(x, y, v);
+            }
+        }
+        g
+    }
+
+    /// A flat, mostly-white UI button with dark glyph-like strokes. Unlike
+    /// `badge`, its histogram is intentionally nothing like the whole scene's:
+    /// this catches preprocessing that changes the same pixels differently
+    /// depending on whether they are equalised as a crop or as a full screen.
+    fn flat_button(w: usize, h: usize) -> Gray {
+        let mut g = Gray::from_vec(w, h, vec![245; w * h]);
+        let y0 = h / 3;
+        let y1 = h * 2 / 3;
+        for x in w / 4..w * 3 / 4 {
+            if x % 11 < 6 {
+                for y in y0..y1 {
+                    if y == y0 || y == y1 - 1 || x % 11 == 0 {
+                        g.set(x, y, 35);
+                    }
+                }
             }
         }
         g
@@ -578,13 +824,7 @@ mod tests {
     }
 
     /// The same scene with the patch in two places.
-    fn two_copies(
-        w: usize,
-        h: usize,
-        patch: &Gray,
-        a: (usize, usize),
-        b: (usize, usize),
-    ) -> Gray {
+    fn two_copies(w: usize, h: usize, patch: &Gray, a: (usize, usize), b: (usize, usize)) -> Gray {
         let mut g = scene(w, h, patch, a.0, a.1);
         paste(&mut g, patch, b.0, b.1);
         g
@@ -602,8 +842,14 @@ mod tests {
     fn the_ladder_starts_at_native_and_leaves_no_scale_far_from_a_rung() {
         let ladder = scale_ladder();
         assert_eq!(ladder[0], 1.0, "native scale is tried first");
-        assert!(ladder.contains(&SCALE_MIN) && ladder.contains(&SCALE_MAX), "{ladder:?}");
-        assert!(ladder.iter().all(|s| (SCALE_MIN..=SCALE_MAX).contains(s)), "{ladder:?}");
+        assert!(
+            ladder.contains(&SCALE_MIN) && ladder.contains(&SCALE_MAX),
+            "{ladder:?}"
+        );
+        assert!(
+            ladder.iter().all(|s| (SCALE_MIN..=SCALE_MAX).contains(s)),
+            "{ladder:?}"
+        );
 
         // Sorted, no two neighbours further apart than one rung: that bound is
         // what caps how far off a real scale can be from the nearest one tried.
@@ -617,7 +863,10 @@ mod tests {
         // scales first.
         let distance: Vec<f64> = ladder.iter().map(|s| (s.ln()).abs()).collect();
         let interior = &distance[..distance.len() - 2];
-        assert!(interior.windows(2).all(|p| p[1] >= p[0] - 1e-9), "{ladder:?}");
+        assert!(
+            interior.windows(2).all(|p| p[1] >= p[0] - 1e-9),
+            "{ladder:?}"
+        );
     }
 
     #[test]
@@ -639,7 +888,11 @@ mod tests {
             at(300, 100, 0.83),
         ]);
         assert_eq!(kept.len(), 2, "got {kept:?}");
-        assert_eq!((kept[0].x, kept[0].y), (102, 101), "the strongest of the cluster wins");
+        assert_eq!(
+            (kept[0].x, kept[0].y),
+            (102, 101),
+            "the strongest of the cluster wins"
+        );
         assert_eq!(kept[1].x, 300);
     }
 
@@ -687,7 +940,9 @@ mod tests {
                 noise.set(x, y, ((x * 31 + y * 17) % 255) as u8);
             }
         }
-        assert!(Matcher::new().robust(&noise, 0, 0, &tpl, "t", "t", 0.9).is_empty());
+        assert!(Matcher::new()
+            .robust(&noise, 0, 0, &tpl, "t", "t", 0.9)
+            .is_empty());
     }
 
     #[test]
@@ -720,8 +975,16 @@ mod tests {
         // of them, and only one, is how this test knows the sweep did not rerun.
         let second = m.robust(&img, 0, 0, &tpl, "t", "t", 0.75);
         assert_eq!(second.len(), 1, "the sweep ran again: {second:?}");
-        assert_eq!((second[0].w, second[0].h), (26, 20), "tier 0 correlates at native scale");
-        assert!((second[0].x - lx).abs() <= 2, "moved from {lx} to {}", second[0].x);
+        assert_eq!(
+            (second[0].w, second[0].h),
+            (26, 20),
+            "tier 0 correlates at native scale"
+        );
+        assert!(
+            (second[0].x - lx).abs() <= 2,
+            "moved from {lx} to {}",
+            second[0].x
+        );
 
         m.forget("t");
         assert!(!m.last.contains_key("t"));
@@ -752,7 +1015,9 @@ mod tests {
                 small.set(x, y, ((x * 7 + y * 11) % 200) as u8);
             }
         }
-        assert!(Matcher::new().robust(&small, 0, 0, &tpl, "t", "t", 0.7).is_empty());
+        assert!(Matcher::new()
+            .robust(&small, 0, 0, &tpl, "t", "t", 0.7)
+            .is_empty());
     }
 
     #[test]
@@ -777,16 +1042,81 @@ mod tests {
         let tpl = Template::from_gray(&patch);
         assert!(coarse_factor(1200, 800, tpl.w.min(tpl.h)) < COARSE_MAX_FACTOR);
 
-        let hits =
-            Matcher::new().robust(&scene(1200, 800, &patch, 700, 500), 0, 0, &tpl, "t", "t", 0.8);
+        let hits = Matcher::new().robust(
+            &scene(1200, 800, &patch, 700, 500),
+            0,
+            0,
+            &tpl,
+            "t",
+            "t",
+            0.8,
+        );
         assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].w, hits[0].h), (120, 40), "the native rung is the one that won");
+        assert_eq!(
+            (hits[0].w, hits[0].h),
+            (120, 40),
+            "the native rung is the one that won"
+        );
+        assert!(
+            hits[0].confidence >= 0.8,
+            "an exact cold match must satisfy the configured threshold, got {:?}",
+            hits[0]
+        );
         // Within a few pixels rather than on the pixel: this patch is a diagonal
         // ramp, and equalising a 1200x800 scene against a 120x40 crop moves its
         // correlation peak a little whatever the coarse pass does. The same
         // scene at half resolution is off by the same amount, so the tolerance
         // is the fixture's, not the wider search's.
-        assert!((hits[0].x - 760).abs() <= 8 && (hits[0].y - 520).abs() <= 8, "{:?}", hits[0]);
+        assert!(
+            (hits[0].x - 760).abs() <= 8 && (hits[0].y - 520).abs() <= 8,
+            "{:?}",
+            hits[0]
+        );
+    }
+
+    #[test]
+    fn a_flat_ui_target_keeps_its_confidence_on_a_cold_full_screen_scan() {
+        let patch = flat_button(175, 36);
+        let tpl = Template::from_gray(&patch);
+        let hits = Matcher::new().robust(
+            &scene(1200, 800, &patch, 700, 500),
+            0,
+            0,
+            &tpl,
+            "button",
+            "button",
+            0.8,
+        );
+        assert_eq!(hits.len(), 1, "the exact button was missed: {hits:?}");
+        assert!(
+            hits[0].confidence >= 0.8,
+            "the exact button fell below its configured threshold: {:?}",
+            hits[0]
+        );
+    }
+
+    #[test]
+    fn a_flat_ui_target_survives_small_capture_and_scale_drift() {
+        let patch = flat_button(175, 36);
+        let tpl = Template::from_gray(&patch);
+        // A repeated crop commonly differs by a pixel or two because the game
+        // window or DPI rounding moved. It is still the same target.
+        let drifted = resize(&patch, 178, 37, Interp::Linear);
+        let hits = Matcher::new().robust(
+            &scene(1200, 800, &drifted, 700, 500),
+            0,
+            0,
+            &tpl,
+            "button",
+            "button",
+            0.8,
+        );
+        assert!(!hits.is_empty(), "the slightly resized button was missed");
+        assert!(
+            (hits[0].x - (700 + 89)).abs() <= 6 && (hits[0].y - (500 + 18)).abs() <= 6,
+            "the match moved away from the button: {:?}",
+            hits[0]
+        );
     }
 
     /// What a full-screen Watch trigger actually costs, present and absent.
@@ -840,7 +1170,9 @@ mod tests {
                 inset.set(x, y, 190);
             }
         }
-        let mask = Template::from_gray(&inset).mask.expect("a bordered crop should mask");
+        let mask = Template::from_gray(&inset)
+            .mask
+            .expect("a bordered crop should mask");
         assert_eq!(mask.at(20, 20), 255, "the element itself must be kept");
         assert_eq!(mask.at(1, 1), 0, "the surround must be cleared");
     }

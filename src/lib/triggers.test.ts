@@ -172,6 +172,19 @@ describe("plain-language helpers", () => {
     expect(isTriggerReady({ ...txt, ocr_text: "Play" })).toBe(true);
   });
 
+  it("requires the selected key instead of silently turning Press into Click", () => {
+    const press = {
+      ...newTriggerDraft(),
+      method: "template",
+      template_path: "button.png",
+      action: "key",
+      key: "   ",
+    };
+    expect(isTriggerReady(press)).toBe(false);
+    expect(isTriggerReady({ ...press, key: " space " })).toBe(true);
+    expect(guardFromDraft({ ...press, key: " space " }).key).toBe("space");
+  });
+
   it("mints unique ids for fresh drafts", () => {
     expect(newTriggerDraft().id).not.toBe(newTriggerDraft().id);
   });

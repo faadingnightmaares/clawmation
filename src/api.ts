@@ -483,6 +483,10 @@ export function addTemplateImage(): Promise<CaptureTemplateResult> {
   return invoke<CaptureTemplateResult>("add_template_image");
 }
 
+export function saveTemplateUpload(dataBase64: string): Promise<CaptureTemplateResult> {
+  return invoke<CaptureTemplateResult>("save_template_upload", { dataBase64 });
+}
+
 /** A surgical capture: the saved crop `path`, a base64 PNG `thumb` with the drawn
  * strokes rendered on it, the crop size, and the click strokes as crop-relative
  * offsets; `click_lines` is every stroke, `click_line`/`offset` mirror the first
@@ -678,6 +682,8 @@ export type GraphNodeType =
   | "branch"
   | "loop"
   | "sub_macro"
+  | "chain"
+  | "note"
   | "stop";
 
 export interface GraphNode {
@@ -712,19 +718,47 @@ export interface NodeGraphValidation {
 
 export interface NodeGraphLoadResult extends OpResult {
   graph?: NodeGraph;
-  source?: "saved" | "imported";
+  source?: "saved";
 }
 
-export function nodeGraphLoad(macroName: string): Promise<NodeGraphLoadResult> {
-  return invoke<NodeGraphLoadResult>("node_graph_load", { macroName });
+export interface NodeLoopItem {
+  name: string;
+  nodes: number;
+  valid_file: boolean;
+  updated_at?: number;
+}
+
+export interface NodeLoopResult extends OpResult {
+  name?: string;
+  graph?: NodeGraph;
+}
+
+export function nodeGraphList(): Promise<NodeLoopItem[]> {
+  return invoke<NodeLoopItem[]>("node_graph_list");
+}
+
+export function nodeGraphCreate(name = "Loop"): Promise<NodeLoopResult> {
+  return invoke<NodeLoopResult>("node_graph_create", { name });
+}
+
+export function nodeGraphLoad(loopName: string): Promise<NodeGraphLoadResult> {
+  return invoke<NodeGraphLoadResult>("node_graph_load", { loopName });
+}
+
+export function nodeGraphRename(oldName: string, newName: string): Promise<NodeLoopResult> {
+  return invoke<NodeLoopResult>("node_graph_rename", { oldName, newName });
+}
+
+export function nodeGraphDelete(name: string): Promise<OpResult> {
+  return invoke<OpResult>("node_graph_delete", { name });
 }
 
 export function nodeGraphValidate(graph: NodeGraph): Promise<NodeGraphValidation> {
   return invoke<NodeGraphValidation>("node_graph_validate", { graph });
 }
 
-export function nodeGraphSave(macroName: string, graph: NodeGraph): Promise<OpResult> {
-  return invoke<OpResult>("node_graph_save", { macroName, graph });
+export function nodeGraphSave(loopName: string, graph: NodeGraph): Promise<OpResult> {
+  return invoke<OpResult>("node_graph_save", { loopName, graph });
 }
 
 export function nodeGraphRun(graph: NodeGraph): Promise<OpResult> {

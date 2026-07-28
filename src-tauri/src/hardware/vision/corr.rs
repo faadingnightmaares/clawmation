@@ -93,6 +93,45 @@ impl Scores {
         }
         best.map(|(i, v)| (i % self.w, i / self.w, v))
     }
+
+    /// The strongest distinct local maxima at or above `threshold`.
+    ///
+    /// A single `best()` is brittle for a full-screen search: one look-alike can
+    /// win the cheap coarse pass, fail native confirmation, and hide the real
+    /// target at the same scale. Returning a tiny set of peaks lets the native
+    /// pass judge each plausible location while still avoiding the dense cloud
+    /// of adjacent scores around one correlation maximum.
+    pub fn peaks(&self, threshold: f32, limit: usize) -> Vec<(usize, usize, f32)> {
+        if limit == 0 || self.w == 0 || self.h == 0 {
+            return Vec::new();
+        }
+        let mut peaks = Vec::new();
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let i = y * self.w + x;
+                let v = self.data[i];
+                if v < threshold {
+                    continue;
+                }
+                let x0 = x.saturating_sub(1);
+                let y0 = y.saturating_sub(1);
+                let x1 = (x + 1).min(self.w - 1);
+                let y1 = (y + 1).min(self.h - 1);
+                let is_peak = (y0..=y1).all(|ny| {
+                    (x0..=x1).all(|nx| {
+                        let ni = ny * self.w + nx;
+                        ni == i || self.data[ni] < v || (self.data[ni] == v && ni > i)
+                    })
+                });
+                if is_peak {
+                    peaks.push((x, y, v));
+                }
+            }
+        }
+        peaks.sort_by(|a, b| b.2.total_cmp(&a.2));
+        peaks.truncate(limit);
+        peaks
+    }
 }
 
 impl Searched {
@@ -100,7 +139,14 @@ impl Searched {
         let (w, h) = (img.w, img.h);
         let px: Vec<i32> = img.data.iter().map(|&v| i32::from(v)).collect();
         let px2: Vec<i32> = px.iter().map(|&v| v * v).collect();
-        Self { w, h, sum: integral(&px, w, h), sum2: integral(&px2, w, h), px, px2 }
+        Self {
+            w,
+            h,
+            sum: integral(&px, w, h),
+            sum2: integral(&px2, w, h),
+            px,
+            px2,
+        }
     }
 
     /// `TM_CCOEFF_NORMED` over the valid region. `None` when the template cannot
@@ -130,7 +176,11 @@ impl Searched {
         if t_var < f64::EPSILON {
             // A featureless template correlates with everything equally; OpenCV
             // says so by returning all ones rather than dividing by zero.
-            return Some(Scores { w: ow, h: oh, data: vec![1.0; ow * oh] });
+            return Some(Scores {
+                w: ow,
+                h: oh,
+                data: vec![1.0; ow * oh],
+            });
         }
         let t_norm = t_var.sqrt();
         let t_mean = t_sum / area;
@@ -161,13 +211,22 @@ impl Searched {
         if m_count < 1.0 {
             return None;
         }
-        let mt: Vec<i32> = templ.data.iter().zip(&m).map(|(&t, &k)| i32::from(t) * k).collect();
+        let mt: Vec<i32> = templ
+            .data
+            .iter()
+            .zip(&m)
+            .map(|(&t, &k)| i32::from(t) * k)
+            .collect();
 
         let tm_sum: f64 = mt.iter().map(|&v| f64::from(v)).sum();
         let tm_sum2: f64 = mt.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
         let t_var = tm_sum2 - tm_sum * tm_sum / m_count;
         if t_var < f64::EPSILON {
-            return Some(Scores { w: ow, h: oh, data: vec![1.0; ow * oh] });
+            return Some(Scores {
+                w: ow,
+                h: oh,
+                data: vec![1.0; ow * oh],
+            });
         }
         let t_norm = t_var.sqrt();
         let t_mean = tm_sum / m_count;
@@ -309,14 +368,18 @@ mod tests {
         let base: Vec<u8> = (0..6 * 6).map(|i| ((i * 5) % 250) as u8).collect();
         let img = gray(6, 6, &base);
         let inverted: Vec<u8> = base.iter().map(|&v| 255 - v).collect();
-        let s = Searched::new(&img).ccoeff_normed(&gray(6, 6, &inverted), None).unwrap();
+        let s = Searched::new(&img)
+            .ccoeff_normed(&gray(6, 6, &inverted), None)
+            .unwrap();
         assert!((s.data[0] + 1.0).abs() < 1e-4, "scored {}", s.data[0]);
     }
 
     #[test]
     fn a_flat_template_scores_one_everywhere() {
         let img = gray(5, 5, &(0..25).map(|i| (i * 9) as u8).collect::<Vec<_>>());
-        let s = Searched::new(&img).ccoeff_normed(&gray(2, 2, &[7, 7, 7, 7]), None).unwrap();
+        let s = Searched::new(&img)
+            .ccoeff_normed(&gray(2, 2, &[7, 7, 7, 7]), None)
+            .unwrap();
         assert!(s.data.iter().all(|&v| v == 1.0));
     }
 
@@ -329,28 +392,60 @@ mod tests {
         let mask = gray(2, 2, &[255, 0, 255, 0]);
         let searched = Searched::new(&img);
         let masked = searched.ccoeff_normed(&templ, Some(&mask)).unwrap();
-        assert!((masked.data[0] - 1.0).abs() < 1e-4, "masked scored {}", masked.data[0]);
+        assert!(
+            (masked.data[0] - 1.0).abs() < 1e-4,
+            "masked scored {}",
+            masked.data[0]
+        );
         let plain = searched.ccoeff_normed(&templ, None).unwrap();
-        assert!(plain.data[0] < 0.95, "unmasked should not match: {}", plain.data[0]);
+        assert!(
+            plain.data[0] < 0.95,
+            "unmasked should not match: {}",
+            plain.data[0]
+        );
     }
 
     #[test]
     fn a_template_larger_than_the_search_area_is_refused() {
         let img = gray(3, 3, &[0; 9]);
-        assert!(Searched::new(&img).ccoeff_normed(&gray(4, 2, &[0; 8]), None).is_none());
+        assert!(Searched::new(&img)
+            .ccoeff_normed(&gray(4, 2, &[0; 8]), None)
+            .is_none());
     }
 
     #[test]
     fn above_returns_hits_in_row_major_order() {
-        let s = Scores { w: 3, h: 2, data: vec![0.1, 0.9, 0.2, 0.8, 0.05, 0.95] };
+        let s = Scores {
+            w: 3,
+            h: 2,
+            data: vec![0.1, 0.9, 0.2, 0.8, 0.05, 0.95],
+        };
         let hits: Vec<(usize, usize)> = s.above(0.8).into_iter().map(|(x, y, _)| (x, y)).collect();
         assert_eq!(hits, vec![(1, 0), (0, 1), (2, 1)]);
     }
 
     #[test]
     fn best_breaks_ties_towards_the_first_position() {
-        let s = Scores { w: 3, h: 2, data: vec![0.2, 0.9, 0.5, 0.9, 0.1, 0.9] };
+        let s = Scores {
+            w: 3,
+            h: 2,
+            data: vec![0.2, 0.9, 0.5, 0.9, 0.1, 0.9],
+        };
         assert_eq!(s.best().map(|(x, y, _)| (x, y)), Some((1, 0)));
+    }
+
+    #[test]
+    fn peaks_keep_distinct_candidates_without_adjacent_duplicates() {
+        let s = Scores {
+            w: 5,
+            h: 3,
+            data: vec![
+                0.1, 0.80, 0.79, 0.1, 0.1, //
+                0.1, 0.78, 0.77, 0.1, 0.91, //
+                0.1, 0.1, 0.1, 0.1, 0.89,
+            ],
+        };
+        assert_eq!(s.peaks(0.7, 4), vec![(4, 1, 0.91), (1, 0, 0.80)]);
     }
 
     #[test]
@@ -366,7 +461,11 @@ mod tests {
                     direct += i64::from(px[j * w + i]);
                 }
             }
-            assert_eq!(box_sum(&sat, w, x, y, bw, bh), direct, "box {x},{y} {bw}x{bh}");
+            assert_eq!(
+                box_sum(&sat, w, x, y, bw, bh),
+                direct,
+                "box {x},{y} {bw}x{bh}"
+            );
         }
     }
 }

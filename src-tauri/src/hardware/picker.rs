@@ -126,7 +126,11 @@ fn rect_of(sx: i32, sy: i32, cx: i32, cy: i32) -> (i32, i32, i32, i32) {
 
 /// The frame darkened to [`DARKEN`], the "outside the selection" backdrop.
 fn darkened(frame: &Frame) -> Dib {
-    let bgr: Vec<u8> = frame.bgr.iter().map(|&v| (f32::from(v) * DARKEN) as u8).collect();
+    let bgr: Vec<u8> = frame
+        .bgr
+        .iter()
+        .map(|&v| (f32::from(v) * DARKEN) as u8)
+        .collect();
     Dib::from_bgr(&bgr, frame.width, frame.height)
 }
 
@@ -143,7 +147,10 @@ fn grab_screen() -> Option<Frame> {
 }
 
 fn unix_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ── Colour sampler ───────────────────────────────────────────────────────────
@@ -160,7 +167,13 @@ struct ColorScene {
 impl ColorScene {
     fn new(frame: Frame) -> Self {
         let bits = dib_of(&frame);
-        Self { frame, bits, mx: 0, my: 0, picked: None }
+        Self {
+            frame,
+            bits,
+            mx: 0,
+            my: 0,
+            picked: None,
+        }
     }
 
     /// HSV at `(x, y)`, averaged over the surrounding 5x5 so a single stray
@@ -185,7 +198,11 @@ impl ColorScene {
         let (h_avg, s_avg, v_avg) = ((hs / 25) as i32, (ss / 25) as i32, (vs / 25) as i32);
 
         let i = (y as usize * w as usize + x as usize) * 3;
-        let (b, g, r) = (self.frame.bgr[i], self.frame.bgr[i + 1], self.frame.bgr[i + 2]);
+        let (b, g, r) = (
+            self.frame.bgr[i],
+            self.frame.bgr[i + 1],
+            self.frame.bgr[i + 2],
+        );
 
         let (h_tol, s_tol, v_tol) = (10, 30, 30);
         self.picked = Some(json!({
@@ -532,7 +549,12 @@ impl SurgicalScene {
 
     fn nudge(&mut self, dx: i32, dy: i32) {
         let (x, y, w, h) = self.rect();
-        self.set_rect(((x + dx).clamp(0, self.w - w), (y + dy).clamp(0, self.h - h), w, h));
+        self.set_rect((
+            (x + dx).clamp(0, self.w - w),
+            (y + dy).clamp(0, self.h - h),
+            w,
+            h,
+        ));
     }
 
     fn enter_target_phase(&mut self, win: &Window) {
@@ -540,7 +562,9 @@ impl SurgicalScene {
         let x = x.clamp(0, self.w - 1);
         let y = y.clamp(0, self.h - 1);
         let (w, h) = (w.min(self.w - x), h.min(self.h - y));
-        let Some(crop) = self.frame.crop(x, y, w, h) else { return };
+        let Some(crop) = self.frame.crop(x, y, w, h) else {
+            return;
+        };
 
         let (sw, sh) = overlay::screen_size();
         let zoom = zoom_for(w, h, sw, sh);
@@ -613,7 +637,9 @@ impl SurgicalScene {
 
     /// Phase-2 commit: the crop is already fixed, so only the strokes are new.
     fn commit(&mut self) -> Flow {
-        let Some(t) = &self.target else { return Flow::Idle };
+        let Some(t) = &self.target else {
+            return Flow::Idle;
+        };
         self.commit_rect(t.rect)
     }
 
@@ -844,9 +870,15 @@ impl SurgicalScene {
             },
 
             Event::Wheel { delta } => {
-                let Some(t) = &mut self.target else { return Flow::Idle };
+                let Some(t) = &mut self.target else {
+                    return Flow::Idle;
+                };
                 let step = (t.zoom / 4).max(1);
-                t.zoom = if delta > 0 { (t.zoom + step).min(48) } else { (t.zoom - step).max(4) };
+                t.zoom = if delta > 0 {
+                    (t.zoom + step).min(48)
+                } else {
+                    (t.zoom - step).max(4)
+                };
                 self.rebuild_zoom();
                 Flow::Repaint
             }
@@ -860,7 +892,11 @@ impl SurgicalScene {
         let (x, y, w, h) = self.rect();
         let drawn = (self.dragging && w > 0 && h > 0) || self.mode == Mode::Adjust;
         // Before there is a box, the lasso shows what a click would take.
-        let shown = if drawn { Some((x, y, w, h)) } else { self.hover.rect() };
+        let shown = if drawn {
+            Some((x, y, w, h))
+        } else {
+            self.hover.rect()
+        };
         let Some((x, y, w, h)) = shown else { return };
         if let Some(crop) = self.frame.crop(x, y, w, h) {
             p.image(&dib_of(&crop), x, y);
@@ -911,7 +947,16 @@ impl SurgicalScene {
         let centre = |cx: i32, cy: i32| (ox + cx * zoom + zoom / 2, oy + cy * zoom + zoom / 2);
         let live = self
             .drawing
-            .then(|| self.line_start.map(|s| [s.0, s.1, self.line_end.unwrap_or(s).0, self.line_end.unwrap_or(s).1]))
+            .then(|| {
+                self.line_start.map(|s| {
+                    [
+                        s.0,
+                        s.1,
+                        self.line_end.unwrap_or(s).0,
+                        self.line_end.unwrap_or(s).1,
+                    ]
+                })
+            })
             .flatten();
         for s in self.strokes.iter().copied().chain(live) {
             let (x1, y1) = centre(s[0], s[1]);
@@ -933,7 +978,12 @@ impl SurgicalScene {
             }
         }
 
-        p.text(ox + disp_w - 36, oy + disp_h + 4, &format!("{zoom}x"), ZOOM_TEXT);
+        p.text(
+            ox + disp_w - 36,
+            oy + disp_h + 4,
+            &format!("{zoom}x"),
+            ZOOM_TEXT,
+        );
         self.paint_label(p, sw, oy, disp_h, cw, ch);
     }
 
@@ -1008,7 +1058,9 @@ fn no_capture() -> Value {
 
 /// Click a point on screen; returns its HSV range, BGR and hex.
 pub fn sample_color() -> Value {
-    let Some(frame) = grab_screen() else { return no_capture() };
+    let Some(frame) = grab_screen() else {
+        return no_capture();
+    };
     match overlay::run(
         "ClawmationColorSampler",
         "Clawmation: Pick Color",
@@ -1035,7 +1087,9 @@ pub fn sample_color() -> Value {
 /// works. A frame-relative percentage stays correct on any monitor layout or DPI
 /// scale; the editor stores it directly.
 pub fn pick_region() -> Value {
-    let Some(frame) = grab_screen() else { return no_capture() };
+    let Some(frame) = grab_screen() else {
+        return no_capture();
+    };
     let (fw, fh) = (frame.width as i32, frame.height as i32);
     match run_region(frame) {
         None => cancelled(),
@@ -1072,14 +1126,23 @@ fn region_pct(x: i32, y: i32, w: i32, h: i32, fw: i32, fh: i32) -> [f64; 4] {
 }
 
 fn run_region(frame: Frame) -> Option<(i32, i32, i32, i32)> {
-    overlay::run("ClawmationRegionPicker", REGION_HINT, RegionScene::new(frame), REGION_TIMEOUT)
+    overlay::run(
+        "ClawmationRegionPicker",
+        REGION_HINT,
+        RegionScene::new(frame),
+        REGION_TIMEOUT,
+    )
 }
 
 /// Drag a rectangle and save it as a template PNG.
 pub fn capture_template(templates_dir: &Path) -> Value {
-    let Some(frame) = grab_screen() else { return no_capture() };
+    let Some(frame) = grab_screen() else {
+        return no_capture();
+    };
     let (fw, fh) = (frame.width as i32, frame.height as i32);
-    let Some((x, y, w, h)) = run_region(frame.clone()) else { return cancelled() };
+    let Some((x, y, w, h)) = run_region(frame.clone()) else {
+        return cancelled();
+    };
 
     let (x, y) = (x.clamp(0, fw - 1), y.clamp(0, fh - 1));
     let (w, h) = (w.min(fw - x), h.min(fh - y));
@@ -1104,14 +1167,18 @@ pub fn capture_template(templates_dir: &Path) -> Value {
 
 /// Box an element, then draw the exact pixels a click must land on.
 pub fn surgical_capture(templates_dir: &Path) -> Value {
-    let Some(frame) = grab_screen() else { return no_capture() };
+    let Some(frame) = grab_screen() else {
+        return no_capture();
+    };
     let picked = overlay::run(
         "ClawmationSurgicalPicker",
         SURGICAL_HINT,
         SurgicalScene::new(frame.clone()),
         SURGICAL_TIMEOUT,
     );
-    let Some((x, y, w, h, strokes)) = picked else { return cancelled() };
+    let Some((x, y, w, h, strokes)) = picked else {
+        return cancelled();
+    };
     let Some(crop) = frame.crop(x, y, w, h) else {
         return json!({ "ok": false, "error": "Empty surgical crop" });
     };
@@ -1161,10 +1228,55 @@ pub fn import_template(templates_dir: &Path, file: &Path) -> Value {
     }
 }
 
+/// Import an image delivered over the webview's drop target. This follows the
+/// same validation and PNG-normalisation path as [`import_template`] without
+/// needing a temporary source file.
+pub fn import_template_bytes(templates_dir: &Path, bytes: &[u8]) -> Value {
+    const MAX_PIXELS: u64 = 50_000_000;
+    let decoded = match ::image::load_from_memory(bytes) {
+        Ok(image) => image,
+        Err(error) => {
+            return json!({ "ok": false, "error": format!("Could not read image: {error}") })
+        }
+    };
+    let rgb = decoded.to_rgb8();
+    let (w, h) = (rgb.width(), rgb.height());
+    if w < 8 || h < 8 {
+        return json!({ "ok": false, "error": "Image too small" });
+    }
+    if u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return json!({ "ok": false, "error": "Image dimensions are too large" });
+    }
+    let mut bgr = Vec::with_capacity((w * h * 3) as usize);
+    for pixel in rgb.pixels() {
+        bgr.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    let image = Frame {
+        bgr,
+        width: w,
+        height: h,
+    };
+    match write_template(templates_dir, "template", &image) {
+        Err(error) => json!({ "ok": false, "error": error }),
+        Ok(path) => json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "w": w,
+            "h": h,
+            "thumb": preview::thumbnail(&image, 96),
+        }),
+    }
+}
+
 /// Save `crop` as `<prefix>_<unix>_<w>x<h>.png` under `dir`.
 fn write_template(dir: &Path, prefix: &str, crop: &Frame) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-    let name = format!("{prefix}_{}_{}x{}.png", unix_seconds(), crop.width, crop.height);
+    let name = format!(
+        "{prefix}_{}_{}x{}.png",
+        unix_seconds(),
+        crop.width,
+        crop.height
+    );
     let path = dir.join(name);
     preview::save_png(&path, crop)
         .map(|()| path)
@@ -1257,7 +1369,7 @@ mod tests {
         assert_eq!(offset_at(110, 100, 100, 100, 10, 8, 8), Some((1, 0)));
         assert_eq!(offset_at(179, 179, 100, 100, 10, 8, 8), Some((7, 7)));
         assert_eq!(offset_at(180, 100, 100, 100, 10, 8, 8), None); // past the right edge
-        // Truncating division would fold this onto row 0 instead of rejecting it.
+                                                                   // Truncating division would fold this onto row 0 instead of rejecting it.
         assert_eq!(offset_at(105, 99, 100, 100, 10, 8, 8), None);
         assert_eq!(offset_at(-1, 100, 100, 100, 10, 8, 8), None); // no cursor yet
     }
@@ -1265,17 +1377,33 @@ mod tests {
     #[test]
     fn magnification_replicates_pixels_exactly() {
         // Two pixels side by side, blown up 3x.
-        let crop = Frame { bgr: vec![1, 2, 3, 4, 5, 6], width: 2, height: 1 };
+        let crop = Frame {
+            bgr: vec![1, 2, 3, 4, 5, 6],
+            width: 2,
+            height: 1,
+        };
         let dib = magnified(&crop, 3);
         // 6 wide, 3 tall, BGRA: first three columns are pixel 0, next three are 1.
-        let row: Vec<u8> = (0..6).flat_map(|c| if c < 3 { [1, 2, 3, 255] } else { [4, 5, 6, 255] }).collect();
+        let row: Vec<u8> = (0..6)
+            .flat_map(|c| {
+                if c < 3 {
+                    [1, 2, 3, 255]
+                } else {
+                    [4, 5, 6, 255]
+                }
+            })
+            .collect();
         let expected: Vec<u8> = row.repeat(3);
         assert_eq!(dib.bytes(), expected.as_slice());
     }
 
     #[test]
     fn darkening_scales_every_channel_toward_black() {
-        let f = Frame { bgr: vec![0, 100, 255], width: 1, height: 1 };
+        let f = Frame {
+            bgr: vec![0, 100, 255],
+            width: 1,
+            height: 1,
+        };
         // 0.42 * 100 = 42.0, 0.42 * 255 = 107.1 -> truncated like numpy's astype.
         assert_eq!(darkened(&f).bytes(), &[0, 42, 107, 255]);
     }
@@ -1297,7 +1425,14 @@ mod tests {
                 bgr[i..i + 3].copy_from_slice(&[200, 160, 90]);
             }
         }
-        (Frame { bgr, width: fw as u32, height: fh as u32 }, button)
+        (
+            Frame {
+                bgr,
+                width: fw as u32,
+                height: fh as u32,
+            },
+            button,
+        )
     }
 
     #[test]
@@ -1306,11 +1441,21 @@ mod tests {
         let mut scene = RegionScene::new(frame);
         let win = Window::detached();
 
-        assert_eq!(scene.event(Event::MouseMove { x: 150, y: 95 }, &win), Flow::Repaint);
-        assert_eq!(scene.hover.rect(), Some(button), "nothing was offered to click");
+        assert_eq!(
+            scene.event(Event::MouseMove { x: 150, y: 95 }, &win),
+            Flow::Repaint
+        );
+        assert_eq!(
+            scene.hover.rect(),
+            Some(button),
+            "nothing was offered to click"
+        );
 
         scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
-        assert_eq!(scene.event(Event::LeftUp { x: 150, y: 95 }, &win), Flow::Close);
+        assert_eq!(
+            scene.event(Event::LeftUp { x: 150, y: 95 }, &win),
+            Flow::Close
+        );
         assert_eq!(scene.take(), Some(button));
     }
 
@@ -1323,7 +1468,10 @@ mod tests {
         scene.event(Event::MouseMove { x: 150, y: 95 }, &win);
         scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
         scene.event(Event::MouseMove { x: 260, y: 200 }, &win);
-        assert_eq!(scene.event(Event::LeftUp { x: 260, y: 200 }, &win), Flow::Close);
+        assert_eq!(
+            scene.event(Event::LeftUp { x: 260, y: 200 }, &win),
+            Flow::Close
+        );
         let picked = scene.take().expect("the drag");
         assert_eq!(picked, (150, 95, 110, 105));
         assert_ne!(picked, button);
@@ -1339,7 +1487,10 @@ mod tests {
         assert_eq!(scene.hover.rect(), None);
         scene.event(Event::LeftDown { x: 20, y: 20 }, &win);
         // Repaint, not Close: the overlay stays up so the user can try again.
-        assert_eq!(scene.event(Event::LeftUp { x: 20, y: 20 }, &win), Flow::Repaint);
+        assert_eq!(
+            scene.event(Event::LeftUp { x: 20, y: 20 }, &win),
+            Flow::Repaint
+        );
         assert_eq!(scene.take(), None);
     }
 
@@ -1351,7 +1502,10 @@ mod tests {
 
         scene.event(Event::MouseMove { x: 150, y: 95 }, &win);
         scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
-        assert_eq!(scene.event(Event::LeftUp { x: 150, y: 95 }, &win), Flow::Repaint);
+        assert_eq!(
+            scene.event(Event::LeftUp { x: 150, y: 95 }, &win),
+            Flow::Repaint
+        );
 
         // The drag phase is skipped entirely, and the box is the control's.
         assert!(scene.mode == Mode::Adjust);
@@ -1367,7 +1521,16 @@ mod tests {
         scene.event(Event::MouseMove { x: 150, y: 95 }, &win);
         scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
         scene.event(Event::LeftUp { x: 150, y: 95 }, &win);
-        assert_eq!(scene.event(Event::Key { vk: VK_RETURN, shift: false }, &win), Flow::Close);
+        assert_eq!(
+            scene.event(
+                Event::Key {
+                    vk: VK_RETURN,
+                    shift: false
+                },
+                &win
+            ),
+            Flow::Close
+        );
 
         assert!(scene.target.is_none(), "the pixel editor was opened anyway");
         let (x, y, w, h, strokes) = scene.take().expect("the snap");
@@ -1386,7 +1549,16 @@ mod tests {
         scene.event(Event::MouseMove { x: 150, y: 95 }, &win);
         scene.event(Event::LeftDown { x: 150, y: 95 }, &win);
         scene.event(Event::LeftUp { x: 150, y: 95 }, &win);
-        assert_eq!(scene.event(Event::Key { vk: VK_D, shift: false }, &win), Flow::Repaint);
+        assert_eq!(
+            scene.event(
+                Event::Key {
+                    vk: VK_D,
+                    shift: false
+                },
+                &win
+            ),
+            Flow::Repaint
+        );
 
         let target = scene.target.as_ref().expect("the pixel editor");
         assert_eq!(target.rect, button);
@@ -1498,6 +1670,29 @@ mod tests {
     }
 
     #[test]
+    fn import_template_bytes_accepts_a_dropped_image() {
+        let dir = temp_templates("import_bytes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let frame = Frame {
+            width: 12,
+            height: 10,
+            bgr: vec![120; 12 * 10 * 3],
+        };
+        let source = dir.join("source.png");
+        preview::save_png(&source, &frame).unwrap();
+        let bytes = std::fs::read(source).unwrap();
+
+        let result = import_template_bytes(&dir, &bytes);
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["w"], 12);
+        assert_eq!(result["h"], 10);
+        assert!(Path::new(result["path"].as_str().unwrap()).exists());
+        assert!(!result["thumb"].as_str().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     #[ignore = "opens a real fullscreen overlay and drags with the user's cursor"]
     fn live_region_picker_returns_the_dragged_rectangle() {
         let (sw, sh) = overlay::screen_size();
@@ -1533,11 +1728,17 @@ mod tests {
         assert!(path.exists(), "{} was not written", path.display());
         assert_eq!(path.parent(), Some(dir.as_path()));
         assert!(
-            path.file_name().unwrap().to_string_lossy().ends_with("_120x90.png"),
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("_120x90.png"),
             "unexpected name {}",
             path.display()
         );
-        assert!(!res["thumb"].as_str().unwrap().is_empty(), "a base64 PNG thumbnail");
+        assert!(
+            !res["thumb"].as_str().unwrap().is_empty(),
+            "a base64 PNG thumbnail"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1581,7 +1782,10 @@ mod tests {
         }
         assert_eq!(res["click_line"], strokes[0]);
         assert_eq!(res["offset"], json!([stroke[0], stroke[1]]));
-        assert!(!res["thumb"].as_str().unwrap().is_empty(), "a base64 PNG thumbnail");
+        assert!(
+            !res["thumb"].as_str().unwrap().is_empty(),
+            "a base64 PNG thumbnail"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

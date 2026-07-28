@@ -1,5 +1,5 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
-import { Eye, Loader2, Plus, ScanEye, Square } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Plus, Refresh, Scanning, Square } from "iconoir-react";
 
 import {
   guardTest,
@@ -14,13 +14,16 @@ import {
 import { useStaggerIn } from "@/lib/anime";
 import { notify, notifyUndo } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import { VIEW_ICONS, VIEW_ICON_STROKE_WIDTH } from "@/nav";
 import { draftFromGuard, guardFromDraft, newWatchDraft, type TriggerDraft } from "@/lib/triggers";
 import { Button } from "@/components/ui/button";
-import { TriggerEditor } from "@/components/editors/TriggerEditor";
 import { TriggerRow } from "@/components/editors/TriggerRow";
+import { WatchTriggerEditor } from "@/components/editors/WatchTriggerEditor";
 import type { ViewProps } from "./types";
 
-export function Watch(_props: ViewProps) {
+const WatchIcon = VIEW_ICONS.vision;
+
+export function Watch({ active = true }: ViewProps) {
   const [triggers, setTriggers] = useState<Guard[]>([]);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
@@ -29,6 +32,7 @@ export function Watch(_props: ViewProps) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<TriggerDraft | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const initialized = useRef(false);
 
   const listRef = useStaggerIn<HTMLDivElement>(triggers.length);
 
@@ -36,9 +40,14 @@ export function Watch(_props: ViewProps) {
     setLoading(true);
     try {
       const r = await visionLoad();
-      setTriggers(r.ok ? r.triggers ?? [] : []);
+      const next = r.ok ? r.triggers ?? [] : [];
+      setTriggers(next);
+      if (next.length === 0) {
+        setEditing((current) => current ?? newWatchDraft());
+      }
     } catch {
       setTriggers([]);
+      setEditing((current) => current ?? newWatchDraft());
     } finally {
       setLoading(false);
     }
@@ -60,11 +69,15 @@ export function Watch(_props: ViewProps) {
   }, []);
 
   useEffect(() => {
-    void load();
+    if (!active) return;
+    if (!initialized.current) {
+      initialized.current = true;
+      void load();
+    }
     void refreshStatus();
     const id = setInterval(refreshStatus, 1000);
     return () => clearInterval(id);
-  }, [load, refreshStatus]);
+  }, [active, load, refreshStatus]);
 
   const enabledCount = triggers.filter((t) => t.enabled !== false).length;
 
@@ -174,20 +187,40 @@ export function Watch(_props: ViewProps) {
               </p>
             </div>
             <Button variant="ghost" size="icon" onClick={add} title="Add something to watch for">
-              <Plus className="size-5" />
+              <Plus className="size-5" strokeWidth={VIEW_ICON_STROKE_WIDTH} />
             </Button>
             <Button variant="outline" size="sm" onClick={stop} disabled={busy}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4 fill-current" />}
+              {busy ? (
+                <Refresh
+                  className="size-4 animate-spin"
+                  strokeWidth={VIEW_ICON_STROKE_WIDTH}
+                />
+              ) : (
+                <Square
+                  className="size-4"
+                  strokeWidth={VIEW_ICON_STROKE_WIDTH}
+                />
+              )}
               Stop
             </Button>
           </div>
         ) : triggers.length > 0 ? (
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="icon" onClick={add} title="Add something to watch for">
-              <Plus className="size-5" />
+              <Plus className="size-5" strokeWidth={VIEW_ICON_STROKE_WIDTH} />
             </Button>
             <Button size="lg" onClick={start} disabled={busy || enabledCount === 0}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <Eye className="size-4" />}
+              {busy ? (
+                <Refresh
+                  className="size-4 animate-spin"
+                  strokeWidth={VIEW_ICON_STROKE_WIDTH}
+                />
+              ) : (
+                <WatchIcon
+                  className="size-4"
+                  strokeWidth={VIEW_ICON_STROKE_WIDTH}
+                />
+              )}
               Start watching
             </Button>
           </div>
@@ -196,21 +229,22 @@ export function Watch(_props: ViewProps) {
 
       {/* ── A new trigger, written right on the page instead of in a drawer ── */}
       {editing && editingIsNew && (
-        <div className="overflow-hidden rounded-xl border border-primary/30 bg-card">
-          <TriggerEditor
-            initial={editing}
-            showSurgical
-            saveLabel="Save trigger"
-            onSave={saveTrigger}
-            onCancel={() => setEditing(null)}
-          />
-        </div>
+        <WatchTriggerEditor
+          initial={editing}
+          saveLabel="Save trigger"
+          onSave={saveTrigger}
+          onCancel={() => setEditing(null)}
+        />
       )}
 
       {/* ── The things being watched for ─────────────────────────────────── */}
       {loading ? (
         <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-          <Loader2 className="size-4 animate-spin" /> Loading…
+          <Refresh
+            className="size-4 animate-spin"
+            strokeWidth={VIEW_ICON_STROKE_WIDTH}
+          />{" "}
+          Loading…
         </div>
       ) : triggers.length ? (
         <div ref={listRef} className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
@@ -233,9 +267,8 @@ export function Watch(_props: ViewProps) {
                 />
                 {open && (
                   <div className="bg-muted/40">
-                    <TriggerEditor
+                    <WatchTriggerEditor
                       initial={draftFromGuard(t)}
-                      showSurgical
                       saveLabel="Save trigger"
                       onSave={saveTrigger}
                       onCancel={() => setEditing(null)}
@@ -249,7 +282,10 @@ export function Watch(_props: ViewProps) {
       ) : editing && editingIsNew ? null : (
         <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
           <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
-            <ScanEye className="size-7" />
+            <Scanning
+              className="size-7"
+              strokeWidth={VIEW_ICON_STROKE_WIDTH}
+            />
           </div>
           <div>
             <h2 className="text-lg font-semibold text-foreground">Nothing to watch for yet</h2>
@@ -263,7 +299,7 @@ export function Watch(_props: ViewProps) {
             <NumStep n={3}>Press Start and leave it running while you do something else.</NumStep>
           </ol>
           <Button size="lg" onClick={add}>
-            <Plus className="size-4" /> Add the first thing to watch for
+            <Plus className="size-4" strokeWidth={VIEW_ICON_STROKE_WIDTH} /> Add the first thing to watch for
           </Button>
         </div>
       )}

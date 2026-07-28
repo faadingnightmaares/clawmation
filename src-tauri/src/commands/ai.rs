@@ -7,6 +7,7 @@
 //! pure `*_in(dir, …)` unit-tested against a temp dir. `steps_run` and
 //! `steps_test` are runtime/vision work, so they delegate straight to [`Core`].
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -26,6 +27,74 @@ fn ai_dir() -> std::path::PathBuf {
 
 fn nodes_dir() -> std::path::PathBuf {
     paths::macros_dir().join("nodes")
+}
+
+#[tauri::command(async)]
+pub fn node_graph_list() -> Value {
+    node_graph_list_in(&nodes_dir())
+}
+
+#[tauri::command(async)]
+pub fn node_graph_create(state: State<AppState>, name: String) -> Value {
+    let result = node_graph_create_in(&nodes_dir(), &name);
+    if result["ok"] == json!(true) {
+        state.emit(
+            "ok",
+            format!(
+                "Created Loop '{}'",
+                result["name"].as_str().unwrap_or("Loop")
+            ),
+        );
+    }
+    result
+}
+
+#[tauri::command(async)]
+pub fn node_graph_rename(state: State<AppState>, old_name: String, new_name: String) -> Value {
+    let result = node_graph_rename_in(&nodes_dir(), &old_name, &new_name);
+    if result["ok"] == json!(true) {
+        state.emit(
+            "ok",
+            format!(
+                "Renamed Loop '{}' to '{}'",
+                old_name,
+                result["name"].as_str().unwrap_or(&new_name)
+            ),
+        );
+    }
+    result
+}
+
+#[tauri::command(async)]
+pub fn node_graph_delete(state: State<AppState>, name: String) -> Value {
+    let result = node_graph_delete_in(&nodes_dir(), &name);
+    if result["ok"] == json!(true) {
+        state.emit("ok", format!("Deleted Loop '{name}'"));
+    }
+    result
+}
+
+fn available_macro_names() -> HashSet<String> {
+    std::fs::read_dir(paths::macros_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+                .then(|| path.file_stem()?.to_str().map(str::to_string))
+                .flatten()
+        })
+        .collect()
+}
+
+fn available_chain_ids(state: &AppState) -> HashSet<String> {
+    state
+        .chains
+        .list()
+        .into_iter()
+        .map(|chain| chain.id)
+        .collect()
 }
 
 #[tauri::command(async)]
@@ -63,14 +132,19 @@ pub fn steps_test(state: State<AppState>, window: Window, step: Value) -> Value 
 }
 
 #[tauri::command(async)]
-pub fn node_graph_load(macro_name: String) -> Value {
-    node_graph_load_in(&paths::macros_dir(), &macro_name)
+pub fn node_graph_load(loop_name: String) -> Value {
+    node_graph_load_in(&paths::macros_dir(), &loop_name)
 }
 
 #[tauri::command(async)]
-pub fn node_graph_validate(graph: Value) -> Value {
+pub fn node_graph_validate(state: State<AppState>, graph: Value) -> Value {
     match serde_json::from_value::<NodeGraph>(graph) {
-        Ok(graph) => json!(graph.validate()),
+        Ok(graph) => {
+            json!(graph.validate_with_resources(
+                &available_macro_names(),
+                &available_chain_ids(state.inner()),
+            ))
+        }
         Err(error) => json!({
             "ok": false,
             "errors": [format!("Bad node graph: {error}")],
@@ -80,10 +154,22 @@ pub fn node_graph_validate(graph: Value) -> Value {
 }
 
 #[tauri::command(async)]
-pub fn node_graph_save(state: State<AppState>, macro_name: String, graph: Value) -> Value {
-    let result = node_graph_save_in(&nodes_dir(), &macro_name, graph);
+pub fn node_graph_save(state: State<AppState>, loop_name: String, graph: Value) -> Value {
+    let mut parsed = match serde_json::from_value::<NodeGraph>(graph.clone()) {
+        Ok(graph) => graph,
+        Err(error) => return json!({ "ok": false, "error": error.to_string() }),
+    };
+    parsed.name = loop_name.clone();
+    let report = parsed.validate_with_resources(
+        &available_macro_names(),
+        &available_chain_ids(state.inner()),
+    );
+    if !report.ok {
+        return json!({ "ok": false, "error": report.errors.join("; "), "validation": report });
+    }
+    let result = node_graph_save_in(&nodes_dir(), &loop_name, graph);
     if result["ok"] == json!(true) {
-        state.emit("ok", format!("Saved node graph '{macro_name}'"));
+        state.emit("ok", format!("Saved Loop '{loop_name}'"));
     } else {
         state.emit(
             "err",
@@ -98,7 +184,18 @@ pub fn node_graph_save(state: State<AppState>, macro_name: String, graph: Value)
 
 #[tauri::command(async)]
 pub fn node_graph_run(state: State<AppState>, graph: Value) -> Value {
-    state.core.node_graph_run(graph)
+    let parsed = match serde_json::from_value::<NodeGraph>(graph.clone()) {
+        Ok(graph) => graph,
+        Err(error) => return json!({ "ok": false, "error": format!("Bad node graph: {error}") }),
+    };
+    let report = parsed.validate_with_resources(
+        &available_macro_names(),
+        &available_chain_ids(state.inner()),
+    );
+    if !report.ok {
+        return json!({ "ok": false, "error": report.errors.join("; ") });
+    }
+    state.core.node_graph_run(graph, state.chains.list())
 }
 
 // ── Pure implementations (unit-tested against a temp dir) ────────────────────
@@ -160,36 +257,179 @@ fn steps_save_in(ai_dir: &Path, macro_name: &str, steps: Vec<Value>) -> Value {
     }
 }
 
-fn node_graph_load_in(macros_dir: &Path, macro_name: &str) -> Value {
-    let graph_path = macros_dir.join("nodes").join(format!("{macro_name}.json"));
-    if graph_path.exists() {
-        return match NodeGraph::load(&graph_path) {
-            Ok(graph) => json!({ "ok": true, "graph": graph, "source": "saved" }),
-            Err(error) => json!({ "ok": false, "error": error }),
-        };
+fn node_graph_load_in(macros_dir: &Path, loop_name: &str) -> Value {
+    let graph_path = macros_dir.join("nodes").join(format!("{loop_name}.json"));
+    if !graph_path.exists() {
+        return json!({ "ok": false, "error": "Loop not found" });
     }
+    match NodeGraph::load(&graph_path) {
+        Ok(mut graph) => {
+            graph.name = loop_name.to_string();
+            json!({ "ok": true, "graph": graph, "source": "saved" })
+        }
+        Err(error) => json!({ "ok": false, "error": error }),
+    }
+}
 
-    let steps_result = macro_to_steps_in(macros_dir, macro_name);
-    if steps_result["ok"] != json!(true) {
-        return steps_result;
+fn safe_loop_name(name: &str) -> Result<String, &'static str> {
+    let safe = name
+        .trim()
+        .chars()
+        .filter(|character| character.is_alphanumeric() || matches!(character, ' ' | '_' | '-'))
+        .take(80)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if safe.is_empty() {
+        return Err("Invalid Loop name");
     }
-    let steps: Result<Vec<Step>, _> = serde_json::from_value(steps_result["steps"].clone());
-    match steps {
-        Ok(steps) => json!({
-            "ok": true,
-            "graph": NodeGraph::from_steps(macro_name, steps),
-            "source": "imported",
-        }),
+    let stem = safe.split('.').next().unwrap_or(&safe).to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err("That Loop name is reserved by Windows");
+    }
+    Ok(safe)
+}
+
+fn node_graph_list_in(nodes_dir: &Path) -> Value {
+    let mut loops = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(nodes_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json")
+            {
+                continue;
+            }
+            let Some(name) = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let updated_at = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default();
+            match NodeGraph::load(&path) {
+                Ok(graph) => loops.push(json!({
+                    "name": name,
+                    "nodes": graph.nodes.len(),
+                    "valid_file": true,
+                    "updated_at": updated_at,
+                })),
+                Err(_) => loops.push(json!({
+                    "name": name,
+                    "nodes": 0,
+                    "valid_file": false,
+                    "updated_at": updated_at,
+                })),
+            }
+        }
+    }
+    loops.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .cmp(&right["name"].as_str().unwrap_or("").to_ascii_lowercase())
+    });
+    json!(loops)
+}
+
+fn node_graph_create_in(nodes_dir: &Path, requested_name: &str) -> Value {
+    let base = match safe_loop_name(requested_name) {
+        Ok(name) => name,
+        Err(error) => return json!({ "ok": false, "error": error }),
+    };
+    let mut name = base.clone();
+    let mut suffix = 2u32;
+    while nodes_dir.join(format!("{name}.json")).exists() {
+        name = format!("{base} {suffix}");
+        suffix += 1;
+    }
+    let graph = NodeGraph::from_steps(&name, Vec::new());
+    match graph.save_to(&nodes_dir.join(format!("{name}.json"))) {
+        Ok(()) => json!({ "ok": true, "name": name, "graph": graph }),
+        Err(error) => json!({ "ok": false, "error": error }),
+    }
+}
+
+fn node_graph_rename_in(nodes_dir: &Path, old_name: &str, new_name: &str) -> Value {
+    let old_name = old_name.trim();
+    let safe = match safe_loop_name(new_name) {
+        Ok(name) => name,
+        Err(error) => return json!({ "ok": false, "error": error }),
+    };
+    let source = nodes_dir.join(format!("{old_name}.json"));
+    if !source.exists() {
+        return json!({ "ok": false, "error": "Loop not found" });
+    }
+    let destination = nodes_dir.join(format!("{safe}.json"));
+    let same_file = old_name.eq_ignore_ascii_case(&safe);
+    if destination.exists() && !same_file {
+        return json!({ "ok": false, "error": "A Loop with that name already exists" });
+    }
+    let mut graph = match NodeGraph::load(&source) {
+        Ok(graph) => graph,
+        Err(error) => return json!({ "ok": false, "error": error }),
+    };
+    graph.name = safe.clone();
+    if let Err(error) = graph.save_to(&destination) {
+        return json!({ "ok": false, "error": error });
+    }
+    if !same_file {
+        if let Err(error) = std::fs::remove_file(&source) {
+            let _ = std::fs::remove_file(&destination);
+            return json!({ "ok": false, "error": error.to_string() });
+        }
+    }
+    json!({ "ok": true, "name": safe })
+}
+
+fn node_graph_delete_in(nodes_dir: &Path, name: &str) -> Value {
+    let path = nodes_dir.join(format!("{}.json", name.trim()));
+    if !path.exists() {
+        return json!({ "ok": false, "error": "Loop not found" });
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => json!({ "ok": true }),
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
     }
 }
 
-fn node_graph_save_in(nodes_dir: &Path, macro_name: &str, graph: Value) -> Value {
+fn node_graph_save_in(nodes_dir: &Path, loop_name: &str, graph: Value) -> Value {
     let mut graph: NodeGraph = match serde_json::from_value(graph) {
         Ok(graph) => graph,
         Err(error) => return json!({ "ok": false, "error": error.to_string() }),
     };
-    graph.name = macro_name.to_string();
+    graph.name = loop_name.to_string();
     let report = graph.validate();
     if !report.ok {
         return json!({
@@ -199,7 +439,7 @@ fn node_graph_save_in(nodes_dir: &Path, macro_name: &str, graph: Value) -> Value
             "warnings": report.warnings,
         });
     }
-    let path = nodes_dir.join(format!("{macro_name}.json"));
+    let path = nodes_dir.join(format!("{loop_name}.json"));
     match graph.save_to(&path) {
         Ok(()) => json!({ "ok": true, "warnings": report.warnings }),
         Err(error) => json!({ "ok": false, "error": error }),
@@ -218,6 +458,9 @@ mod tests {
             timestamp,
             x,
             y,
+            mouse_motion: None,
+            dx: 0,
+            dy: 0,
             button: "left".to_string(),
             key: String::new(),
             delta: 0,
@@ -329,32 +572,76 @@ mod tests {
     }
 
     #[test]
-    fn node_graph_load_imports_legacy_steps_then_prefers_saved_graph() {
-        let macros = temp_dir("node_load");
-        let name = "__test___node_load";
+    fn node_graph_workspaces_create_list_rename_load_and_delete() {
+        let macros = temp_dir("node_workspaces");
+        let nodes = macros.join("nodes");
+
+        let created = node_graph_create_in(&nodes, "Farm Loop");
+        assert_eq!(created["ok"], true);
+        assert_eq!(created["name"], "Farm Loop");
+        assert_eq!(created["graph"]["name"], "Farm Loop");
+        assert_eq!(created["graph"]["nodes"].as_array().unwrap().len(), 2);
+
+        let duplicate = node_graph_create_in(&nodes, "Farm Loop");
+        assert_eq!(duplicate["name"], "Farm Loop 2");
+        let listed = node_graph_list_in(&nodes);
+        assert_eq!(listed.as_array().unwrap().len(), 2);
+        assert!(listed[0]["updated_at"].as_u64().is_some());
+
+        let renamed = node_graph_rename_in(&nodes, "Farm Loop", "Daily Farm");
+        assert_eq!(renamed["ok"], true);
+        assert_eq!(renamed["name"], "Daily Farm");
+        assert!(!nodes.join("Farm Loop.json").exists());
+        assert!(nodes.join("Daily Farm.json").exists());
+
+        let reopened = node_graph_load_in(&macros, "Daily Farm");
+        assert_eq!(reopened["ok"], true);
+        assert_eq!(reopened["source"], "saved");
+        assert_eq!(reopened["graph"]["name"], "Daily Farm");
+
+        let deleted = node_graph_delete_in(&nodes, "Daily Farm");
+        assert_eq!(deleted["ok"], true);
+        assert!(!nodes.join("Daily Farm.json").exists());
+    }
+
+    #[test]
+    fn node_graph_workspaces_do_not_touch_recorded_macros() {
+        let macros = temp_dir("node_workspace_isolation");
+        let nodes = macros.join("nodes");
         let recorded = Macro {
-            name: name.into(),
-            events: vec![
-                ev(InputEventType::MouseDown, 0.1, 5, 6),
-                ev(InputEventType::MouseUp, 0.2, 5, 6),
-            ],
+            name: "Same Name".into(),
+            events: vec![ev(InputEventType::KeyPress, 0.1, 0, 0)],
             ..Default::default()
         };
-        recorded
-            .save_to(&macros.join(format!("{name}.json")))
-            .unwrap();
+        let macro_path = macros.join("Same Name.json");
+        recorded.save_to(&macro_path).unwrap();
 
-        let imported = node_graph_load_in(&macros, name);
-        assert_eq!(imported["ok"], true);
-        assert_eq!(imported["source"], "imported");
-        assert_eq!(imported["graph"]["nodes"].as_array().unwrap().len(), 3);
+        assert_eq!(node_graph_create_in(&nodes, "Same Name")["ok"], true);
+        assert_eq!(
+            node_graph_rename_in(&nodes, "Same Name", "Renamed Loop")["ok"],
+            true
+        );
+        assert_eq!(node_graph_delete_in(&nodes, "Renamed Loop")["ok"], true);
+        assert!(
+            macro_path.exists(),
+            "Loop CRUD must never alter a recorded macro"
+        );
+    }
 
-        let saved: NodeGraph = serde_json::from_value(imported["graph"].clone()).unwrap();
-        saved
-            .save_to(&macros.join("nodes").join(format!("{name}.json")))
-            .unwrap();
-        let reopened = node_graph_load_in(&macros, name);
-        assert_eq!(reopened["source"], "saved");
+    #[test]
+    fn node_graph_workspace_names_are_safe_and_collisions_are_rejected() {
+        let nodes = temp_dir("node_workspace_names");
+        assert_eq!(node_graph_create_in(&nodes, "CON")["ok"], false);
+        assert_eq!(node_graph_create_in(&nodes, "!!!")["ok"], false);
+        assert_eq!(
+            node_graph_create_in(&nodes, "  My: Loop?  ")["name"],
+            "My Loop"
+        );
+        assert_eq!(node_graph_create_in(&nodes, "Other")["ok"], true);
+        assert_eq!(
+            node_graph_rename_in(&nodes, "Other", "My Loop")["ok"],
+            false
+        );
     }
 
     #[test]

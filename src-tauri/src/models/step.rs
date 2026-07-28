@@ -167,7 +167,11 @@ pub fn macro_to_steps(macro_def: &Macro) -> Vec<Step> {
                 }
             }
             InputEventType::KeyDown => {
-                let key = if e.key.is_empty() { "?".to_string() } else { e.key.clone() };
+                let key = if e.key.is_empty() {
+                    "?".to_string()
+                } else {
+                    e.key.clone()
+                };
                 steps.push(Step {
                     id: short_id(),
                     step_type: "key".to_string(),
@@ -220,6 +224,9 @@ mod tests {
             timestamp,
             x: 0,
             y: 0,
+            mouse_motion: None,
+            dx: 0,
+            dy: 0,
             button: "left".to_string(),
             key: String::new(),
             delta: 0,
@@ -229,7 +236,10 @@ mod tests {
     }
 
     fn macro_of(events: Vec<MacroEvent>) -> Macro {
-        Macro { events, ..Default::default() }
+        Macro {
+            events,
+            ..Default::default()
+        }
     }
 
     #[test]

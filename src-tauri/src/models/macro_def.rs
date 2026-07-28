@@ -37,6 +37,18 @@ pub enum InputEventType {
     Checkpoint,
 }
 
+/// How a recorded mouse move must be replayed.
+///
+/// Older macros omit this field and keep the legacy hybrid replay path. New
+/// recordings explicitly separate ordinary pointer positioning from raw camera
+/// deltas so Roblox cursor locking cannot erase camera movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MouseMotionMode {
+    Pointer,
+    Camera,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MacroEvent {
     // `type` and `timestamp` are read by subscript in Python (`d["type"]`,
@@ -52,6 +64,12 @@ pub struct MacroEvent {
     pub x: i64,
     #[serde(default)]
     pub y: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_motion: Option<MouseMotionMode>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dx: i64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dy: i64,
     #[serde(default = "default_button")]
     pub button: String,
     #[serde(default)]
@@ -67,6 +85,10 @@ pub struct MacroEvent {
 
 fn default_button() -> String {
     "left".to_string()
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +108,11 @@ pub struct Macro {
     pub recording_duration: Option<f64>,
     // Python coerces a hand-written `null` in these four back to the default
     // (`if not isinstance(x, ...): x = default`); `null_default` reproduces that.
-    #[serde(default, deserialize_with = "crate::util::null_default", rename = "loop")]
+    #[serde(
+        default,
+        deserialize_with = "crate::util::null_default",
+        rename = "loop"
+    )]
     pub loop_enabled: bool,
     #[serde(default, deserialize_with = "crate::util::null_default")]
     pub loop_count: i64,
@@ -174,7 +200,9 @@ impl Macro {
                 ));
             }
             if event.timestamp > MAX_DURATION_SECONDS {
-                return Err(format!("event {index} exceeds the maximum seven-day timeline"));
+                return Err(format!(
+                    "event {index} exceeds the maximum seven-day timeline"
+                ));
             }
             if !event.duration.is_finite() || event.duration < 0.0 {
                 return Err(format!("event {index} has an invalid duration"));
@@ -183,10 +211,14 @@ impl Macro {
                 for field in ["timeout", "poll"] {
                     if let Some(value) = cfg.get(field) {
                         let Some(number) = value.as_f64() else {
-                            return Err(format!("event {index} checkpoint field '{field}' must be a number"));
+                            return Err(format!(
+                                "event {index} checkpoint field '{field}' must be a number"
+                            ));
                         };
                         if !number.is_finite() || number < 0.0 {
-                            return Err(format!("event {index} checkpoint field '{field}' is invalid"));
+                            return Err(format!(
+                                "event {index} checkpoint field '{field}' is invalid"
+                            ));
                         }
                     }
                 }
@@ -280,9 +312,34 @@ mod tests {
     #[test]
     fn missing_version_loads_as_legacy_but_new_macros_are_current() {
         let legacy: Macro =
-            serde_json::from_str(r#"{"name":"old","record_resolution":[1920,1080],"events":[]}"#).unwrap();
+            serde_json::from_str(r#"{"name":"old","record_resolution":[1920,1080],"events":[]}"#)
+                .unwrap();
         assert_eq!(legacy.format_version, LEGACY_MACRO_FORMAT_VERSION);
-        assert_eq!(Macro::default().format_version, CURRENT_MACRO_FORMAT_VERSION);
+        assert_eq!(
+            Macro::default().format_version,
+            CURRENT_MACRO_FORMAT_VERSION
+        );
+    }
+
+    #[test]
+    fn mouse_motion_metadata_is_backward_compatible_and_roundtrips() {
+        let legacy: MacroEvent =
+            serde_json::from_str(r#"{"type":"MOUSE_MOVE","timestamp":0.1,"x":12,"y":34}"#).unwrap();
+        assert_eq!(legacy.mouse_motion, None);
+        assert_eq!((legacy.dx, legacy.dy), (0, 0));
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(!legacy_json.contains("mouse_motion"));
+        assert!(!legacy_json.contains("\"dx\""));
+        assert!(!legacy_json.contains("\"dy\""));
+
+        let mut camera = legacy;
+        camera.mouse_motion = Some(MouseMotionMode::Camera);
+        camera.dx = 17;
+        camera.dy = -9;
+        let roundtrip: MacroEvent =
+            serde_json::from_str(&serde_json::to_string(&camera).unwrap()).unwrap();
+        assert_eq!(roundtrip.mouse_motion, Some(MouseMotionMode::Camera));
+        assert_eq!((roundtrip.dx, roundtrip.dy), (17, -9));
     }
 
     #[test]
@@ -292,6 +349,9 @@ mod tests {
             timestamp,
             x: 0,
             y: 0,
+            mouse_motion: None,
+            dx: 0,
+            dy: 0,
             button: "left".to_string(),
             key: String::new(),
             delta: 0,

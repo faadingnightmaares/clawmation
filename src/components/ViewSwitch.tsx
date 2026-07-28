@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useRef, type KeyboardEvent } from "react";
-import { animate } from "animejs";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  type KeyboardEvent,
+} from "react";
+import { animate, spring } from "animejs";
 
-import { NAV, PRIMARY_VIEWS, type ViewId } from "@/nav";
+import {
+  NAV,
+  PRIMARY_VIEWS,
+  VIEW_ICON_STROKE_WIDTH,
+  type ViewId,
+} from "@/nav";
 import { reducedMotion } from "@/lib/anime";
 import { cn } from "@/lib/utils";
 
@@ -10,102 +20,139 @@ interface ViewSwitchProps {
   navigate: (v: ViewId) => void;
 }
 
-/**
- * The switch carrying every place you actually work: Home, Macros, Nodes,
- * Watch, Autopilot. One physical thumb slides between the segments: it stretches
- * across the gap on the way and settles into the target, so the eye tracks a
- * moving object instead of boxes swapping highlight.
- *
- * Settings is the one view not in here, and while it shows, no segment is
- * current: the thumb hides rather than lying about where you are.
- */
+/** The primary work areas. Settings remains a separate utility action. */
 export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const thumbRef = useRef<HTMLSpanElement>(null);
-  const glowRef = useRef<HTMLSpanElement>(null);
+  const switchRef = useRef<HTMLDivElement>(null);
+  const indicatorRef = useRef<HTMLDivElement>(null);
+  const refractionRef = useRef<HTMLDivElement>(null);
+  const indicatorAnimationRef = useRef<{ cancel: () => void } | null>(null);
+  const refractionAnimationRef = useRef<{ cancel: () => void } | null>(null);
+  const indicatorGeometryRef = useRef<{ left: number; width: number } | null>(
+    null,
+  );
+  const lastContainerWidthRef = useRef<number | null>(null);
   const btnRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  /** Where the thumb was last sent: the start point of the next trip. */
-  const placed = useRef<{ x: number; w: number } | null>(null);
-
+  const previousView = useRef<ViewId | null>(null);
   const index = PRIMARY_VIEWS.findIndex((v) => v.id === view);
 
-  const place = useCallback(
-    (animated: boolean) => {
-      const thumb = thumbRef.current;
-      if (!thumb) return;
+  const positionIndicator = useCallback(
+    (withMotion: boolean) => {
+      const indicator = indicatorRef.current;
+      const refraction = refractionRef.current;
+      const target = btnRefs.current[index];
+      if (!indicator) return;
 
-      const btn = index < 0 ? null : btnRefs.current[index];
-      if (!btn) {
-        thumb.style.opacity = "0";
-        placed.current = null;
+      if (!target) {
+        indicatorAnimationRef.current?.cancel();
+        refractionAnimationRef.current?.cancel();
+        indicatorAnimationRef.current = null;
+        refractionAnimationRef.current = null;
+        indicatorGeometryRef.current = null;
+        indicator.style.opacity = "0";
+        if (refraction) {
+          refraction.style.opacity = "0";
+          refraction.style.transform = "translateX(-130%)";
+        }
+        previousView.current = view;
         return;
       }
 
-      const x = btn.offsetLeft;
-      const w = btn.offsetWidth;
-      const from = placed.current;
-      // A resize that changed nothing must not stomp on a trip in flight.
-      if (!animated && from && from.x === x && from.w === w) return;
-      placed.current = { x, w };
-      thumb.style.opacity = "1";
+      const left = target.offsetLeft;
+      const width = target.offsetWidth;
+      const shouldAnimate =
+        withMotion &&
+        previousView.current !== null &&
+        indicatorGeometryRef.current !== null &&
+        !reducedMotion();
+      const previousGeometry = indicatorGeometryRef.current;
 
-      if (!animated || !from || reducedMotion()) {
-        thumb.style.width = `${w}px`;
-        thumb.style.transform = `translateX(${x}px)`;
-        return;
+      indicatorAnimationRef.current?.cancel();
+      refractionAnimationRef.current?.cancel();
+      indicatorAnimationRef.current = null;
+      refractionAnimationRef.current = null;
+      if (refraction) {
+        refraction.style.opacity = "0";
+        refraction.style.transform = "translateX(-130%)";
       }
 
-      const rightward = x > from.x;
-      const stretch = rightward ? x + w - from.x : from.x + from.w - x;
-      animate(thumb, {
-        width: [
-          { to: `${stretch}px`, duration: 170, ease: "out(2)" },
-          { to: `${w}px`, duration: 340, ease: "out(3)" },
-        ],
-        translateX: rightward
-          ? [
-              { to: from.x, duration: 170 },
-              { to: x, duration: 340, ease: "out(3)" },
-            ]
-          : [
-              { to: x, duration: 170, ease: "out(2)" },
-              { to: x, duration: 340 },
-            ],
-      });
+      indicator.style.left = `${left}px`;
+      indicator.style.width = `${width}px`;
 
-      if (glowRef.current) {
-        animate(glowRef.current, {
-          opacity: [0.5, 0],
-          scale: [0.85, 1.06],
-          duration: 620,
-          ease: "out(3)",
+      if (!shouldAnimate || !previousGeometry) {
+        indicator.style.opacity = "1";
+        indicator.style.transform =
+          "translateX(0px) scaleX(1) scaleY(1)";
+      } else {
+        const translateFrom = previousGeometry.left - left;
+        const scaleFrom = previousGeometry.width / Math.max(width, 1);
+        indicatorAnimationRef.current = animate(indicator, {
+          translateX: [translateFrom, 0],
+          scaleX: [scaleFrom, 1],
+          scaleY: [0.96, 1],
+          opacity: [0.92, 1],
+          duration: 360,
+          ease: spring({ duration: 360, bounce: 0.06 }),
         });
+        if (refraction) {
+          refractionAnimationRef.current = animate(refraction, {
+            translateX: ["-130%", "235%"],
+            scaleX: [0.86, 1.04, 0.94],
+            opacity: [0, 0.42, 0],
+            duration: 300,
+            delay: 15,
+            ease: "inOut(3)",
+          });
+        }
       }
-      const icon = btn.querySelector("svg");
-      if (icon) {
-        animate(icon, {
-          scale: [1, 1.3, 1],
-          rotate: [0, rightward ? 12 : -12, 0],
-          duration: 520,
-          ease: "out(3)",
-        });
-      }
+
+      indicatorGeometryRef.current = { left, width };
+      previousView.current = view;
     },
-    [index],
+    [index, view],
   );
 
-  useEffect(() => place(true), [place]);
+  useLayoutEffect(() => {
+    positionIndicator(previousView.current !== null);
 
-  // Labels can reflow (font swap, a longer word after a locale change), so the
-  // thumb re-measures instead of trusting the width it was born with.
-  useEffect(() => {
-    const track = trackRef.current;
-    if (!track || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => place(false));
-    ro.observe(track);
-    btnRefs.current.forEach((b) => b && ro.observe(b));
-    return () => ro.disconnect();
-  }, [place]);
+    const readContainerWidth = () =>
+      switchRef.current?.getBoundingClientRect().width ?? 0;
+    lastContainerWidthRef.current = readContainerWidth();
+
+    const reposition = () => {
+      lastContainerWidthRef.current = readContainerWidth();
+      positionIndicator(false);
+    };
+    window.addEventListener("resize", reposition);
+
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            // Compare border-box to border-box. ResizeObserver's contentRect
+            // excludes the switch border and otherwise cancels this transition
+            // immediately on its first observation.
+            const width = readContainerWidth();
+            const previousWidth = lastContainerWidthRef.current;
+            if (
+              previousWidth !== null &&
+              Math.abs(width - previousWidth) < 0.5
+            ) {
+              return;
+            }
+            lastContainerWidthRef.current = width;
+            positionIndicator(false);
+          });
+    if (switchRef.current) resizeObserver?.observe(switchRef.current);
+
+    return () => {
+      indicatorAnimationRef.current?.cancel();
+      refractionAnimationRef.current?.cancel();
+      indicatorAnimationRef.current = null;
+      refractionAnimationRef.current = null;
+      window.removeEventListener("resize", reposition);
+      resizeObserver?.disconnect();
+    };
+  }, [positionIndicator]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -127,59 +174,62 @@ export function ViewSwitch({ view, navigate }: ViewSwitchProps) {
 
   return (
     <div
-      ref={trackRef}
+      ref={switchRef}
       role="group"
       aria-label="Switch view"
       onKeyDown={onKeyDown}
-      className="relative isolate flex items-center gap-1 rounded-xl border border-border/60 bg-muted/40 p-1"
+      className="relative isolate flex items-center gap-1 rounded-[18px] border border-border/70 bg-card/75 p-1.5 shadow-[0_6px_24px_rgba(46,33,20,0.05)]"
     >
-      <span
-        ref={thumbRef}
+      <div
+        ref={indicatorRef}
         aria-hidden="true"
-        style={{ opacity: 0 }}
-        className="pointer-events-none absolute top-1 bottom-1 left-0 -z-10 rounded-lg bg-background shadow-sm ring-1 ring-border/70"
+        className="view-switch-indicator pointer-events-none absolute bottom-1.5 top-1.5 z-0 origin-left rounded-xl opacity-0"
       >
-        <span
-          ref={glowRef}
-          className="absolute inset-0 rounded-lg bg-primary/30 opacity-0"
+        <div
+          ref={refractionRef}
+          data-view-switch-refraction=""
+          className="view-switch-refraction"
         />
-      </span>
+      </div>
+      {PRIMARY_VIEWS.map((item, itemIndex) => {
+        const active = itemIndex === index;
+        const accel = NAV.findIndex((entry) => entry.id === item.id) + 1;
+        const title = item.disabled
+          ? `${item.label} · ${item.badge ?? "Unavailable"}`
+          : `${item.label} · Alt+${accel}`;
 
-      {PRIMARY_VIEWS.map((v, i) => {
-        const active = i === index;
-        const accel = NAV.findIndex((n) => n.id === v.id) + 1;
-        const title = v.disabled
-          ? `${v.label} · ${v.badge ?? "Unavailable"}`
-          : `${v.label}  ·  Alt+${accel}`;
         return (
           <button
-            key={v.id}
-            ref={(el) => {
-              btnRefs.current[i] = el;
+            key={item.id}
+            ref={(element) => {
+              btnRefs.current[itemIndex] = element;
             }}
             type="button"
             aria-current={active ? "page" : undefined}
-            aria-disabled={v.disabled || undefined}
-            aria-label={v.label}
+            aria-disabled={item.disabled || undefined}
+            aria-label={item.label}
             title={title}
-            disabled={v.disabled}
-            onClick={() => navigate(v.id)}
+            disabled={item.disabled}
+            onClick={() => navigate(item.id)}
             className={cn(
-              "relative flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors duration-200 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 md:px-3.5",
-              v.disabled
+              "relative z-10 flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-sm font-medium transition-[color,background-color,transform] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] outline-none active:translate-y-px focus-visible:ring-[3px] focus-visible:ring-ring/35 disabled:translate-y-0 md:px-3.5",
+              item.disabled
                 ? "cursor-not-allowed text-muted-foreground/55"
                 : active
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
+                  ? "text-primary"
+                  : "text-muted-foreground hover:bg-muted/55 hover:text-foreground",
             )}
           >
-            <v.Icon className="size-4" />
-            {/* Five labels don't fit a narrow window: below `md` the icons carry
-                it alone, and the thumb re-measures through the ResizeObserver. */}
-            <span className="hidden md:inline">{v.label}</span>
-            {v.badge && (
+            <span className="grid size-[18px] shrink-0 place-items-center" aria-hidden="true">
+              <item.Icon
+                className="size-[17px]"
+                strokeWidth={VIEW_ICON_STROKE_WIDTH}
+              />
+            </span>
+            <span className="hidden lg:inline">{item.label}</span>
+            {item.badge && (
               <span className="rounded border border-border/70 bg-background/55 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none tracking-wide text-muted-foreground">
-                {v.badge}
+                {item.badge}
               </span>
             )}
           </button>

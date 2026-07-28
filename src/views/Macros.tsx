@@ -1,23 +1,37 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { animate } from "animejs";
 import {
+  IconAdjustmentsHorizontal,
+  IconAlertTriangle,
+  IconCheck,
+  IconChevronDown,
+  IconClock,
+  IconDownload,
+  IconFilter,
+  IconPackage,
+  IconPlayerPause,
+  IconPlayerPlay,
+  IconPlayerStop,
+  IconPlus,
+  IconRefresh,
+  IconSearch,
+  IconStar,
+  IconTrash,
+  IconUpload,
+} from "@tabler/icons-react";
+import {
   BookmarkPlus,
   ChevronDown,
   Copy,
   Download,
   Eye,
   FolderInput,
-  Layers,
   ListVideo,
-  Package,
-  Pause,
   Play,
   Plus,
-  Search,
   Shield,
   Square,
   Trash2,
-  Upload,
 } from "lucide-react";
 
 import {
@@ -47,7 +61,7 @@ import {
   type MacroListItem,
   type TemplateItem,
 } from "@/api";
-import { STOPS, fmtAgo, fmtDur, fmtHotkey, repeatToIndex, repsFor } from "@/format";
+import { STOPS, fmtAgo, fmtDur, repeatToIndex, repsFor } from "@/format";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { reducedMotion, useStaggerIn } from "@/lib/anime";
@@ -59,6 +73,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
   SelectContent,
@@ -89,12 +104,19 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { GuardsSheet } from "@/components/editors/GuardsSheet";
-import { CheckpointsSheet } from "@/components/editors/CheckpointsSheet";
+import { GuardsEditor } from "@/components/editors/GuardsSheet";
+import { CheckpointsEditor } from "@/components/editors/CheckpointsSheet";
+import {
+  MacroEditorPanel,
+  MacroInspector,
+  MacroLibrarySummary,
+  MacroRow,
+} from "@/components/macros/MacroWorkspaceCards";
 
 const SPEEDS = ["0.25", "0.5", "1", "1.5", "2", "4"] as const;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const CANCELLED = "cancelled";
+const FAVORITES_KEY = "clawmation.macro-favorites";
 
 /** The repeat stops in words, for the places there is room for words. Index
  *  matches `STOPS`; the compact chips on a row show the glyph instead. */
@@ -117,6 +139,78 @@ function readSpeeds(): Record<string, string> {
 }
 
 type SortKey = "recent" | "name" | "plays" | "duration" | "events";
+type MacroTab = "all" | "recent" | "favorites" | "ready";
+type AutomationTab = "guards" | "checkpoints";
+
+function readFavorites(): Set<string> {
+  try {
+    const stored = JSON.parse(
+      globalThis.localStorage?.getItem(FAVORITES_KEY) ?? "[]",
+    );
+    return new Set(Array.isArray(stored) ? stored : []);
+  } catch {
+    return new Set();
+  }
+}
+
+const BROWSER_PREVIEW_MACROS: MacroListItem[] = [
+  {
+    name: "raid",
+    events: 4573,
+    duration: 371,
+    resolution: "1920x1080",
+    loop: true,
+    loop_count: 1,
+    category: "",
+    notes: "Full raid routine with buffs, pulls, and rotation.",
+    play_count: 1,
+    last_played: Math.floor(Date.now() / 1000) - 172800,
+    played: 371,
+  },
+  {
+    name: "event",
+    events: 4480,
+    duration: 304,
+    resolution: "1920x1080",
+    loop: false,
+    loop_count: 1,
+    category: "",
+    notes: "Event farming route.",
+    play_count: 3,
+    last_played: Math.floor(Date.now() / 1000) - 432000,
+    played: 912,
+  },
+  {
+    name: "farming loop",
+    events: 2913,
+    duration: 272,
+    resolution: "1920x1080",
+    loop: true,
+    loop_count: 2,
+    category: "Farming",
+    notes: "Daily resource farming loop.",
+    play_count: 8,
+    last_played: Math.floor(Date.now() / 1000) - 1209600,
+    played: 2176,
+  },
+];
+
+type MacroWorkspaceLoadState = "loading" | "ready" | "error";
+
+interface MacroWorkspaceSnapshot {
+  macros: MacroListItem[];
+  templates: TemplateItem[];
+  guardCounts: Record<string, number>;
+}
+
+// Views are unmounted as the user switches workspaces. Keep the last successful
+// macro payload in memory so returning to Macros is instant while a quiet
+// background refresh checks for changes. Tests intentionally skip this cache.
+let macroWorkspaceCache: MacroWorkspaceSnapshot | null = null;
+
+function readMacroWorkspaceCache() {
+  return import.meta.env.MODE === "test" ? null : macroWorkspaceCache;
+}
 
 // ── The 3-2-1 pre-record overlay. anime.js pops each number as it lands. ───────
 function Countdown({ n }: { n: number }) {
@@ -181,22 +275,36 @@ function PromptDialog({ spec, onClose }: { spec: PromptSpec | null; onClose: () 
   );
 }
 
-export function Macros({ status }: ViewProps) {
+export function Macros({ status, active = true }: ViewProps) {
   const mode = status?.mode ?? "idle";
-  const [macros, setMacros] = useState<MacroListItem[]>([]);
-  const [templates, setTemplates] = useState<TemplateItem[]>([]);
-  const [guardCounts, setGuardCounts] = useState<Record<string, number>>({});
+  const initialWorkspace = useRef(readMacroWorkspaceCache()).current;
+  const hasLoadedWorkspace = useRef(initialWorkspace !== null);
+  const [loadState, setLoadState] = useState<MacroWorkspaceLoadState>(
+    initialWorkspace ? "ready" : "loading",
+  );
+  const [macros, setMacros] = useState<MacroListItem[]>(
+    initialWorkspace?.macros ?? [],
+  );
+  const [templates, setTemplates] = useState<TemplateItem[]>(
+    initialWorkspace?.templates ?? [],
+  );
+  const [guardCounts, setGuardCounts] = useState<Record<string, number>>(
+    initialWorkspace?.guardCounts ?? {},
+  );
   const [speeds, setSpeeds] = useState<Record<string, string>>(readSpeeds);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("recent");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [tab, setTab] = useState<MacroTab>("all");
+  const [favorites, setFavorites] = useState<Set<string>>(readFavorites);
 
   const [countdown, setCountdown] = useState<number | null>(null);
   // The one row showing its settings. Only ever one: the panel is tall, and two
   // open at once turns the list back into the stack of cards this replaced.
   const [openRow, setOpenRow] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState<string | null>(null);
   // Set only when the open row is a *just-recorded* macro, which is the one time
   // the name field should take focus by itself: it still has its generated name.
   const [nameFresh, setNameFresh] = useState(false);
@@ -204,8 +312,7 @@ export function Macros({ status }: ViewProps) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [bulkConfirm, setBulkConfirm] = useState(false);
 
-  const [guardsFor, setGuardsFor] = useState<string | null>(null);
-  const [checkpointsFor, setCheckpointsFor] = useState<string | null>(null);
+  const [automationTab, setAutomationTab] = useState<AutomationTab>("guards");
 
   const pendingRename = useRef<string | null>(null);
   const playingName = useRef<string | null>(null);
@@ -215,18 +322,69 @@ export function Macros({ status }: ViewProps) {
 
   const load = useCallback(async () => {
     try {
-      const [ms, ts, gc] = await Promise.all([listMacros(), listTemplates(), getAllGuardCounts()]);
-      setMacros(ms ?? []);
-      setTemplates(ts ?? []);
-      setGuardCounts(gc?.ok ? (gc.counts ?? {}) : {});
+      // The macro list is the only payload required to render this workspace.
+      // Presets and guard counts are useful decoration, so a failure in either
+      // must never turn a healthy macro library into a false error/empty state.
+      const [macrosResult, templatesResult, guardsResult] =
+        await Promise.allSettled([
+          listMacros(),
+          listTemplates(),
+          getAllGuardCounts(),
+        ]);
+      if (macrosResult.status === "rejected") throw macrosResult.reason;
+      const ms = macrosResult.value ?? [];
+      const ts =
+        templatesResult.status === "fulfilled"
+          ? (templatesResult.value ?? [])
+          : [];
+      const gc =
+        guardsResult.status === "fulfilled" && guardsResult.value?.ok
+          ? (guardsResult.value.counts ?? {})
+          : {};
+      const snapshot = { macros: ms, templates: ts, guardCounts: gc };
+
+      setMacros(snapshot.macros);
+      setTemplates(snapshot.templates);
+      setGuardCounts(snapshot.guardCounts);
+      if (import.meta.env.MODE !== "test") macroWorkspaceCache = snapshot;
+      hasLoadedWorkspace.current = true;
+      setLoadState("ready");
     } catch {
-      /* best-effort refresh */
+      const hasTauri = Boolean(
+        (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__,
+      );
+      if (
+        import.meta.env.DEV &&
+        import.meta.env.MODE !== "test" &&
+        !hasTauri
+      ) {
+        const snapshot = {
+          macros: BROWSER_PREVIEW_MACROS,
+          templates: [],
+          guardCounts: {},
+        };
+        setMacros(snapshot.macros);
+        setTemplates(snapshot.templates);
+        setGuardCounts(snapshot.guardCounts);
+        if (import.meta.env.MODE !== "test") macroWorkspaceCache = snapshot;
+        hasLoadedWorkspace.current = true;
+        setLoadState("ready");
+      } else if (!hasLoadedWorkspace.current) {
+        setLoadState("error");
+      }
     }
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (active) return;
+    setPrompt(null);
+    setDeleteTarget(null);
+    setBulkConfirm(false);
+  }, [active]);
 
   // Single place that reacts to a run ending: refresh + open the new recording's
   // row with its name ready to replace, toast + clear the playing row after a run.
@@ -237,6 +395,7 @@ export function Macros({ status }: ViewProps) {
       load().then(() => {
         if (pendingRename.current) {
           setOpenRow(pendingRename.current);
+          setEditingName(pendingRename.current);
           setNameFresh(true);
           pendingRename.current = null;
         }
@@ -256,6 +415,7 @@ export function Macros({ status }: ViewProps) {
   // "/" jumps to the search box, Escape closes the open row: the two things a
   // list this long is otherwise a mouse trip for.
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       const typing = !!el?.closest("input, textarea, [contenteditable='true']");
@@ -267,13 +427,27 @@ export function Macros({ status }: ViewProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [active]);
 
   const busy = mode !== "idle" || countdown !== null;
 
   const toggleRow = (name: string) => {
     setNameFresh(false);
-    setOpenRow((cur) => (cur === name ? null : name));
+    setOpenRow(name);
+    setEditingName((current) => (current === name ? current : null));
+  };
+
+  const toggleFavorite = (name: string) => {
+    setFavorites((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      globalThis.localStorage?.setItem(
+        FAVORITES_KEY,
+        JSON.stringify([...next]),
+      );
+      return next;
+    });
   };
 
   // ── Recording ────────────────────────────────────────────────────────────
@@ -323,8 +497,9 @@ export function Macros({ status }: ViewProps) {
   };
 
   // ── Playback ─────────────────────────────────────────────────────────────
-  const play = async (m: MacroListItem) => {
-    const reps = repsFor(repeatToIndex(m.loop, m.loop_count));
+  const play = async (m: MacroListItem, repeatOverride?: number) => {
+    const reps =
+      repeatOverride ?? repsFor(repeatToIndex(m.loop, m.loop_count));
     const speed = parseFloat(speeds[m.name] ?? "1") || 1;
     playingName.current = m.name;
     setPlayingCard(m.name);
@@ -381,7 +556,19 @@ export function Macros({ status }: ViewProps) {
       // The row is keyed by name, so follow it: the settings panel stays open on
       // the macro the user is still editing, and its chosen speed goes with it.
       setOpenRow((cur) => (cur === from ? name : cur));
+      setEditingName((cur) => (cur === from ? name : cur));
       setNameFresh(false);
+      setFavorites((current) => {
+        if (!current.has(from)) return current;
+        const next = new Set(current);
+        next.delete(from);
+        next.add(name);
+        globalThis.localStorage?.setItem(
+          FAVORITES_KEY,
+          JSON.stringify([...next]),
+        );
+        return next;
+      });
       setSpeeds((prev) => {
         if (!prev[from]) return prev;
         const next = { ...prev, [name]: prev[from] };
@@ -399,8 +586,12 @@ export function Macros({ status }: ViewProps) {
     try {
       const res = await duplicateMacro(m.name);
       if (res?.ok) {
-        notify("success", `Copied to “${res.name}”`);
-        load();
+        await load();
+        if (res.name) {
+          setOpenRow(res.name);
+          setEditingName(null);
+          setNameFresh(false);
+        }
       } else notify("error", res?.error || "Couldn't duplicate");
     } catch {
       notify("error", "Couldn't duplicate");
@@ -419,6 +610,17 @@ export function Macros({ status }: ViewProps) {
           return next;
         });
         setOpenRow((cur) => (cur === name ? null : cur));
+        setEditingName((cur) => (cur === name ? null : cur));
+        setFavorites((current) => {
+          if (!current.has(name)) return current;
+          const next = new Set(current);
+          next.delete(name);
+          globalThis.localStorage?.setItem(
+            FAVORITES_KEY,
+            JSON.stringify([...next]),
+          );
+          return next;
+        });
         load();
       } else notify("error", res?.error || "Couldn't delete");
     } catch {
@@ -582,6 +784,9 @@ export function Macros({ status }: ViewProps) {
     const q = query.trim().toLowerCase();
     const filtered = macros.filter((m) => {
       if (categoryFilter !== "all" && m.category !== categoryFilter) return false;
+      if (tab === "recent" && !m.last_played) return false;
+      if (tab === "favorites" && !favorites.has(m.name)) return false;
+      if (tab === "ready" && m.events < 1) return false;
       if (!q) return true;
       return (
         m.name.toLowerCase().includes(q) ||
@@ -597,34 +802,139 @@ export function Macros({ status }: ViewProps) {
       events: (a, b) => (b.events ?? 0) - (a.events ?? 0),
     };
     return [...filtered].sort(cmp[sort]);
-  }, [macros, query, categoryFilter, sort]);
+  }, [macros, query, categoryFilter, sort, tab, favorites]);
 
-  const listRef = useStaggerIn<HTMLDivElement>(`${visible.length}:${sort}:${categoryFilter}`);
-  const recordHotkey = status?.config?.hotkey_record
-    ? fmtHotkey(status.config.hotkey_record)
-    : null;
+  // Animate the library only when its initial payload replaces the skeleton.
+  // Filtering, sorting, duplicating, and deleting should feel immediate rather
+  // than replaying an entrance animation across every existing row.
+  const listRef = useStaggerIn<HTMLDivElement>(loadState);
+  const activeMacro =
+    visible.find((macro) => macro.name === openRow) ?? visible[0] ?? null;
   const recording = mode === "recording" || mode === "paused";
 
+  if (loadState === "loading") return <MacrosLoadingState />;
+
+  if (loadState === "error") {
+    return (
+      <MacrosLoadError
+        onRetry={() => {
+          setLoadState("loading");
+          void load();
+        }}
+      />
+    );
+  }
+
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex h-full min-h-0 flex-col">
       {countdown !== null && <Countdown n={countdown} />}
 
+      <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto lg:grid-cols-[minmax(300px,0.82fr)_minmax(0,3fr)] lg:overflow-hidden">
+        {activeMacro && (
+          <div className="workspace-scrollbar flex min-h-0 flex-col gap-5 overflow-y-auto pr-2">
+            <MacroEditorPanel
+              key={activeMacro.name}
+              macro={activeMacro}
+              speed={speeds[activeMacro.name] ?? "1"}
+              focusName={editingName === activeMacro.name && nameFresh}
+              playing={playingCard === activeMacro.name && mode === "playing"}
+              onStop={stopPlay}
+              onSpeed={(value) => setSpeed(activeMacro.name, value)}
+              onRepeat={(index) => changeRepeat(activeMacro, index)}
+              onRename={(to) => rename(activeMacro.name, to)}
+              onCategory={(value) => saveCategory(activeMacro, value)}
+              onNotes={(value) => saveNotes(activeMacro, value)}
+              onSavePreset={() => askSaveAsTemplate(activeMacro)}
+              onExport={() => onExportMacro(activeMacro)}
+              onBundle={() => onExportBundle(activeMacro)}
+            />
+            <section
+              aria-label={`Screen safeguards for ${activeMacro.name}`}
+              className="flex min-h-[360px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_12px_34px_rgba(50,35,18,0.045)]"
+            >
+              <div className="border-b border-border px-4 py-3">
+                <p className="text-sm font-semibold text-foreground">
+                  Screen safeguards
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Recovery rules and visual waits in one place.
+                </p>
+                <div
+                  role="tablist"
+                  aria-label="Screen safeguard tools"
+                  className="mt-3 grid grid-cols-2 overflow-hidden rounded-lg border border-border"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={automationTab === "guards"}
+                    onClick={() => setAutomationTab("guards")}
+                    className={cn(
+                      "border-r border-border px-3 py-2 text-xs font-medium transition-colors",
+                      automationTab === "guards"
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    Safety
+                    {guardCounts[activeMacro.name]
+                      ? ` · ${guardCounts[activeMacro.name]}`
+                      : ""}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={automationTab === "checkpoints"}
+                    onClick={() => setAutomationTab("checkpoints")}
+                    className={cn(
+                      "px-3 py-2 text-xs font-medium transition-colors",
+                      automationTab === "checkpoints"
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    Vision
+                  </button>
+                </div>
+              </div>
+              <div
+                key={`${activeMacro.name}:${automationTab}`}
+                className="min-h-0"
+              >
+                {automationTab === "guards" ? (
+                  <GuardsEditor
+                    macroName={activeMacro.name}
+                    onChanged={load}
+                    embedded
+                  />
+                ) : (
+                  <CheckpointsEditor
+                    macroName={activeMacro.name}
+                    onChanged={load}
+                    embedded
+                  />
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+
+        <div
+          className={cn(
+            "flex min-h-0 flex-col gap-5 lg:overflow-hidden",
+            !activeMacro && "lg:col-span-2",
+          )}
+        >
       {/* ── Header: what this is, and the one thing you came here to press ── */}
-      <header className="flex flex-wrap items-start justify-between gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-5 border-b border-border/70 pb-5">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Macros</h1>
+          <h1 className="text-[28px] font-semibold tracking-[-0.035em] text-foreground">
+            Macros
+          </h1>
           <p className="text-sm text-muted-foreground">
             {recording
-              ? "Do the task once. Every click and key is being captured."
-              : macros.length === 0
-                ? "Record what you do once, and Clawmation repeats it for you."
-                : `${macros.length} saved. Press Run on any of them.`}
-            {!recording && recordHotkey ? (
-              <>
-                {" "}
-                Or press <Kbd>{recordHotkey}</Kbd> without leaving your game.
-              </>
-            ) : null}
+              ? "Every click and key is being captured."
+              : "Create, manage, and run your macros with ease."}
           </p>
         </div>
 
@@ -649,61 +959,105 @@ export function Macros({ status }: ViewProps) {
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={togglePause}>
-              {mode === "paused" ? <Play className="size-4" /> : <Pause className="size-4" />}
+              {mode === "paused" ? (
+                <IconPlayerPlay className="size-4" />
+              ) : (
+                <IconPlayerPause className="size-4" />
+              )}
               {mode === "paused" ? "Resume" : "Pause"}
             </Button>
             <Button variant="destructive" size="sm" onClick={toggleRecord}>
-              <Square className="size-4 fill-current" />
+              <IconPlayerStop className="size-4 fill-current" />
               Stop &amp; save
             </Button>
           </div>
         ) : (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <Button
+              size="lg"
+              onClick={toggleRecord}
+              disabled={busy}
+              className="min-w-32 rounded-lg shadow-[0_8px_20px_color-mix(in_srgb,var(--primary)_20%,transparent)]"
+            >
+              <span className="size-2.5 rounded-full bg-current" />
+              Record
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" title="Add a macro from a file">
-                  <Plus className="size-5" />
+                <Button variant="outline" size="lg" className="rounded-lg">
+                  <IconPlus className="size-[18px]" strokeWidth={1.8} />
+                  New macro
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuItem onSelect={onImportMacro}>
-                  <Upload className="size-4" />
+                  <IconUpload className="size-4" />
                   Add a macro from a file
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={onImportBundle}>
-                  <Package className="size-4" />
+                  <IconPackage className="size-4" />
                   Add a bundle (macro + images)
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Button size="lg" onClick={toggleRecord} disabled={busy}>
-              <span className="size-2.5 rounded-full bg-current" />
-              Record
-            </Button>
           </div>
         )}
       </header>
 
       {/* ── Search, category, sort ──────────────────────────────────────── */}
       {macros.length > 0 && (
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[200px] flex-1">
-              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.75fr)_minmax(340px,1fr)]">
+          <div className="grid gap-3 sm:grid-cols-[minmax(220px,1fr)_145px_180px]">
+            <div className="relative min-w-0">
+              <IconSearch className="pointer-events-none absolute left-3.5 top-1/2 size-[18px] -translate-y-1/2 text-muted-foreground" />
               <Input
                 ref={searchRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search macros…"
-                className="pl-9"
+                className="h-11 rounded-lg pl-10"
               />
             </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="h-11 justify-between rounded-lg px-4"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <IconFilter className="size-[18px]" strokeWidth={1.7} />
+                    <span className="truncate">
+                      {categoryFilter === "all" ? "Filter" : categoryFilter}
+                    </span>
+                  </span>
+                  <IconChevronDown className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-52">
+                <DropdownMenuItem onSelect={() => setCategoryFilter("all")}>
+                  {categoryFilter === "all" && <IconCheck className="size-4" />}
+                  All categories
+                </DropdownMenuItem>
+                {categories.map((category) => (
+                  <DropdownMenuItem
+                    key={category}
+                    onSelect={() => setCategoryFilter(category)}
+                  >
+                    {categoryFilter === category && (
+                      <IconCheck className="size-4" />
+                    )}
+                    {category}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-              <SelectTrigger className="w-[170px]">
+              <SelectTrigger className="h-11 w-full rounded-lg" aria-label="Sort macros">
+                <IconAdjustmentsHorizontal className="size-[18px]" />
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="recent">Recently played</SelectItem>
+                <SelectItem value="recent">Last played</SelectItem>
                 <SelectItem value="name">Name</SelectItem>
                 <SelectItem value="plays">Most played</SelectItem>
                 <SelectItem value="duration">Longest</SelectItem>
@@ -711,37 +1065,48 @@ export function Macros({ status }: ViewProps) {
               </SelectContent>
             </Select>
           </div>
-          {/* One click to filter, where the old dropdown took two. Only ever
-              rendered once the user has actually made categories. */}
-          {categories.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <FilterPill
-                active={categoryFilter === "all"}
-                onClick={() => setCategoryFilter("all")}
+          <div
+            role="tablist"
+            aria-label="Macro views"
+            className="grid h-11 grid-cols-4 overflow-hidden rounded-lg border border-border bg-card"
+          >
+            {(
+              [
+                ["all", "All", null],
+                ["recent", "Recent", IconClock],
+                ["favorites", "Favorites", IconStar],
+                ["ready", "Ready", IconPlayerPlay],
+              ] as const
+            ).map(([value, label, Icon]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={tab === value}
+                onClick={() => setTab(value)}
+                className={cn(
+                  "relative flex items-center justify-center gap-1.5 border-l border-border/70 px-2 text-xs font-medium text-muted-foreground transition-colors first:border-l-0 hover:text-foreground",
+                  tab === value && "bg-primary/5 text-primary",
+                )}
               >
-                All
-              </FilterPill>
-              {categories.map((c) => (
-                <FilterPill
-                  key={c}
-                  active={categoryFilter === c}
-                  onClick={() => setCategoryFilter(categoryFilter === c ? "all" : c)}
-                >
-                  {c}
-                </FilterPill>
-              ))}
-            </div>
-          )}
+                {Icon && <Icon className="size-4" strokeWidth={1.7} />}
+                <span>{label}</span>
+                {tab === value && (
+                  <span className="absolute inset-x-0 bottom-0 h-0.5 bg-primary" />
+                )}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
       {/* ── Bulk bar ────────────────────────────────────────────────────── */}
       {selected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5">
           <span className="text-sm font-medium">{selected.size} selected</span>
           <div className="flex-1" />
           <Button variant="ghost" size="sm" onClick={onBulkExport}>
-            <Download className="size-4" />
+            <IconDownload className="size-4" />
             Export
           </Button>
           <Button
@@ -750,7 +1115,7 @@ export function Macros({ status }: ViewProps) {
             onClick={() => setBulkConfirm(true)}
             className="text-destructive hover:bg-destructive/10 hover:text-destructive"
           >
-            <Trash2 className="size-4" />
+            <IconTrash className="size-4" />
             Delete
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
@@ -767,41 +1132,58 @@ export function Macros({ status }: ViewProps) {
           No macros match “{query}”.
         </p>
       ) : (
-        <div
-          ref={listRef}
-          className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card"
-        >
-          {visible.map((m) => (
-            <MacroRow
-              key={m.name}
-              macro={m}
-              guards={guardCounts[m.name] ?? 0}
-              speed={speeds[m.name] ?? "1"}
-              open={openRow === m.name}
-              focusName={openRow === m.name && nameFresh}
-              selected={selected.has(m.name)}
-              playing={playingCard === m.name && mode === "playing"}
-              iteration={status?.play_iteration ?? 0}
-              totalReps={status?.play_total_reps ?? 0}
-              busy={busy}
-              onToggle={() => toggleRow(m.name)}
-              onSelect={() => toggleSelect(m.name)}
-              onRun={() => play(m)}
-              onStop={stopPlay}
-              onSpeed={(v) => setSpeed(m.name, v)}
-              onRepeat={(i) => changeRepeat(m, i)}
-              onRename={(to) => rename(m.name, to)}
-              onCategory={(v) => saveCategory(m, v)}
-              onNotes={(v) => saveNotes(m, v)}
-              onGuards={() => setGuardsFor(m.name)}
-              onCheckpoints={() => setCheckpointsFor(m.name)}
-              onDuplicate={() => onDuplicate(m)}
-              onSavePreset={() => askSaveAsTemplate(m)}
-              onExport={() => onExportMacro(m)}
-              onBundle={() => onExportBundle(m)}
-              onDelete={() => setDeleteTarget(m.name)}
-            />
-          ))}
+        <div className="grid min-h-0 flex-1 items-stretch gap-5 overflow-hidden lg:grid-cols-[minmax(0,1.75fr)_minmax(320px,1fr)]">
+          <div className="flex min-h-0 min-w-0 flex-col">
+            <div
+              ref={listRef}
+              role="region"
+              aria-label="Saved macros"
+              tabIndex={0}
+              data-visible-rows="6"
+              className="macro-list workspace-scrollbar grid min-h-0 min-w-0 max-h-[42.75rem] flex-1 content-start gap-3 overflow-y-auto overscroll-contain pr-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {visible.map((macro) => (
+                <MacroRow
+                  key={macro.name}
+                  macro={macro}
+                  guards={guardCounts[macro.name] ?? 0}
+                  speed={speeds[macro.name] ?? "1"}
+                  active={activeMacro?.name === macro.name}
+                  favorite={favorites.has(macro.name)}
+                  selected={selected.has(macro.name)}
+                  playing={playingCard === macro.name && mode === "playing"}
+                  iteration={status?.play_iteration ?? 0}
+                  totalReps={status?.play_total_reps ?? 0}
+                  busy={busy}
+                  onToggle={() => toggleRow(macro.name)}
+                  onSelect={() => toggleSelect(macro.name)}
+                  onFavorite={() => toggleFavorite(macro.name)}
+                  onRun={() => play(macro)}
+                  onStop={stopPlay}
+                  onRepeat={(index) => changeRepeat(macro, index)}
+                  onDuplicate={() => onDuplicate(macro)}
+                  onExport={() => onExportMacro(macro)}
+                  onBundle={() => onExportBundle(macro)}
+                  onDelete={() => setDeleteTarget(macro.name)}
+                />
+              ))}
+            </div>
+            <MacroLibrarySummary macros={visible} />
+          </div>
+          {activeMacro && (
+            <div className="min-h-0 overflow-hidden">
+              <MacroInspector
+                key={activeMacro.name}
+                macro={activeMacro}
+                favorite={favorites.has(activeMacro.name)}
+                busy={busy}
+                onFavorite={() => toggleFavorite(activeMacro.name)}
+                onRun={(repeat) => play(activeMacro, repeat)}
+                onDuplicate={() => onDuplicate(activeMacro)}
+                onDelete={() => setDeleteTarget(activeMacro.name)}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -810,7 +1192,7 @@ export function Macros({ status }: ViewProps) {
         <section className="flex flex-col gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <Layers className="size-4 text-muted-foreground" />
+              <IconPackage className="size-4 text-muted-foreground" />
               Presets
             </h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
@@ -836,13 +1218,15 @@ export function Macros({ status }: ViewProps) {
                   className="text-muted-foreground hover:text-destructive"
                   title="Remove preset"
                 >
-                  <Trash2 className="size-4" />
+                  <IconTrash className="size-4" />
                 </Button>
               </div>
             ))}
           </div>
         </section>
       )}
+        </div>
+      </div>
 
       {/* ── Overlays ────────────────────────────────────────────────────── */}
       <PromptDialog spec={prompt} onClose={() => setPrompt(null)} />
@@ -885,29 +1269,13 @@ export function Macros({ status }: ViewProps) {
         </AlertDialogContent>
       </AlertDialog>
 
-      {guardsFor && (
-        <GuardsSheet
-          macroName={guardsFor}
-          open
-          onOpenChange={(o) => !o && setGuardsFor(null)}
-          onChanged={load}
-        />
-      )}
-      {checkpointsFor && (
-        <CheckpointsSheet
-          macroName={checkpointsFor}
-          open
-          onOpenChange={(o) => !o && setCheckpointsFor(null)}
-          onChanged={load}
-        />
-      )}
     </div>
   );
 }
 
 // ── One row ──────────────────────────────────────────────────────────────────
 
-interface MacroRowProps {
+interface LegacyMacroRowProps {
   macro: MacroListItem;
   guards: number;
   speed: string;
@@ -943,7 +1311,7 @@ interface MacroRowProps {
  * (an overlay button behind the content), which is why the content layer is
  * pointer-transparent and each real control opts back in.
  */
-function MacroRow(p: MacroRowProps) {
+function LegacyMacroRow(p: LegacyMacroRowProps) {
   const { macro } = p;
   const panelId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -1218,13 +1586,8 @@ function MacroRow(p: MacroRowProps) {
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
 
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-medium text-foreground">
-      {children}
-    </kbd>
-  );
-}
+void LegacyMacroRow;
+void FilterPill;
 
 function Field({
   label,
@@ -1331,9 +1694,100 @@ function RepeatChips({
   );
 }
 
+function MacrosLoadingState() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading macro workspace"
+      aria-live="polite"
+      className="flex h-full min-h-0 flex-col"
+    >
+      <span className="sr-only">Loading your macros</span>
+      <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto lg:grid-cols-[minmax(300px,0.82fr)_minmax(0,3fr)] lg:overflow-hidden">
+        <div className="workspace-scrollbar flex min-h-0 flex-col gap-5 overflow-hidden pr-2">
+          <div className="shrink-0 rounded-xl border border-border bg-card p-5">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="mt-2 h-3 w-16" />
+            <div className="mt-6 space-y-5">
+              {["w-full", "w-4/5", "w-full"].map((width, index) => (
+                <div key={index}>
+                  <Skeleton className="mb-2 h-3 w-20" />
+                  <Skeleton className={cn("h-9 rounded-md", width)} />
+                </div>
+              ))}
+              <Skeleton className="h-9 w-full rounded-md" />
+            </div>
+          </div>
+          <div className="min-h-[360px] shrink-0 rounded-xl border border-border bg-card p-5">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="mt-2 h-3 w-52" />
+            <Skeleton className="mt-5 h-9 w-full rounded-lg" />
+            <Skeleton className="mt-5 h-40 w-full rounded-lg" />
+          </div>
+        </div>
+
+        <div className="flex min-h-0 flex-col gap-5 overflow-hidden">
+          <header className="flex items-center justify-between gap-5 border-b border-border/70 pb-5">
+            <div>
+              <Skeleton className="h-8 w-28" />
+              <Skeleton className="mt-2 h-4 w-64" />
+            </div>
+            <div className="flex gap-3">
+              <Skeleton className="h-10 w-32 rounded-lg" />
+              <Skeleton className="h-10 w-36 rounded-lg" />
+            </div>
+          </header>
+
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1.75fr)_minmax(340px,1fr)]">
+            <div className="grid gap-3 sm:grid-cols-[minmax(220px,1fr)_145px_180px]">
+              <Skeleton className="h-11 rounded-lg" />
+              <Skeleton className="h-11 rounded-lg" />
+              <Skeleton className="h-11 rounded-lg" />
+            </div>
+            <Skeleton className="h-11 rounded-lg" />
+          </div>
+
+          <div className="grid min-h-0 flex-1 gap-5 overflow-hidden lg:grid-cols-[minmax(0,1.75fr)_minmax(320px,1fr)]">
+            <div className="grid min-h-0 content-start gap-3 overflow-hidden pr-2">
+              {Array.from({ length: 6 }, (_, index) => (
+                <Skeleton key={index} className="h-[92px] w-full rounded-xl" />
+              ))}
+            </div>
+            <Skeleton className="min-h-[360px] rounded-xl" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MacrosLoadError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center">
+      <div
+        role="alert"
+        className="flex max-w-md flex-col items-center rounded-xl border border-border bg-card px-8 py-10 text-center shadow-[0_12px_34px_rgba(50,35,18,0.045)]"
+      >
+        <span className="flex size-11 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+          <IconAlertTriangle className="size-5" strokeWidth={1.8} />
+        </span>
+        <h1 className="mt-4 text-lg font-semibold">Couldn&apos;t load macros</h1>
+        <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
+          Your macros are still safe. Clawmation couldn&apos;t reach the local
+          library just now.
+        </p>
+        <Button className="mt-5" onClick={onRetry}>
+          <IconRefresh className="size-4" />
+          Try again
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function EmptyState({ onRecord, disabled }: { onRecord: () => void; disabled: boolean }) {
   return (
-    <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
+    <div className="flex w-full max-w-2xl self-center flex-col items-center gap-5 rounded-xl border border-border bg-card px-6 py-14 text-center">
       <div className="flex size-14 items-center justify-center rounded-full bg-secondary text-muted-foreground">
         <ListVideo className="size-7" />
       </div>

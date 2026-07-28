@@ -22,23 +22,32 @@
 //! matching pynput's observe-only listeners.
 
 use std::collections::HashSet;
+use std::iter::once;
+use std::mem::{size_of, MaybeUninit};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
+    RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetClassNameW, GetClipCursor, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowTextW,
+    PostThreadMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
 };
 
-use crate::models::macro_def::{InputEventType, Macro, MacroEvent};
+use crate::models::macro_def::{InputEventType, Macro, MacroEvent, MouseMotionMode};
 
 /// One wheel notch, as Win32 defines it (matches `input.rs`).
 const WHEEL_DELTA: i64 = 120;
@@ -180,6 +189,9 @@ fn new_event(event_type: InputEventType, timestamp: f64) -> MacroEvent {
         timestamp,
         x: 0,
         y: 0,
+        mouse_motion: None,
+        dx: 0,
+        dy: 0,
         button: "left".to_string(),
         key: String::new(),
         delta: 0,
@@ -219,6 +231,18 @@ struct RecorderState {
     paused_total: Duration,
     /// Hotkeys that drive the app itself, lower-cased; never baked into a macro.
     ignore_keys: HashSet<String>,
+    /// Raw Input is registered before `start` returns. When unavailable, the
+    /// low-level hook still records a derived relative fallback for right-drag.
+    raw_input_available: bool,
+    right_button_down: bool,
+    last_hook_cursor: Option<(i64, i64)>,
+    last_raw_cursor: Option<(i64, i64)>,
+    locked_cursor_samples: u8,
+    unlocked_cursor_samples: u8,
+    raw_camera_active: bool,
+    /// First raw packet at a possible lock point. Kept briefly so automatic
+    /// Shift Lock detection does not discard the opening camera delta.
+    pending_raw_move: Option<(f64, i64, i64, i64, i64)>,
 }
 
 impl RecorderState {
@@ -232,6 +256,14 @@ impl RecorderState {
             pause_start: now,
             paused_total: Duration::ZERO,
             ignore_keys,
+            raw_input_available: false,
+            right_button_down: false,
+            last_hook_cursor: None,
+            last_raw_cursor: None,
+            locked_cursor_samples: 0,
+            unlocked_cursor_samples: 0,
+            raw_camera_active: false,
+            pending_raw_move: None,
         }
     }
 
@@ -244,8 +276,7 @@ impl RecorderState {
         } else {
             Duration::ZERO
         };
-        self.start.elapsed().as_secs_f64()
-            - (self.paused_total + current_pause).as_secs_f64()
+        self.start.elapsed().as_secs_f64() - (self.paused_total + current_pause).as_secs_f64()
     }
 
     fn active(&self) -> bool {
@@ -256,11 +287,34 @@ impl RecorderState {
         if !self.active() {
             return;
         }
+        let previous = self.last_hook_cursor.replace((x, y));
+
+        // While Roblox owns the cursor, screen coordinates are either frozen at
+        // its lock point or repeatedly recentered. Raw Input below is the only
+        // faithful source of camera movement, so never record those synthetic
+        // absolute positions as a second move.
+        if self.raw_input_available && (self.right_button_down || self.raw_camera_active) {
+            return;
+        }
+
+        // If Raw Input could not be registered, right-drag still gets a useful
+        // derived-delta fallback instead of silently becoming absolute moves.
+        if self.right_button_down {
+            if let Some((px, py)) = previous {
+                self.push_camera_move(x, y, x - px, y - py);
+            }
+            return;
+        }
+
         // Skip only exact same-pixel duplicates (mouse jitter at rest). NEVER
         // mutate the previous event's timestamp; that would compress the gap to
         // the next real event and make playback fire early.
         if let Some(last) = self.events.last() {
-            if last.event_type == InputEventType::MouseMove && last.x == x && last.y == y {
+            if last.event_type == InputEventType::MouseMove
+                && last.mouse_motion == Some(MouseMotionMode::Pointer)
+                && last.x == x
+                && last.y == y
+            {
                 return;
             }
         }
@@ -268,8 +322,84 @@ impl RecorderState {
         self.events.push(MacroEvent {
             x,
             y,
+            mouse_motion: Some(MouseMotionMode::Pointer),
             ..new_event(InputEventType::MouseMove, ts)
         });
+    }
+
+    fn push_camera_move(&mut self, x: i64, y: i64, dx: i64, dy: i64) {
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        let ts = self.elapsed();
+        self.push_camera_move_at(ts, x, y, dx, dy);
+    }
+
+    fn push_camera_move_at(&mut self, timestamp: f64, x: i64, y: i64, dx: i64, dy: i64) {
+        self.events.push(MacroEvent {
+            x,
+            y,
+            mouse_motion: Some(MouseMotionMode::Camera),
+            dx,
+            dy,
+            ..new_event(InputEventType::MouseMove, timestamp)
+        });
+    }
+
+    /// Record physical Raw Input counts while a camera gesture owns the cursor.
+    ///
+    /// Right-drag is explicit. Shift Lock is detected from a tightly clipped or
+    /// stationary cursor while non-zero raw counts continue arriving. Two
+    /// consecutive free cursor samples end the inferred lock, which tolerates a
+    /// one-frame Roblox recenter without leaking absolute pointer moves.
+    fn handle_raw_move(
+        &mut self,
+        dx: i64,
+        dy: i64,
+        x: i64,
+        y: i64,
+        tightly_clipped: bool,
+        roblox_foreground: bool,
+    ) {
+        if !self.active() || (dx == 0 && dy == 0) {
+            return;
+        }
+
+        let cursor = (x, y);
+        let stationary = self.last_raw_cursor == Some(cursor);
+        self.last_raw_cursor = Some(cursor);
+
+        let inferred_lock = stationary && roblox_foreground;
+        if tightly_clipped || inferred_lock {
+            self.locked_cursor_samples = self.locked_cursor_samples.saturating_add(1);
+            self.unlocked_cursor_samples = 0;
+        } else {
+            self.locked_cursor_samples = 0;
+            self.unlocked_cursor_samples = self.unlocked_cursor_samples.saturating_add(1);
+            if self.unlocked_cursor_samples >= 2 {
+                self.raw_camera_active = false;
+            }
+        }
+
+        let was_camera_active = self.raw_camera_active;
+        if tightly_clipped || (roblox_foreground && self.locked_cursor_samples > 0) {
+            self.raw_camera_active = true;
+        }
+        if self.right_button_down || self.raw_camera_active {
+            if !was_camera_active && stationary {
+                if let Some((timestamp, px, py, pdx, pdy)) = self.pending_raw_move.take() {
+                    let last_timestamp = self.events.last().map_or(0.0, |event| event.timestamp);
+                    if (px, py) == cursor && timestamp >= last_timestamp {
+                        self.push_camera_move_at(timestamp, px, py, pdx, pdy);
+                    }
+                }
+            } else {
+                self.pending_raw_move = None;
+            }
+            self.push_camera_move(x, y, dx, dy);
+        } else {
+            self.pending_raw_move = Some((self.elapsed(), x, y, dx, dy));
+        }
     }
 
     fn handle_button(&mut self, down: bool, x: i64, y: i64, button: &str) {
@@ -288,6 +418,11 @@ impl RecorderState {
             button: button.to_string(),
             ..new_event(kind, ts)
         });
+        self.last_hook_cursor = Some((x, y));
+        if button.eq_ignore_ascii_case("right") {
+            self.right_button_down = down;
+            self.pending_raw_move = None;
+        }
     }
 
     fn handle_scroll(&mut self, x: i64, y: i64, delta: i64) {
@@ -409,6 +544,136 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(once(0)).collect()
+}
+
+/// Roblox Shift Lock confines the pointer to a tiny center rectangle. This is a
+/// direct signal that raw counts represent camera rotation, unlike an ordinary
+/// pointer move. The stationary-cursor fallback in `handle_raw_move` covers
+/// Roblox versions that recenter each frame without calling `ClipCursor`.
+unsafe fn cursor_is_tightly_clipped() -> bool {
+    let mut rect: RECT = std::mem::zeroed();
+    GetClipCursor(&mut rect) != 0
+        && (rect.right - rect.left).unsigned_abs() <= 8
+        && (rect.bottom - rect.top).unsigned_abs() <= 8
+}
+
+static LAST_FOREGROUND_WINDOW: AtomicIsize = AtomicIsize::new(0);
+static LAST_FOREGROUND_WAS_ROBLOX: AtomicBool = AtomicBool::new(false);
+static FOREGROUND_PROBE_PACKETS: AtomicU32 = AtomicU32::new(0);
+
+/// Shift-lock inference is Roblox-specific. Cache the foreground-window check
+/// by HWND so a high-polling-rate mouse does not perform string queries for
+/// every raw packet.
+unsafe fn roblox_is_foreground() -> bool {
+    let hwnd = GetForegroundWindow();
+    let raw = hwnd as isize;
+    let periodic_refresh = FOREGROUND_PROBE_PACKETS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(1024);
+    if LAST_FOREGROUND_WINDOW.load(Ordering::Relaxed) == raw && !periodic_refresh {
+        return LAST_FOREGROUND_WAS_ROBLOX.load(Ordering::Relaxed);
+    }
+
+    let mut title = [0u16; 128];
+    let title_len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32).max(0) as usize;
+    let mut class = [0u16; 64];
+    let class_len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
+    let title = String::from_utf16_lossy(&title[..title_len]).to_ascii_lowercase();
+    let class = String::from_utf16_lossy(&class[..class_len]).to_ascii_lowercase();
+    let is_roblox = title.contains("roblox") || class == "windowsclient";
+
+    LAST_FOREGROUND_WAS_ROBLOX.store(is_roblox, Ordering::Relaxed);
+    LAST_FOREGROUND_WINDOW.store(raw, Ordering::Relaxed);
+    is_roblox
+}
+
+unsafe extern "system" fn raw_input_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_INPUT {
+        let mut raw = MaybeUninit::<RAWINPUT>::uninit();
+        let mut bytes = size_of::<RAWINPUT>() as u32;
+        let read = GetRawInputData(
+            lparam as _,
+            RID_INPUT,
+            raw.as_mut_ptr().cast(),
+            &mut bytes,
+            size_of::<windows_sys::Win32::UI::Input::RAWINPUTHEADER>() as u32,
+        );
+        if read == size_of::<RAWINPUT>() as u32 {
+            let raw = raw.assume_init();
+            if raw.header.dwType == RIM_TYPEMOUSE {
+                let mouse = raw.data.mouse;
+                if mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 {
+                    let mut point: POINT = std::mem::zeroed();
+                    if GetCursorPos(&mut point) != 0 {
+                        let clipped = cursor_is_tightly_clipped();
+                        let roblox = roblox_is_foreground();
+                        dispatch(|state| {
+                            state.handle_raw_move(
+                                i64::from(mouse.lLastX),
+                                i64::from(mouse.lLastY),
+                                i64::from(point.x),
+                                i64::from(point.y),
+                                clipped,
+                                roblox,
+                            )
+                        });
+                    }
+                }
+            }
+        }
+    }
+    DefWindowProcW(hwnd, message, wparam, lparam)
+}
+
+/// Create a message-only Raw Input sink. It never appears on screen and never
+/// takes focus; it exists solely so recording receives physical mouse counts
+/// even while Roblox is the foreground application.
+unsafe fn create_raw_input_window(module: *mut std::ffi::c_void) -> Option<HWND> {
+    let class_name = wide("ClawmationRawMouseRecorder");
+    let mut class: WNDCLASSW = std::mem::zeroed();
+    class.lpfnWndProc = Some(raw_input_proc);
+    class.hInstance = module;
+    class.lpszClassName = class_name.as_ptr();
+    RegisterClassW(&class);
+
+    let hwnd = CreateWindowExW(
+        0,
+        class_name.as_ptr(),
+        class_name.as_ptr(),
+        0,
+        0,
+        0,
+        0,
+        0,
+        HWND_MESSAGE,
+        std::ptr::null_mut(),
+        module,
+        std::ptr::null(),
+    );
+    if hwnd.is_null() {
+        return None;
+    }
+
+    let device = RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02,
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    };
+    if RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) == 0 {
+        DestroyWindow(hwnd);
+        return None;
+    }
+    Some(hwnd)
+}
+
 /// Install both low-level hooks and pump messages until `WM_QUIT`. Runs on its
 /// own thread; reports that thread's native id back so [`MacroRecorder::stop`]
 /// can wake it. The hooks are unhooked as the loop exits.
@@ -423,6 +688,8 @@ fn hook_thread(ready: mpsc::Sender<u32>) {
     let _aware = crate::hardware::dpi::PerMonitorAware::new();
     unsafe {
         let hmod = GetModuleHandleW(std::ptr::null());
+        let raw_window = create_raw_input_window(hmod);
+        dispatch(|state| state.raw_input_available = raw_window.is_some());
         let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0);
         let key_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0);
 
@@ -438,6 +705,9 @@ fn hook_thread(ready: mpsc::Sender<u32>) {
 
         UnhookWindowsHookEx(mouse_hook);
         UnhookWindowsHookEx(key_hook);
+        if let Some(hwnd) = raw_window {
+            DestroyWindow(hwnd);
+        }
     }
 }
 
@@ -546,10 +816,7 @@ impl MacroRecorder {
         }
         self.thread_id = 0;
 
-        let mut events = lock_shared()
-            .take()
-            .map(|s| s.events)
-            .unwrap_or_default();
+        let mut events = lock_shared().take().map(|s| s.events).unwrap_or_default();
         for e in &mut events {
             e.timestamp = round4(e.timestamp);
         }
@@ -711,6 +978,69 @@ mod tests {
         s.handle_move(101, 200);
         assert_eq!(s.events.len(), 4);
         assert_eq!(s.events[3].event_type, InputEventType::MouseMove);
+        assert_eq!(s.events[3].mouse_motion, Some(MouseMotionMode::Pointer));
+    }
+
+    #[test]
+    fn right_drag_records_raw_camera_counts_without_absolute_duplicates() {
+        let mut s = state();
+        s.raw_input_available = true;
+        s.handle_button(true, 500, 400, "right");
+        s.handle_move(520, 390); // ignored: Raw Input owns this camera segment
+        s.handle_raw_move(17, -9, 500, 400, false, true);
+        s.handle_button(false, 500, 400, "right");
+
+        assert_eq!(s.events.len(), 3);
+        let camera = &s.events[1];
+        assert_eq!(camera.event_type, InputEventType::MouseMove);
+        assert_eq!(camera.mouse_motion, Some(MouseMotionMode::Camera));
+        assert_eq!((camera.dx, camera.dy), (17, -9));
+    }
+
+    #[test]
+    fn shift_lock_detection_retains_the_first_raw_packet() {
+        let mut s = state();
+        s.raw_input_available = true;
+
+        // Some Roblox versions recenter instead of using a tiny ClipCursor
+        // rectangle. The second packet at the same screen point identifies the
+        // lock and flushes the first buffered packet in original order.
+        s.handle_raw_move(8, 3, 960, 540, false, true);
+        s.handle_raw_move(11, -4, 960, 540, false, true);
+
+        assert_eq!(s.events.len(), 2);
+        assert!(s
+            .events
+            .iter()
+            .all(|event| event.mouse_motion == Some(MouseMotionMode::Camera)));
+        assert_eq!((s.events[0].dx, s.events[0].dy), (8, 3));
+        assert_eq!((s.events[1].dx, s.events[1].dy), (11, -4));
+        s.handle_move(961, 540);
+        assert_eq!(
+            s.events.len(),
+            2,
+            "absolute recenter must not duplicate raw camera input"
+        );
+    }
+
+    #[test]
+    fn tightly_clipped_shift_lock_records_immediately() {
+        let mut s = state();
+        s.raw_input_available = true;
+        s.handle_raw_move(-6, 5, 960, 540, true, true);
+        assert_eq!(s.events.len(), 1);
+        assert_eq!(s.events[0].mouse_motion, Some(MouseMotionMode::Camera));
+        assert_eq!((s.events[0].dx, s.events[0].dy), (-6, 5));
+    }
+
+    #[test]
+    fn stationary_pointer_outside_roblox_is_not_misclassified_as_camera() {
+        let mut s = state();
+        s.raw_input_available = true;
+        s.handle_raw_move(1, 0, 400, 300, false, false);
+        s.handle_raw_move(1, 0, 400, 300, false, false);
+        assert!(s.events.is_empty());
+        assert!(!s.raw_camera_active);
     }
 
     #[test]
@@ -799,9 +1129,12 @@ mod tests {
         // point (400,320 at 125%) and every replayed position would land a
         // DPI-factor short of its target.
         assert!(
-            macro_.events.iter().any(|e| e.event_type == InputEventType::MouseMove
-                && (e.x - 500).abs() <= 2
-                && (e.y - 400).abs() <= 2),
+            macro_
+                .events
+                .iter()
+                .any(|e| e.event_type == InputEventType::MouseMove
+                    && (e.x - 500).abs() <= 2
+                    && (e.y - 400).abs() <= 2),
             "no recorded move landed at the physical target (500,400): {:?}",
             macro_
                 .events

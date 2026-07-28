@@ -1,232 +1,560 @@
 import {
   ArrowRight,
-  Cat,
-  Check,
+  CursorClick,
   Eye,
-  Lightbulb,
-  ListVideo,
+  GitBranch,
+  Keyboard,
+  LinkSimple,
+  Play,
+  Record,
   ShieldCheck,
-  Workflow,
-  type LucideIcon,
-} from "lucide-react";
+  WarningCircle,
+  type Icon,
+} from "@phosphor-icons/react";
 
-import { useStaggerIn } from "@/lib/anime";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import type { ViewProps } from "./types";
 
-/** The how-it-works reference, shown as a tab inside Settings; it is something
- *  you read once, not a place you work, so it does not earn a slot in the bar. */
-export function Guide({ navigate }: ViewProps) {
-  const pageRef = useStaggerIn<HTMLDivElement>();
+export type GuideTopic =
+  | "getting-started"
+  | "macros"
+  | "loops"
+  | "watch"
+  | "troubleshooting";
 
+export interface GuideTopicMeta {
+  id: GuideTopic;
+  label: string;
+  description: string;
+  Icon: Icon;
+}
+
+export const GUIDE_TOPICS: GuideTopicMeta[] = [
+  {
+    id: "getting-started",
+    label: "Getting started",
+    description: "Record, run, and stop your first automation.",
+    Icon: Play,
+  },
+  {
+    id: "macros",
+    label: "Macros",
+    description: "Recording, playback, repeats, and safeguards.",
+    Icon: Record,
+  },
+  {
+    id: "loops",
+    label: "Loops & chains",
+    description: "Build visual workflows and ordered macro sequences.",
+    Icon: GitBranch,
+  },
+  {
+    id: "watch",
+    label: "Watch & vision",
+    description: "Detect images, colours, and screen states reliably.",
+    Icon: Eye,
+  },
+  {
+    id: "troubleshooting",
+    label: "Troubleshooting",
+    description: "Fast answers for playback, hotkeys, and vision.",
+    Icon: WarningCircle,
+  },
+];
+
+interface GuideProps extends Pick<ViewProps, "navigate"> {
+  topic: GuideTopic;
+}
+
+export function Guide({ topic, navigate }: GuideProps) {
+  switch (topic) {
+    case "macros":
+      return <MacrosGuide navigate={navigate} />;
+    case "loops":
+      return <LoopsGuide navigate={navigate} />;
+    case "watch":
+      return <WatchGuide navigate={navigate} />;
+    case "troubleshooting":
+      return <TroubleshootingGuide navigate={navigate} />;
+    default:
+      return <GettingStartedGuide navigate={navigate} />;
+  }
+}
+
+function GettingStartedGuide({
+  navigate,
+}: Pick<ViewProps, "navigate">) {
   return (
-    <div ref={pageRef} className="space-y-8">
-      <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
-        Clawmation records what you do (every click, keypress and pause) and plays it back for
-        you, as many times as you like. It can also watch your screen and step in on its own while
-        you’re away, so your grind keeps running even when you’re not at the keyboard.
-      </p>
+    <Article
+      eyebrow="Documentation"
+      title="Getting started"
+      intro="Create a recording, play it back, and stay in control from the first run."
+    >
+      <DocSection title="How Clawmation works">
+        <p>
+          A macro captures your mouse, keyboard, timing, and camera drags. Playing
+          it repeats the same actions against the same screen layout.
+        </p>
+        <DefinitionList
+          items={[
+            ["Macro", "A recording of one task."],
+            ["Watch", "A screen detector that reacts when something appears."],
+            ["Loop", "A visual workflow connecting macros, waits, decisions, and chains."],
+          ]}
+        />
+      </DocSection>
 
-      {/* Record */}
-      <Section icon={ListVideo} title="Record your first macro">
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          A macro is just a recording of you playing. Do the task once, and Clawmation can repeat it
-          for hours.
-        </p>
-        <ol className="flex flex-col gap-2.5 text-sm text-muted-foreground">
-          <NumStep n={1}>
-            Open your game, then press your record hotkey, or hit the Record button on the Macros
-            page.
-          </NumStep>
-          <NumStep n={2}>
-            Play through the task once, exactly how you normally would. Every click, key and pause is
-            captured.
-          </NumStep>
-          <NumStep n={3}>Press Stop to save it, and give it a name you’ll recognise later.</NumStep>
-          <NumStep n={4}>
-            Press Run and choose how many times to repeat: a set number, or ∞ to keep going.
-          </NumStep>
-        </ol>
-        <Note icon={Cat}>
-          While a macro is running, a little cat sits in the corner (wide awake when Clawmation is
-          playing, curled up asleep when it’s finished), so you can tell at a glance whether it’s
-          still going.
-        </Note>
-        <Cta onClick={() => navigate("macros")}>Record a macro</Cta>
-      </Section>
+      <DocSection title="Record your first macro">
+        <Steps
+          items={[
+            "Open the game or app at the exact size and position you plan to use.",
+            "Press Record from Macros, then perform the task once at a natural pace.",
+            "Use the Stop hotkey when the task is complete. Clawmation saves it immediately.",
+            "Rename the recording and choose its repeat count before the first run.",
+          ]}
+        />
+        <Callout icon={Record}>
+          Right-click camera movement, Shift Lock, held keys, and pauses are all
+          part of the recording. Perform them exactly as you want them replayed.
+        </Callout>
+      </DocSection>
 
-      {/* Guards */}
-      <Section icon={ShieldCheck} title="Keep it alive with guards" badge="Most loved">
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          Left alone, a farming loop dies the moment the game boots you to a login screen. A guard is
-          a little watcher that keeps it alive. The classic case: your loop is set to run forever, a
-          guard watches for the <span className="font-medium text-foreground">Reconnect</span> button,
-          and the instant it appears the guard pauses your macro, clicks Reconnect, waits for the game
-          to load back in, then carries on right where it left off, so the loop never dies.
+      <DocSection title="Run safely">
+        <p>
+          Start with one repeat while watching the game. If the route is correct,
+          increase the repeat count or choose infinity.
         </p>
-        <ol className="flex flex-col gap-2.5 text-sm text-muted-foreground">
-          <NumStep n={1}>
-            Tell it what to look for and where: a colour, a button or some words, in one corner of the
-            screen.
-          </NumStep>
-          <NumStep n={2}>
-            It checks that spot a few times every second, quietly in the background while your macro
-            runs.
-          </NumStep>
-          <NumStep n={3}>
-            The moment it spots the trigger, it pauses your macro and does what you set: a click or a
-            keypress.
-          </NumStep>
-          <NumStep n={4}>
-            After a short wait for the game to catch up, it picks your macro back up exactly where it
-            paused.
-          </NumStep>
-        </ol>
-        <div className="rounded-lg border border-border bg-secondary/40 p-4">
-          <p className="mb-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            The classic reconnect setup
-          </p>
-          <dl className="space-y-2 text-sm">
-            <SpecRow label="Macro">your farming loop, set to ∞ reps</SpecRow>
-            <SpecRow label="Trigger">the colour of the Reconnect button</SpecRow>
-            <SpecRow label="Action">click it</SpecRow>
-            <SpecRow label="Wait after">about 10 seconds</SpecRow>
-          </dl>
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Guards live on each macro. Open a macro’s menu on the Macros page and add a guard to it.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Cta onClick={() => navigate("autopilot")}>See what’s protected</Cta>
-          <Button variant="outline" onClick={() => navigate("macros")}>
-            Go to Macros
-          </Button>
-        </div>
-      </Section>
-
-      {/* Watch */}
-      <Section icon={Eye} title="Let it watch the screen on its own">
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          Sometimes you don’t need a whole macro. You just need Clawmation to catch one thing and
-          react. That’s the Watch page.
-        </p>
-        <ol className="flex flex-col gap-2.5 text-sm text-muted-foreground">
-          <NumStep n={1}>
-            Add a thing to watch for: a colour, a picture of a button, or some on-screen text.
-          </NumStep>
-          <NumStep n={2}>Tell it what to do when that thing appears: click it, or press a key.</NumStep>
-          <NumStep n={3}>Press Start watching, and Clawmation reacts on its own. No macro required.</NumStep>
-        </ol>
-        <p className="text-sm text-muted-foreground">
-          Handy for catching AFK check popups, auto-accepting invites, or clicking through a reward
-          screen while you’re away.
-        </p>
-        <Cta onClick={() => navigate("vision")}>Open Watch</Cta>
-      </Section>
-
-      {/* Chains */}
-      <Section icon={Workflow} title="Chain macros together">
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          Have a few macros that always run in the same order? Chain them so they play back-to-back,
-          optionally on a schedule, so your daily routine can even start itself. You’ll find them at
-          the top of <span className="font-medium text-foreground">Autopilot</span>.
-        </p>
-        <Cta onClick={() => navigate("autopilot")}>Build a chain</Cta>
-      </Section>
-
-      {/* Tips */}
-      <Section icon={Lightbulb} title="A few tips">
-        <ul className="flex flex-col gap-2.5 text-sm text-muted-foreground">
-          <Tip>
-            Keep the area you watch small. It’s faster and far less likely to fire on the wrong
-            thing.
-          </Tip>
-          <Tip>
-            Always Test a guard or trigger before you rely on it, so you know it can really see what
-            you meant.
-          </Tip>
-          <Tip>
-            Give macros clear names and categories. Future-you will thank you once you have twenty of
-            them.
-          </Tip>
-        </ul>
-      </Section>
-    </div>
+        <ShortcutRow keys={["Stop hotkey"]}>
+          Stops macros, chains, Loops, Watch actions, and recording from one place.
+        </ShortcutRow>
+        <ArticleAction onClick={() => navigate("macros")}>
+          Open Macros
+        </ArticleAction>
+      </DocSection>
+    </Article>
   );
 }
 
-function Section({
-  icon: Icon,
+function MacrosGuide({ navigate }: Pick<ViewProps, "navigate">) {
+  return (
+    <Article
+      eyebrow="Documentation"
+      title="Macros"
+      intro="Record dependable actions, organize them, and recover when the screen changes."
+    >
+      <DocSection title="The macro workspace">
+        <p>
+          Select a macro to edit its name, category, notes, speed, and repeat
+          behavior. The library stays independently scrollable so controls never
+          disappear while you browse.
+        </p>
+        <FeatureList
+          items={[
+            ["Playback speed", "Use 1× for recorded timing. Faster speeds reduce every recorded delay."],
+            ["Repeat", "Run once, a fixed number of times, or continuously until stopped."],
+            ["Presets", "Save a setup you want to reuse without duplicating the source file manually."],
+            ["Bundles", "Export a macro together with the images its vision steps need."],
+          ]}
+        />
+      </DocSection>
+
+      <DocSection title="Screen safeguards">
+        <p>
+          Safety and Vision live beside the selected macro. They let a long run
+          recover from disconnects, wait for loading screens, or click a known
+          button before continuing.
+        </p>
+        <Steps
+          items={[
+            "Choose the smallest reliable image, colour, or screen region.",
+            "Test the detector against a fresh frame before enabling it.",
+            "Set the action and a realistic timeout for the game to respond.",
+            "Run the macro once while watching both success and failure paths.",
+          ]}
+        />
+        <Callout icon={ShieldCheck}>
+          A smaller detection region is faster and less likely to match the wrong
+          part of the screen.
+        </Callout>
+      </DocSection>
+
+      <DocSection title="Keep recordings reliable">
+        <FeatureList
+          items={[
+            ["Window geometry", "Keep the game at the same size and display scale used while recording."],
+            ["Camera control", "Record deliberate right-button drags and avoid moving the physical mouse during playback."],
+            ["Timing", "Leave enough time for menus and teleports to finish before the next action."],
+            ["Emergency stop", "Set a memorable Stop hotkey and test it before running continuously."],
+          ]}
+        />
+        <ArticleAction onClick={() => navigate("macros")}>
+          Manage macros
+        </ArticleAction>
+      </DocSection>
+    </Article>
+  );
+}
+
+function LoopsGuide({ navigate }: Pick<ViewProps, "navigate">) {
+  return (
+    <Article
+      eyebrow="Documentation"
+      title="Loops & chains"
+      intro="Turn individual recordings into readable workflows with clear success and failure paths."
+    >
+      <DocSection title="Build on the canvas">
+        <Steps
+          items={[
+            "Create a Loop and right-click anywhere on the canvas.",
+            "Add a Start node, then add macros, waits, vision checks, or actions.",
+            "Drag from an output handle to the next node. Each output accepts one destination.",
+            "Connect every required path, then Save and Run from the toolbar.",
+          ]}
+        />
+        <ShortcutGrid
+          items={[
+            ["Ctrl + Z", "Undo"],
+            ["Ctrl + Shift + Z", "Redo"],
+            ["Ctrl + S", "Save Loop"],
+            ["Ctrl + D", "Duplicate node"],
+            ["Delete", "Remove selected node"],
+            ["F2", "Rename Loop"],
+          ]}
+        />
+      </DocSection>
+
+      <DocSection title="Read outcome paths">
+        <p>
+          Nodes that can fail expose two named outputs. Connect both whenever the
+          failure needs recovery instead of stopping the workflow.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Outcome tone="success" title="If works">
+            Continue to the normal next step.
+          </Outcome>
+          <Outcome tone="danger" title="If fails">
+            Retry, recover, notify, or stop safely.
+          </Outcome>
+        </div>
+      </DocSection>
+
+      <DocSection title="Compose a chain inside a Loop">
+        <p>
+          A Chain node runs several saved macros in order while keeping the
+          canvas compact.
+        </p>
+        <Steps
+          items={[
+            "Add a Chain node and create a saved chain from its inspector.",
+            "Add macros to the sequence. Drag rows or use the arrow controls to reorder them.",
+            "Choose the pause between macros and how many times the whole sequence repeats.",
+            "Save the chain, connect If works and If fails, then save the Loop.",
+          ]}
+        />
+        <Callout icon={LinkSimple}>
+          Use connected Macro nodes when each step needs its own branch. Use a
+          Chain node when the sequence always runs straight through.
+        </Callout>
+        <ArticleAction onClick={() => navigate("nodes")}>
+          Open Loops
+        </ArticleAction>
+      </DocSection>
+    </Article>
+  );
+}
+
+function WatchGuide({ navigate }: Pick<ViewProps, "navigate">) {
+  return (
+    <Article
+      eyebrow="Documentation"
+      title="Watch & vision"
+      intro="Detect the right screen state quickly, then perform a click or key action."
+    >
+      <DocSection title="Choose the detector">
+        <DefinitionList
+          items={[
+            ["Image", "Best for distinctive buttons, icons, and objects that keep the same appearance."],
+            ["Colour", "Fastest for a stable, unique colour inside a small region."],
+            ["Text", "Useful when the wording is stable but surrounding visuals change."],
+          ]}
+        />
+      </DocSection>
+
+      <DocSection title="Capture a clean image">
+        <Steps
+          items={[
+            "Capture only the visual detail that identifies the target.",
+            "Avoid animated edges, counters, player names, and changing backgrounds.",
+            "Restrict the search region to where the target can realistically appear.",
+            "Test several times before enabling Press or Click.",
+          ]}
+        />
+        <Callout icon={CursorClick}>
+          A detector finding the object does not automatically click it. Confirm
+          the action is set to Click or Key instead of None.
+        </Callout>
+      </DocSection>
+
+      <DocSection title="Tune reliability">
+        <FeatureList
+          items={[
+            ["Confidence", "Raise it to reject false matches; lower it slightly if a correct image is missed."],
+            ["Region", "The strongest speed and accuracy improvement. Keep it as small as practical."],
+            ["Timeout", "Give loading screens enough time, but always choose what happens when time expires."],
+            ["Test frame", "Use a fresh capture after changing game resolution, UI scale, or theme."],
+          ]}
+        />
+        <ArticleAction onClick={() => navigate("vision")}>
+          Open Watch
+        </ArticleAction>
+      </DocSection>
+    </Article>
+  );
+}
+
+function TroubleshootingGuide({
+  navigate,
+}: Pick<ViewProps, "navigate">) {
+  return (
+    <Article
+      eyebrow="Documentation"
+      title="Troubleshooting"
+      intro="Start with the symptom, verify the smallest possible case, then change one variable."
+    >
+      <DocSection title="A run will not stop">
+        <Steps
+          items={[
+            "Press the configured Stop hotkey once.",
+            "If the app is visible, press Stop in the top bar.",
+            "Open Settings → Shortcuts and confirm the key is registered and not shared with another action.",
+            "Test the Stop hotkey with a one-step macro before starting a long run.",
+          ]}
+        />
+      </DocSection>
+
+      <DocSection title="Clicks or camera movement land incorrectly">
+        <FeatureList
+          items={[
+            ["Display scale", "Use the same Windows scale and monitor arrangement as the recording."],
+            ["Window position", "Keep the game window at the recorded size and location."],
+            ["Input ownership", "Do not move the physical mouse while playback owns a held drag."],
+            ["Game state", "Confirm menus, Shift Lock, and camera mode match the beginning of the recording."],
+          ]}
+        />
+      </DocSection>
+
+      <DocSection title="Vision misses the target">
+        <Steps
+          items={[
+            "Capture a tighter image with fewer changing pixels.",
+            "Select a smaller region and test against a new frame.",
+            "Lower confidence in small steps instead of making a large jump.",
+            "Re-capture after any resolution, UI scale, or graphics change.",
+          ]}
+        />
+      </DocSection>
+
+      <DocSection title="Hotkeys or settings do not persist">
+        <p>
+          Use a unique shortcut for each action. If Windows refuses a key,
+          another app has registered it globally. Choose a different combination,
+          then verify it immediately without restarting.
+        </p>
+        <ArticleAction onClick={() => navigate("settings")}>
+          Open Settings
+        </ArticleAction>
+      </DocSection>
+    </Article>
+  );
+}
+
+function Article({
+  eyebrow,
   title,
-  badge,
+  intro,
   children,
 }: {
-  icon: LucideIcon;
+  eyebrow: string;
   title: string;
-  badge?: string;
+  intro: string;
   children: React.ReactNode;
 }) {
   return (
-    <Card className="gap-5 p-6">
-      <div className="flex items-center gap-3">
-        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
-          <Icon className="size-5" />
+    <article className="mx-auto w-full max-w-3xl pb-16">
+      <header className="border-b border-border pb-8">
+        <p className="text-xs font-medium text-primary">{eyebrow}</p>
+        <h1
+          id="guide-article-title"
+          className="mt-2 text-[2rem] font-semibold tracking-[-0.04em] text-foreground"
+        >
+          {title}
+        </h1>
+        <p className="mt-3 max-w-2xl text-[15px] leading-7 text-muted-foreground">
+          {intro}
+        </p>
+      </header>
+      <div className="divide-y divide-border">{children}</div>
+    </article>
+  );
+}
+
+function DocSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-5 py-8 text-sm leading-7 text-muted-foreground">
+      <h2 className="text-lg font-semibold tracking-[-0.02em] text-foreground">
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function Steps({ items }: { items: string[] }) {
+  return (
+    <ol className="space-y-4">
+      {items.map((item, index) => (
+        <li key={item} className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-3">
+          <span className="grid size-7 place-items-center rounded-md bg-primary/10 text-xs font-semibold tabular-nums text-primary">
+            {index + 1}
+          </span>
+          <p className="pt-px">{item}</p>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function FeatureList({ items }: { items: [string, string][] }) {
+  return (
+    <dl className="divide-y divide-border border-y border-border">
+      {items.map(([term, detail]) => (
+        <div
+          key={term}
+          className="grid gap-1 py-3.5 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-5"
+        >
+          <dt className="font-medium text-foreground">{term}</dt>
+          <dd>{detail}</dd>
         </div>
-        <h2 className="text-lg font-semibold text-foreground">{title}</h2>
-        {badge && (
-          <Badge variant="secondary" className="ml-auto font-normal">
-            {badge}
-          </Badge>
-        )}
+      ))}
+    </dl>
+  );
+}
+
+function DefinitionList({ items }: { items: [string, string][] }) {
+  return <FeatureList items={items} />;
+}
+
+function Callout({
+  icon: IconComponent,
+  children,
+}: {
+  icon: Icon;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-l-2 border-primary/55 bg-primary/[0.035] py-3 pr-4 pl-3.5">
+      <IconComponent className="mt-1 size-4 text-primary" weight="duotone" />
+      <p>{children}</p>
+    </div>
+  );
+}
+
+function ShortcutRow({
+  keys,
+  children,
+}: {
+  keys: string[];
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-4 border-y border-border py-4">
+      <div className="flex shrink-0 items-center gap-1.5">
+        <Keyboard className="size-4 text-primary" />
+        {keys.map((key) => (
+          <kbd
+            key={key}
+            className="rounded border border-border bg-muted/45 px-2 py-0.5 font-mono text-[10px] text-foreground"
+          >
+            {key}
+          </kbd>
+        ))}
       </div>
-      {children}
-    </Card>
-  );
-}
-
-function NumStep({ n, children }: { n: number; children: React.ReactNode }) {
-  return (
-    <li className="flex gap-3">
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary">
-        {n}
-      </span>
-      {children}
-    </li>
-  );
-}
-
-function SpecRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex gap-3">
-      <dt className="w-24 shrink-0 text-muted-foreground">{label}</dt>
-      <dd className="text-foreground">{children}</dd>
+      <p>{children}</p>
     </div>
   );
 }
 
-function Note({ icon: Icon, children }: { icon: LucideIcon; children: React.ReactNode }) {
+function ShortcutGrid({ items }: { items: [string, string][] }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-border bg-secondary/40 p-3.5 text-sm text-muted-foreground">
-      <Icon className="mt-0.5 size-4 shrink-0 text-primary" />
-      <p className="leading-relaxed">{children}</p>
+    <div className="grid border-y border-border sm:grid-cols-2">
+      {items.map(([keys, action], index) => (
+        <div
+          key={keys}
+          className={cnBorder(index)}
+        >
+          <kbd className="font-mono text-[11px] font-medium text-foreground">
+            {keys}
+          </kbd>
+          <span>{action}</span>
+        </div>
+      ))}
     </div>
   );
 }
 
-function Tip({ children }: { children: React.ReactNode }) {
+function cnBorder(index: number) {
+  return [
+    "flex items-center justify-between gap-4 py-3 text-xs",
+    index > 1 ? "border-t border-border" : "",
+    index % 2 === 0 ? "sm:pr-4" : "sm:border-l sm:border-border sm:pl-4",
+  ].join(" ");
+}
+
+function Outcome({
+  tone,
+  title,
+  children,
+}: {
+  tone: "success" | "danger";
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
-    <li className="flex gap-3">
-      <Check className="mt-0.5 size-4 shrink-0 text-primary" />
-      {children}
-    </li>
+    <div className="flex items-start gap-3 border-y border-border py-3.5">
+      <span
+        className={`mt-1.5 size-2 shrink-0 rounded-full ${
+          tone === "success" ? "bg-success" : "bg-destructive"
+        }`}
+      />
+      <div>
+        <p
+          className={`font-medium ${
+            tone === "success" ? "text-success" : "text-destructive"
+          }`}
+        >
+          {title}
+        </p>
+        <p>{children}</p>
+      </div>
+    </div>
   );
 }
 
-function Cta({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+function ArticleAction({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
   return (
-    <Button onClick={onClick} className="w-fit">
+    <Button onClick={onClick}>
       {children}
       <ArrowRight className="size-4" />
     </Button>

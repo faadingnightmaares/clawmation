@@ -1,5 +1,10 @@
 import { useMemo } from "react";
-import { ArrowRight, Download, Sparkles } from "lucide-react";
+import {
+  ArrowRight,
+  CheckCircle,
+  DownloadSimple,
+  Sparkle,
+} from "@phosphor-icons/react";
 
 import type { UpdateInfo } from "@/api";
 import { parseReleaseNotes, type ReleaseSectionContent } from "@/lib/releaseNotes";
@@ -40,25 +45,25 @@ export function ReleaseUpdateDialog({
         if (!open && !installing) onDismiss();
       }}
     >
-      <AlertDialogContent className="max-h-[calc(100vh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-w-xl">
-        <AlertDialogHeader className="gap-0 border-b border-border bg-card px-6 py-5">
+      <AlertDialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <AlertDialogHeader className="gap-0 border-b border-border bg-card px-6 py-6 sm:px-8">
           <div className="mb-3 flex items-center gap-2 text-[0.6875rem] font-semibold tracking-[0.14em] text-primary uppercase">
-            <span className="flex size-6 items-center justify-center rounded-md bg-primary/10">
-              <Sparkles className="size-3.5" aria-hidden="true" />
-            </span>
+            <Sparkle className="size-4" weight="fill" aria-hidden="true" />
             Update available
           </div>
-          <AlertDialogTitle>Clawmation {info.latest} is ready</AlertDialogTitle>
-          <AlertDialogDescription className="mt-1.5 max-w-lg leading-relaxed">
+          <AlertDialogTitle className="text-xl tracking-[-0.025em]">
+            Clawmation {info.latest} is ready
+          </AlertDialogTitle>
+          <AlertDialogDescription className="mt-2 max-w-xl leading-6">
             {parsed.summary}
           </AlertDialogDescription>
 
           <div
-            className="mt-4 flex w-fit items-center gap-2 rounded-lg border border-border bg-secondary/45 px-3 py-2 font-mono text-xs"
+            className="mt-4 flex items-center gap-2 font-mono text-[11px]"
             aria-label={`Version ${info.current} to ${info.latest}`}
           >
             <span className="text-muted-foreground">{info.current}</span>
-            <ArrowRight className="size-3.5 text-primary" aria-hidden="true" />
+            <ArrowRight className="size-3.5 text-primary" weight="bold" aria-hidden="true" />
             <span data-version="available" className="font-medium text-foreground">
               {info.latest}
             </span>
@@ -66,9 +71,9 @@ export function ReleaseUpdateDialog({
         </AlertDialogHeader>
 
         {installing ? (
-          <div className="flex min-h-48 flex-col justify-center gap-4 px-6 py-8">
-            <span className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              <Download className="size-5" aria-hidden="true" />
+          <div className="flex min-h-52 flex-col justify-center gap-4 px-6 py-9 sm:px-8">
+            <span className="flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <DownloadSimple className="size-5" weight="bold" aria-hidden="true" />
             </span>
             <div className="space-y-2.5">
               <Progress value={progress ?? 0} aria-label="Update download progress" />
@@ -85,19 +90,22 @@ export function ReleaseUpdateDialog({
             role="region"
             aria-label="Release highlights"
             tabIndex={0}
-            className="min-h-0 overflow-y-auto overscroll-contain px-6 py-5 break-words [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            className="min-h-0 overflow-y-auto overscroll-contain px-6 py-6 break-words [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:px-8"
           >
-            <p className="mb-4 text-[0.6875rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
-              Release highlights
-            </p>
-            <div className="space-y-5">
+            <div className="relative space-y-7 before:absolute before:top-2 before:bottom-2 before:left-[5px] before:w-px before:bg-border">
               {parsed.sections.map((section, sectionIndex) => (
                 <section
                   key={`${section.heading ?? "notes"}-${sectionIndex}`}
-                  className="space-y-3"
+                  className="relative space-y-3 pl-7"
                 >
                   {section.heading && (
-                    <h3 className="text-sm font-semibold text-foreground">{section.heading}</h3>
+                    <h3 className="relative text-sm font-semibold text-foreground">
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-[0.4rem] -left-[1.72rem] size-[11px] rounded-full border-[3px] border-card bg-primary"
+                      />
+                      {section.heading}
+                    </h3>
                   )}
                   {section.content.map((content, contentIndex) => (
                     <ReleaseContent
@@ -112,7 +120,7 @@ export function ReleaseUpdateDialog({
         )}
 
         {!installing && (
-          <AlertDialogFooter className="items-stretch border-t border-border bg-card px-6 py-4 sm:items-center">
+          <AlertDialogFooter className="items-stretch border-t border-border bg-card px-6 py-4 sm:items-center sm:px-8">
             <p className="text-left text-xs leading-relaxed text-muted-foreground sm:mr-auto sm:max-w-52">
               Installing restarts the app. Finish any active run first.
             </p>
@@ -123,7 +131,7 @@ export function ReleaseUpdateDialog({
                 onInstall();
               }}
             >
-              <Download className="size-4" aria-hidden="true" />
+              <DownloadSimple className="size-4" weight="bold" aria-hidden="true" />
               Install and restart
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -139,19 +147,18 @@ function ReleaseContent({ content }: { content: ReleaseSectionContent }) {
   }
 
   return (
-    <ol className="space-y-2.5">
+    <ol className="divide-y divide-border border-y border-border">
       {content.items.map((item) => (
         <li
           key={`${item.number}-${item.title}`}
-          className="grid grid-cols-[2rem_minmax(0,1fr)] gap-3 rounded-xl border border-border bg-secondary/25 p-3.5"
+          className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-3 py-3.5"
         >
-          <span
+          <CheckCircle
+            className="mt-0.5 size-4 text-primary"
+            weight="fill"
             aria-hidden="true"
-            className="flex size-8 items-center justify-center rounded-lg bg-primary/10 font-mono text-[0.6875rem] font-medium text-primary"
-          >
-            {String(item.number).padStart(2, "0")}
-          </span>
-          <div className="min-w-0 pt-0.5">
+          />
+          <div className="min-w-0">
             <p className="text-sm font-medium leading-5 text-foreground">{item.title}</p>
             {item.detail && (
               <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.detail}</p>

@@ -137,12 +137,20 @@ pub fn list_templates() -> Vec<TemplateItem> {
 }
 
 #[tauri::command(async)]
-pub fn create_from_template(state: State<AppState>, template_name: String, new_name: String) -> Value {
+pub fn create_from_template(
+    state: State<AppState>,
+    template_name: String,
+    new_name: String,
+) -> Value {
     let result = create_from_template_in(&paths::macros_dir(), &template_name, &new_name);
     if result["ok"] == json!(true) {
         state.emit(
             "ok",
-            format!("Created '{}' from template '{}'", new_name.trim(), template_name),
+            format!(
+                "Created '{}' from template '{}'",
+                new_name.trim(),
+                template_name
+            ),
         );
     }
     result
@@ -161,7 +169,12 @@ pub fn delete_template(state: State<AppState>, template_name: String) -> Value {
 
 #[tauri::command(async)]
 pub fn rename_macro(state: State<AppState>, old_name: String, new_name: String) -> Value {
-    let result = rename_macro_in(&paths::macros_dir(), &paths::guards_dir(), &old_name, &new_name);
+    let result = rename_macro_in(
+        &paths::macros_dir(),
+        &paths::guards_dir(),
+        &old_name,
+        &new_name,
+    );
     if result["ok"] == json!(true) {
         let safe = result["name"].as_str().unwrap_or_default().to_string();
         let old = old_name.trim();
@@ -182,7 +195,10 @@ pub fn duplicate_macro(state: State<AppState>, name: String) -> Value {
     let result = duplicate_macro_in(&paths::macros_dir(), &paths::guards_dir(), &name);
     if result["ok"] == json!(true) {
         let new_name = result["name"].as_str().unwrap_or_default();
-        state.emit("ok", format!("Duplicated '{}' \u{2192} '{new_name}'", strip_json(&name)));
+        state.emit(
+            "ok",
+            format!("Duplicated '{}' \u{2192} '{new_name}'", strip_json(&name)),
+        );
     }
     result
 }
@@ -531,6 +547,9 @@ mod tests {
                 timestamp: i as f64 * 0.1,
                 x: 10 * i as i64,
                 y: 10 * i as i64,
+                mouse_motion: None,
+                dx: 0,
+                dy: 0,
                 button: "left".to_string(),
                 key: String::new(),
                 delta: 0,
@@ -572,7 +591,11 @@ mod tests {
         assert_eq!(r["ok"], json!(true), "create_from_template ok: {r}");
         let created =
             Macro::load(&macros.join(format!("{new_name}.json"))).expect("created macro loads");
-        assert_eq!(created.events.len(), 4, "created macro keeps the 4 source events");
+        assert_eq!(
+            created.events.len(),
+            4,
+            "created macro keeps the 4 source events"
+        );
         assert_eq!(created.name, new_name, "created macro is renamed");
 
         let r = delete_template_in(&macros, tpl);
@@ -610,12 +633,19 @@ mod tests {
 
         assert_eq!(r["ok"], json!(true));
         assert_eq!(r["deleted"].as_array().unwrap().len(), 3, "3 deleted");
-        assert_eq!(r["failed"].as_array().unwrap().len(), 1, "1 failed (missing)");
+        assert_eq!(
+            r["failed"].as_array().unwrap().len(),
+            1,
+            "1 failed (missing)"
+        );
         assert_eq!(r["failed"][0], json!("__test___bulk_missing"));
         for n in &names {
             assert!(!macros.join(format!("{n}.json")).exists(), "{n} removed");
         }
-        assert!(stats.get(&names[0]).is_none(), "stat removed for deleted macro");
+        assert!(
+            stats.get(&names[0]).is_none(),
+            "stat removed for deleted macro"
+        );
     }
 
     #[test]
@@ -628,7 +658,10 @@ mod tests {
 
         let r = delete_macro_in(&macros, &stats, name);
         assert_eq!(r["ok"], json!(true));
-        assert!(!macros.join(format!("{name}.json")).exists(), "file removed");
+        assert!(
+            !macros.join(format!("{name}.json")).exists(),
+            "file removed"
+        );
         assert!(stats.get(name).is_none(), "stat removed");
 
         let r = delete_macro_in(&macros, &stats, "__test___nope");
@@ -646,7 +679,10 @@ mod tests {
         // 0 → infinite loop.
         let r = set_repeat_in(&macros, name, 0);
         assert_eq!(r["ok"], json!(true));
-        assert_eq!((r["loop"].clone(), r["loop_count"].clone()), (json!(true), json!(0)));
+        assert_eq!(
+            (r["loop"].clone(), r["loop_count"].clone()),
+            (json!(true), json!(0))
+        );
         let m = load();
         assert!(m.loop_enabled && m.loop_count == 0, "infinite persisted");
 
@@ -699,7 +735,11 @@ mod tests {
         let name = "__test___dup";
         make_macro(&macros, name, 3);
         GuardFile {
-            guards: vec![Guard { id: "g1".into(), name: "Recon".into(), ..Default::default() }],
+            guards: vec![Guard {
+                id: "g1".into(),
+                name: "Recon".into(),
+                ..Default::default()
+            }],
         }
         .save_to(&guards.join(format!("{name}.json")))
         .unwrap();
@@ -729,19 +769,33 @@ mod tests {
         let guards = temp_dir("rename_guards");
         let old = "__test___old";
         make_macro(&macros, old, 2);
-        GuardFile { guards: vec![Guard { id: "g1".into(), ..Default::default() }] }
-            .save_to(&guards.join(format!("{old}.json")))
-            .unwrap();
+        GuardFile {
+            guards: vec![Guard {
+                id: "g1".into(),
+                ..Default::default()
+            }],
+        }
+        .save_to(&guards.join(format!("{old}.json")))
+        .unwrap();
 
         // "!!" is stripped by the sanitizer, surrounding whitespace trimmed.
         let r = rename_macro_in(&macros, &guards, old, "  new name!!  ");
         assert_eq!(r["ok"], json!(true));
         assert_eq!(r["name"], json!("new name"));
-        assert!(!macros.join(format!("{old}.json")).exists(), "old macro removed");
+        assert!(
+            !macros.join(format!("{old}.json")).exists(),
+            "old macro removed"
+        );
         let moved = Macro::load(&macros.join("new name.json")).unwrap();
         assert_eq!(moved.name, "new name", "stored name updated");
-        assert!(!guards.join(format!("{old}.json")).exists(), "old guard removed");
-        assert!(guards.join("new name.json").exists(), "guard moved alongside");
+        assert!(
+            !guards.join(format!("{old}.json")).exists(),
+            "old guard removed"
+        );
+        assert!(
+            guards.join("new name.json").exists(),
+            "guard moved alongside"
+        );
     }
 
     #[test]
@@ -751,7 +805,10 @@ mod tests {
         make_macro(&macros, "__test___a", 1);
         make_macro(&macros, "__test___b", 1);
 
-        assert_eq!(rename_macro_in(&macros, &guards, "  ", "x")["error"], json!("Empty name"));
+        assert_eq!(
+            rename_macro_in(&macros, &guards, "  ", "x")["error"],
+            json!("Empty name")
+        );
         assert_eq!(
             rename_macro_in(&macros, &guards, "__test___a", "   ")["error"],
             json!("Empty name")

@@ -206,6 +206,7 @@ export function describeTrigger(d: TriggerDraft): string {
  *  pixel on screen as a single blob and clicks its centre, on repeat. The
  *  default now reads as "nothing chosen yet", which is what it is. */
 export function isTriggerReady(d: TriggerDraft): boolean {
+  if (d.action === "key" && !d.key.trim()) return false;
   const look = lookOf(d.method);
   if (look === "color") {
     return Array.isArray(d.hsv_low) && d.hsv_low.length === 3 && !isUnpickedColor(d.hsv_low, d.hsv_high);
@@ -251,12 +252,15 @@ export function newTriggerDraft(name = ""): TriggerDraft {
   };
 }
 
-/** A fresh Watch trigger: [`newTriggerDraft`] with no wait between repeats. The
- *  standalone watcher usually exists to keep pressing a thing the moment it comes
- *  back, so zero is its right default; per-macro guards keep the steadier two
- *  seconds, where re-firing during playback is a hazard rather than the point. */
+/** A fresh Watch trigger starts on the visual capture path shown first in the
+ *  guided Watch workspace, with no wait between repeats. Per-macro guards keep
+ *  the steadier colour default and two-second pace. */
 export function newWatchDraft(name = ""): TriggerDraft {
-  return { ...newTriggerDraft(name), cooldown: 0 };
+  return {
+    ...newTriggerDraft(name),
+    method: methodFor("image"),
+    cooldown: 0,
+  };
 }
 
 const num = (v: unknown, d: number): number => (typeof v === "number" && !Number.isNaN(v) ? v : d);
@@ -306,7 +310,7 @@ export function guardFromDraft(d: TriggerDraft, opts?: { forTest?: boolean }): G
     name: d.name || "Trigger",
     method: d.method,
     action: d.action,
-    key: d.key || "",
+    key: d.key.trim(),
     hsv_low: d.hsv_low,
     hsv_high: d.hsv_high,
     template_path: d.template_path || "",

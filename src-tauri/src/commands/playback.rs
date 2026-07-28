@@ -58,8 +58,8 @@ pub fn emergency_stop_impl(state: &AppState) -> Value {
     // A running chain keeps firing macro after macro on its own thread; flag it
     // to halt after the current one. With the player stopped above (the in-flight
     // macro dies), this ends the whole chain rather than just the macro it was on.
-    // The vision watch below is the "autopilot" loop; there is no other autopilot
-    // runtime, so recording + playback + chain + vision is the complete stop set.
+    // The vision watcher is an independent background runtime, so recording +
+    // playback + chain + vision is the complete stop set.
     if state.chains.running_chain().is_some() {
         state.chains.stop();
         stopped.push("chain");

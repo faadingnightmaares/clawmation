@@ -48,6 +48,31 @@ update from that moment.
 The rest of this file is what that workflow does, for when you need to do it by
 hand or work out why it didn't.
 
+## Rollback
+
+Publishing `latest.json` starts distribution immediately, but the updater never
+downgrades an installed copy. Use this procedure if a critical regression is
+found:
+
+1. Unpublish the affected GitHub release, or remove its `latest.json` asset, to
+   stop additional clients from discovering it. Confirm the updater endpoint no
+   longer returns the affected version.
+2. Keep the affected installer and signature unchanged. Never replace a signed
+   asset under the same tag or filename; downloads and caches may already hold
+   the original bytes.
+3. Fix forward and publish the next patch version, such as `1.2.1`, through the
+   normal signed release workflow.
+4. If users need an immediate manual rollback, point them to the last known-good
+   signed installer and tell them to preserve their Clawmation data directory
+   first. Copies already on the affected version will not downgrade through the
+   in-app updater.
+5. Re-publish update discovery only after the replacement build passes the full
+   test, installer, signature, and smoke-test checklist.
+
+For `1.2.0`, the last known-good release is `v1.1.9`. Legacy macro migrations
+also keep a backup beside the upgraded file; do not delete or rewrite those
+backups during incident response.
+
 ## Cutting a release by hand
 
 1. Bump the version in **three** places, which must agree:

@@ -25,9 +25,8 @@ export interface EditorSheetProps {
 /** The guards-for-one-macro state machine, shared by the Macros drawer and the
  *  in-place Protection editor. `active` gates the load: the drawer is always
  *  mounted and loads when it opens; the inline editor is mounted only while its
- *  row is open, so it passes `true` and loads on mount. Opening on a macro with
- *  no guards drops straight into the editor — an empty list with a button would
- *  just be a button you came here to press. */
+ *  row is open, so it passes `true` and loads on mount. Empty macros stay on
+ *  the compact state until the user explicitly chooses to add a guard. */
 function useGuardsEditor(macroName: string, active: boolean, onChanged?: () => void) {
   const [guards, setGuards] = useState<Guard[]>([]);
   const [loading, setLoading] = useState(false);
@@ -40,7 +39,6 @@ function useGuardsEditor(macroName: string, active: boolean, onChanged?: () => v
       const r = await guardList(macroName);
       const list = r.ok ? r.guards ?? [] : [];
       setGuards(list);
-      if (!list.length) setEditing(newTriggerDraft());
     } catch {
       setGuards([]);
     } finally {
@@ -189,7 +187,15 @@ export function GuardsSheet({ macroName, open, onOpenChange, onChanged }: Editor
  *  a drawer, the way a trigger or a macro row opens onto its editor. A guard
  *  row expands onto its editor right beneath it; a new guard is a card above the
  *  list. */
-export function GuardsEditor({ macroName, onChanged }: { macroName: string; onChanged?: () => void }) {
+export function GuardsEditor({
+  macroName,
+  onChanged,
+  embedded = false,
+}: {
+  macroName: string;
+  onChanged?: () => void;
+  embedded?: boolean;
+}) {
   const h = useGuardsEditor(macroName, true, onChanged);
   const title = h.editing ? (h.editingIsNew ? "New guard" : "Edit guard") : "Safety guards";
   const desc = h.editing
@@ -199,10 +205,12 @@ export function GuardsEditor({ macroName, onChanged }: { macroName: string; onCh
 
   return (
     <div>
-      <div className="space-y-1 border-b border-border px-4 py-3">
-        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-        <p className="text-xs text-muted-foreground">{desc}</p>
-      </div>
+      {!embedded && (
+        <div className="space-y-1 border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          <p className="text-xs text-muted-foreground">{desc}</p>
+        </div>
+      )}
 
       <div className="space-y-3 px-4 py-4">
         {h.loading ? (

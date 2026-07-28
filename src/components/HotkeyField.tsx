@@ -91,7 +91,15 @@ export function HotkeyField({ id, label, value, onCapture }: HotkeyFieldProps) {
   useEffect(() => {
     const el = capsRef.current;
     if (!el || !value || reducedMotion()) return;
-    animate(el, { scale: [0.82, 1], opacity: [0, 1], duration: 320, ease: "out(3)" });
+    const animation = animate(el, {
+      scale: [0.9, 1],
+      opacity: [0, 1],
+      duration: 240,
+      ease: "out(3.5)",
+    });
+    return () => {
+      animation.cancel();
+    };
   }, [value]);
 
   const caps = accelCaps(value);

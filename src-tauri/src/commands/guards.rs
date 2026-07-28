@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State, Window};
 
@@ -45,7 +47,10 @@ pub fn get_all_guard_counts() -> Value {
             }
             // Per-file failures are swallowed, as in the source's `except: pass`.
             let Ok(data) = load_json(&path) else { continue };
-            let n = data.get("guards").and_then(Value::as_array).map_or(0, Vec::len);
+            let n = data
+                .get("guards")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
             if n > 0 {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     counts.insert(stem.to_string(), json!(n));
@@ -68,7 +73,10 @@ pub fn count_all_guards() -> i64 {
                 continue;
             }
             let Ok(data) = load_json(&path) else { continue };
-            total += data.get("guards").and_then(Value::as_array).map_or(0, Vec::len) as i64;
+            total += data
+                .get("guards")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as i64;
         }
     }
     total
@@ -95,7 +103,10 @@ pub fn guard_save(state: State<AppState>, macro_name: String, guards: Option<Vec
         state.emit("err", format!("Guard save failed: {e}"));
         return json!({ "ok": false, "error": e.to_string() });
     }
-    state.emit("ok", format!("Saved {} guard(s) for {macro_name}", file.guards.len()));
+    state.emit(
+        "ok",
+        format!("Saved {} guard(s) for {macro_name}", file.guards.len()),
+    );
     json!({ "ok": true })
 }
 
@@ -115,7 +126,12 @@ pub fn guard_test(state: State<AppState>, window: Window, guard: Value) -> Value
     let backend = state.core.config.lock().unwrap().capture_backend.clone();
     // The editor is on top of whatever the guard watches for; test against the
     // screen the guard will actually see at run time.
-    with_window_out_of_frame(&window, || state.core.vision.guard_test(w as i64, h as i64, &backend, &g))
+    with_window_out_of_frame(&window, || {
+        state
+            .core
+            .vision
+            .guard_test(w as i64, h as i64, &backend, &g)
+    })
 }
 
 /// The interactive pickers the guard/trigger editor opens, each a 1:1 replacement
@@ -141,19 +157,43 @@ pub fn guard_pick_region(window: Window) -> Value {
 
 #[tauri::command(async)]
 pub fn capture_template(window: Window) -> Value {
-    with_window_out_of_frame(&window, || picker::capture_template(&paths::templates_dir()))
+    with_window_out_of_frame(
+        &window,
+        || picker::capture_template(&paths::templates_dir()),
+    )
 }
 
 /// The one picker that opens a file dialog instead of the screen, so there is no
 /// overlay and no window to hide.
 #[tauri::command(async)]
 pub fn add_template_image(app: AppHandle, state: State<AppState>) -> Value {
-    state.core.vision.add_template_image(&app, &paths::templates_dir())
+    state
+        .core
+        .vision
+        .add_template_image(&app, &paths::templates_dir())
+}
+
+#[tauri::command(async)]
+pub fn save_template_upload(data_base64: String) -> Value {
+    const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+    let bytes = match STANDARD.decode(data_base64) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return json!({ "ok": false, "error": format!("Invalid image data: {error}") })
+        }
+    };
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return json!({ "ok": false, "error": "Image is larger than 20 MB" });
+    }
+    picker::import_template_bytes(&paths::templates_dir(), &bytes)
 }
 
 #[tauri::command(async)]
 pub fn surgical_capture(window: Window) -> Value {
-    with_window_out_of_frame(&window, || picker::surgical_capture(&paths::templates_dir()))
+    with_window_out_of_frame(
+        &window,
+        || picker::surgical_capture(&paths::templates_dir()),
+    )
 }
 
 /// Read a JSON file into a `Value`, collapsing IO and parse failures into one

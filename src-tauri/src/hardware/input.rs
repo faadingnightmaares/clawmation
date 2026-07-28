@@ -25,19 +25,20 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{GetLastError, POINT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SetCursorPos, SystemParametersInfoW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETMOUSE, SPI_GETMOUSESPEED, SPI_SETMOUSE,
-    SPI_SETMOUSESPEED,
+    GetCursorPos, GetSystemMetrics, SetCursorPos, SystemParametersInfoW, SM_CXSCREEN,
+    SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SPI_GETMOUSE, SPI_GETMOUSESPEED, SPI_SETMOUSE, SPI_SETMOUSESPEED,
 };
 
 use crate::hardware::dpi::PerMonitorAware;
-use crate::models::macro_def::{InputEventType, MacroEvent};
+use crate::models::macro_def::{InputEventType, MacroEvent, MouseMotionMode};
 
 /// One wheel notch, as Win32 defines it.
 const WHEEL_DELTA: i32 = 120;
@@ -297,9 +298,17 @@ fn virtual_screen() -> (i32, i32, i32, i32) {
         let ox = GetSystemMetrics(SM_XVIRTUALSCREEN);
         let oy = GetSystemMetrics(SM_YVIRTUALSCREEN);
         let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        let w = if vw != 0 { vw } else { GetSystemMetrics(SM_CXSCREEN) };
+        let w = if vw != 0 {
+            vw
+        } else {
+            GetSystemMetrics(SM_CXSCREEN)
+        };
         let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        let h = if vh != 0 { vh } else { GetSystemMetrics(SM_CYSCREEN) };
+        let h = if vh != 0 {
+            vh
+        } else {
+            GetSystemMetrics(SM_CYSCREEN)
+        };
         (ox, oy, w.max(1), h.max(1))
     }
 }
@@ -338,7 +347,11 @@ where
 
 fn send(inputs: &[INPUT], operation: &'static str) -> InputResult {
     send_with(inputs, operation, |remaining| unsafe {
-        let sent = SendInput(remaining.len() as u32, remaining.as_ptr(), size_of::<INPUT>() as i32) as usize;
+        let sent = SendInput(
+            remaining.len() as u32,
+            remaining.as_ptr(),
+            size_of::<INPUT>() as i32,
+        ) as usize;
         (sent, GetLastError())
     })
 }
@@ -386,8 +399,9 @@ fn key_input(vk: u16, up: bool) -> INPUT {
         vk,
         0x21..=0x2E | 0x5B..=0x5D | 0x90 | 0xA3 | 0xA5
     );
-    let flags =
-        KEYEVENTF_SCANCODE | if up { KEYEVENTF_KEYUP } else { 0 } | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+    let flags = KEYEVENTF_SCANCODE
+        | if up { KEYEVENTF_KEYUP } else { 0 }
+        | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -411,7 +425,12 @@ fn key_input(vk: u16, up: bool) -> INPUT {
 fn get_mouse_settings() -> Option<(i32, i32)> {
     unsafe {
         let mut speed: i32 = 10;
-        let ok_speed = SystemParametersInfoW(SPI_GETMOUSESPEED, 0, &mut speed as *mut i32 as *mut c_void, 0);
+        let ok_speed = SystemParametersInfoW(
+            SPI_GETMOUSESPEED,
+            0,
+            &mut speed as *mut i32 as *mut c_void,
+            0,
+        );
         let mut accel: [i32; 3] = [0, 0, 0];
         let ok_accel = SystemParametersInfoW(SPI_GETMOUSE, 0, accel.as_mut_ptr() as *mut c_void, 0);
         if ok_speed == 0 || ok_accel == 0 {
@@ -473,10 +492,10 @@ impl Drop for NoAcceleration {
 // holds one too because it reads the curve's start point with `GetCursorPos`.
 // Relative `MOUSEEVENTF_MOVE` deltas are raw counts rather than screen
 // coordinates, so `move_relative` passes the recorded physical delta through
-// unchanged for Raw Input consumers. Windows can still scale the visible cursor
-// path, so the player follows each relative event with a `SetCursorPos`-only
-// reconciliation. The recorder guards its hook thread, the player guards the
-// playback thread, and `screen_size` guards the resolution query the same way.
+// unchanged for Raw Input consumers. Explicit game-camera events stay
+// relative-only because Roblox owns and recenters the visible cursor. The
+// recorder guards its hook thread, the player guards the playback thread, and
+// `screen_size` guards the resolution query the same way.
 
 // ── Controller ───────────────────────────────────────────────────────────────
 
@@ -535,10 +554,13 @@ impl InputController {
             return Ok(());
         }
         // `MOUSEINPUT::dx`/`dy` are Raw Input counts, not screen coordinates.
-        // Preserve the recorded delta for game camera movement; the player
-        // separately reconciles the visible cursor to its physical target.
+        // Preserve the recorded delta for game camera movement. Explicit camera
+        // events remain relative-only; pointer events use the absolute path.
         let (dx, dy) = crate::hardware::dpi::relative_counts(dx, dy);
-        send(&[mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0)], "relative mouse move")
+        send(
+            &[mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0)],
+            "relative mouse move",
+        )
     }
 
     /// Reconcile the visible cursor with a recorded physical target without
@@ -649,7 +671,12 @@ impl InputController {
             self.try_move_to(x, y)?;
         }
         send(
-            &[mouse_input(button_flags(button, true), 0, 0, button_data(button))],
+            &[mouse_input(
+                button_flags(button, true),
+                0,
+                0,
+                button_data(button),
+            )],
             "mouse button down",
         )
     }
@@ -672,7 +699,12 @@ impl InputController {
             self.try_move_to(x, y)?;
         }
         send(
-            &[mouse_input(button_flags(button, false), 0, 0, button_data(button))],
+            &[mouse_input(
+                button_flags(button, false),
+                0,
+                0,
+                button_data(button),
+            )],
             "mouse button up",
         )
     }
@@ -782,7 +814,14 @@ impl InputController {
     /// Replay a single recorded event with an optional coordinate transform
     /// (offset + scale), mirroring `InputController.replay_event`. `CHECKPOINT`
     /// events are handled by the player, not here, so they're a no-op.
-    pub fn replay_event(&self, event: &MacroEvent, x_offset: i32, y_offset: i32, x_scale: f64, y_scale: f64) {
+    pub fn replay_event(
+        &self,
+        event: &MacroEvent,
+        x_offset: i32,
+        y_offset: i32,
+        x_scale: f64,
+        y_scale: f64,
+    ) {
         let _ = self.try_replay_event(event, x_offset, y_offset, x_scale, y_scale);
     }
 
@@ -798,6 +837,11 @@ impl InputController {
         let y = (event.y as f64 * y_scale) as i32 + y_offset;
 
         match event.event_type {
+            InputEventType::MouseMove if event.mouse_motion == Some(MouseMotionMode::Camera) => {
+                let dx = event.dx.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                let dy = event.dy.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                self.try_move_relative(dx, dy)
+            }
             InputEventType::MouseMove => self.try_move_to(x, y),
             InputEventType::MouseDown => self.try_mouse_down(Some((x, y)), &event.button),
             InputEventType::MouseUp => self.try_mouse_up(Some((x, y)), &event.button),

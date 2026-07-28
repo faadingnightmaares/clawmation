@@ -1,27 +1,62 @@
 import { useCallback, useEffect, useState } from "react";
-import { GitBranch, SpinnerGap } from "@phosphor-icons/react";
+import { Plus, SpinnerGap } from "@phosphor-icons/react";
 
-import { listMacros, type MacroListItem } from "@/api";
+import {
+  listChains,
+  listMacros,
+  nodeGraphCreate,
+  nodeGraphDelete,
+  nodeGraphList,
+  nodeGraphRename,
+  type Chain,
+  type MacroListItem,
+  type NodeLoopItem,
+} from "@/api";
 import { NodeGraphEditor } from "@/components/nodes/NodeGraphEditor";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { notify } from "@/lib/toast";
+import { VIEW_ICONS, VIEW_ICON_STROKE_WIDTH } from "@/nav";
 import type { ViewProps } from "./types";
 
-export function Nodes(_props: ViewProps) {
+const LoopsIcon = VIEW_ICONS.nodes;
+
+export function Nodes({ status, active = true }: ViewProps) {
+  const [loops, setLoops] = useState<NodeLoopItem[]>([]);
   const [macros, setMacros] = useState<MacroListItem[]>([]);
+  const [chains, setChains] = useState<Chain[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [emptyMenu, setEmptyMenu] = useState<{ left: number; top: number } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (preferredName?: string) => {
     setLoading(true);
     setError("");
     try {
-      const next = (await listMacros()) ?? [];
-      setMacros(next);
+      const [nextLoops, nextMacros, nextChains] = await Promise.all([
+        nodeGraphList(),
+        listMacros(),
+        listChains(),
+      ]);
+      setLoops(nextLoops);
+      setMacros(nextMacros);
+      setChains(nextChains ?? []);
       setSelectedName((current) => {
-        if (current && next.some((macro) => macro.name === current)) return current;
-        return next[0]?.name ?? null;
+        const preferred = preferredName || current;
+        if (preferred && nextLoops.some((loop) => loop.name === preferred)) return preferred;
+        return nextLoops[0]?.name ?? null;
       });
     } catch (loadError) {
       setError(String(loadError));
@@ -34,80 +69,202 @@ export function Nodes(_props: ViewProps) {
     void load();
   }, [load]);
 
-  return (
-    <div className="grid h-full min-h-0 w-full grid-cols-[220px_minmax(0,1fr)] overflow-hidden bg-background">
-      <aside className="flex min-h-0 flex-col border-r border-border bg-card">
-        <div className="shrink-0 border-b border-border px-4 py-3">
-          <div className="flex items-center gap-2">
-            <GitBranch className="size-4 text-primary" weight="bold" />
-            <h1 className="text-sm font-semibold text-foreground">Nodes</h1>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {macros.length} {macros.length === 1 ? "macro" : "macros"}
-          </p>
-        </div>
+  useEffect(() => {
+    if (active) return;
+    setDeleteTarget(null);
+    setEmptyMenu(null);
+  }, [active]);
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          {loading ? (
-            <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
-              <SpinnerGap className="size-4 animate-spin" />
-              Loading macros
-            </div>
-          ) : error ? (
-            <div className="p-2">
-              <p className="text-xs text-destructive">Couldn&apos;t load macros.</p>
-              <Button className="mt-3" variant="outline" size="sm" onClick={() => void load()}>
-                Retry
-              </Button>
-            </div>
-          ) : macros.length === 0 ? (
-            <p className="px-2 py-3 text-xs leading-5 text-muted-foreground">
-              Record or create a macro first. Its graph will appear here.
+  useEffect(() => {
+    if (!active || !emptyMenu) return;
+    const close = () => setEmptyMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [active, emptyMenu]);
+
+  const createLoop = async () => {
+    setBusy(true);
+    try {
+      const result = await nodeGraphCreate("Loop");
+      if (!result.ok || !result.name) {
+        notify("error", result.error || "Couldn’t create the Loop.");
+        return;
+      }
+      setEmptyMenu(null);
+      await load(result.name);
+    } catch (createError) {
+      notify("error", String(createError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const renameLoop = async (oldName: string, newName: string): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const result = await nodeGraphRename(oldName, newName);
+      if (!result.ok || !result.name) {
+        notify("error", result.error || "Couldn’t rename the Loop.");
+        return false;
+      }
+      await load(selectedName === oldName ? result.name : selectedName ?? undefined);
+      return true;
+    } catch (renameError) {
+      notify("error", String(renameError));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteLoop = async () => {
+    if (!deleteTarget) return;
+    setBusy(true);
+    try {
+      const result = await nodeGraphDelete(deleteTarget);
+      if (!result.ok) {
+        notify("error", result.error || "Couldn’t delete the Loop.");
+        return;
+      }
+      localStorage.removeItem(`clawmation:node-draft:${deleteTarget}`);
+      const preferredName = selectedName === deleteTarget ? undefined : selectedName ?? undefined;
+      setDeleteTarget(null);
+      await load(preferredName);
+    } catch (deleteError) {
+      notify("error", String(deleteError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading && loops.length === 0) {
+    return (
+      <div className="grid h-full place-items-center bg-background text-sm text-muted-foreground">
+        <span className="flex items-center gap-2">
+          <SpinnerGap className="size-4 animate-spin" />
+          Loading Loops
+        </span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="grid h-full place-items-center bg-background px-8 text-center">
+        <div>
+          <p className="text-sm font-medium text-destructive">Couldn’t load Loops.</p>
+          <Button className="mt-3" variant="outline" size="sm" onClick={() => void load()}>
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full min-h-0 w-full overflow-hidden bg-background">
+      {selectedName ? (
+        <NodeGraphEditor
+          key={selectedName}
+          loopName={selectedName}
+          loops={loops}
+          macros={macros}
+          chains={chains}
+          status={status}
+          active={active}
+          workspaceBusy={busy}
+          onSelectLoop={setSelectedName}
+          onCreateLoop={createLoop}
+          onRenameLoop={renameLoop}
+          onDeleteLoop={setDeleteTarget}
+          onChanged={() => load(selectedName)}
+        />
+      ) : (
+        <div
+          className="node-empty-canvas relative grid h-full place-items-center overflow-hidden bg-background px-8 text-center"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            const bounds = event.currentTarget.getBoundingClientRect();
+            setEmptyMenu({
+              left: Math.max(8, Math.min(event.clientX - bounds.left, bounds.width - 190)),
+              top: Math.max(8, Math.min(event.clientY - bounds.top, bounds.height - 62)),
+            });
+          }}
+        >
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle,hsl(var(--border))_1px,transparent_1px)] [background-size:24px_24px]" />
+          <div className="relative max-w-sm">
+            <LoopsIcon
+              className="mx-auto size-10 text-muted-foreground/45"
+              strokeWidth={VIEW_ICON_STROKE_WIDTH}
+            />
+            <p className="mt-3 text-sm font-semibold text-foreground">Create your first Loop</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              A Loop is a complete node workflow containing any number of macros, waits, guards,
+              and branches.
             </p>
-          ) : (
-            <div className="grid gap-1">
-              {macros.map((macro) => {
-                const active = macro.name === selectedName;
-                return (
-                  <button
-                    key={macro.name}
-                    type="button"
-                    onClick={() => setSelectedName(macro.name)}
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "w-full rounded-md px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-                      active
-                        ? "bg-primary/10 text-foreground"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    <span className="block truncate text-xs font-medium">{macro.name}</span>
-                    <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                      {macro.events} {macro.events === 1 ? "event" : "events"}
-                    </span>
-                  </button>
-                );
-              })}
+            <Button className="mt-4" size="sm" onClick={() => void createLoop()} disabled={busy}>
+              {busy ? <SpinnerGap className="size-4 animate-spin" /> : <Plus className="size-4" />}
+              New Loop
+            </Button>
+            <p className="mt-3 text-[10px] text-muted-foreground">
+              You can also right-click anywhere on the canvas.
+            </p>
+          </div>
+
+          {emptyMenu && (
+            <div
+              role="menu"
+              aria-label="Loop menu"
+              className="absolute z-20 w-44 rounded-md border border-border bg-popover p-1.5 shadow-xl"
+              style={{ left: emptyMenu.left, top: emptyMenu.top }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs font-medium text-popover-foreground hover:bg-accent"
+                onClick={() => void createLoop()}
+              >
+                <Plus className="size-4 text-primary" weight="bold" />
+                New Loop
+              </button>
             </div>
           )}
         </div>
-      </aside>
+      )}
 
-      <section className="min-h-0 min-w-0">
-        {selectedName ? (
-          <NodeGraphEditor key={selectedName} macroName={selectedName} onChanged={load} />
-        ) : (
-          <div className="grid h-full place-items-center px-8 text-center">
-            <div>
-              <GitBranch className="mx-auto size-10 text-muted-foreground/40" />
-              <p className="mt-3 text-sm font-medium text-foreground">No graph selected</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Choose a macro from the library to build its node graph.
-              </p>
-            </div>
-          </div>
-        )}
-      </section>
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{deleteTarget}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes only the Loop workflow. Recorded macros inside it are not deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => void deleteLoop()}
+              disabled={busy}
+            >
+              Delete Loop
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
