@@ -90,16 +90,34 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
     let act: Act = {
         let core = core.clone();
         Box::new(move |action: VisionAction| match action {
-            VisionAction::KeyDown(key) => core.controller.key_down(&key),
-            VisionAction::KeyUp(key) => core.controller.key_up(&key),
-            VisionAction::Nudge(x, y) => {
-                core.controller.move_to(x as i32, y as i32);
-                core.controller.nudge();
+            VisionAction::FocusAt(x, y) => {
+                crate::hardware::window::focus_window_at_point(x as i32, y as i32)
             }
-            VisionAction::MoveTo(x, y) => core.controller.move_to(x as i32, y as i32),
-            VisionAction::MouseDown(button) => core.controller.mouse_down(None, &button),
-            VisionAction::MouseUp(button) => core.controller.mouse_up(None, &button),
-            VisionAction::Pause(duration) => std::thread::sleep(duration),
+            VisionAction::Click(x, y) => core
+                .controller
+                .try_click(x as i32, y as i32, "left")
+                .map_err(|error| error.to_string()),
+            VisionAction::KeyPress(key) => core
+                .controller
+                .try_key_press(&key)
+                .map_err(|error| error.to_string()),
+            VisionAction::Nudge(x, y) => core
+                .controller
+                .try_move_to(x as i32, y as i32)
+                .and_then(|_| core.controller.try_nudge())
+                .map_err(|error| error.to_string()),
+            VisionAction::MoveTo(x, y) => core
+                .controller
+                .try_move_to(x as i32, y as i32)
+                .map_err(|error| error.to_string()),
+            VisionAction::MouseDown(button) => core
+                .controller
+                .try_mouse_down(None, &button)
+                .map_err(|error| error.to_string()),
+            VisionAction::MouseUp(button) => core
+                .controller
+                .try_mouse_up(None, &button)
+                .map_err(|error| error.to_string()),
         })
     };
     let on_event: OnEvent = {

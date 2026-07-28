@@ -581,9 +581,13 @@ impl InputController {
     /// them so a game polling the cursor position once per frame still catches
     /// the displaced position rather than only the cancellation.
     pub fn nudge(&self) {
-        self.move_relative(1, 0);
+        let _ = self.try_nudge();
+    }
+
+    pub fn try_nudge(&self) -> InputResult {
+        self.try_move_relative(1, 0)?;
         std::thread::sleep(Duration::from_millis(16));
-        self.move_relative(-1, 0);
+        self.try_move_relative(-1, 0)
     }
 
     /// Human-like cursor move to `(x, y)` along a cubic Bézier curve.

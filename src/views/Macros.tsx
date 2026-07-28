@@ -1024,8 +1024,8 @@ export function Macros({ status, active = true }: ViewProps) {
 
       {/* ── Search, category, sort ──────────────────────────────────────── */}
       {macros.length > 0 && (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.75fr)_minmax(340px,1fr)]">
-          <div className="grid gap-3 sm:grid-cols-[minmax(220px,1fr)_145px_180px]">
+        <div className="macro-toolbar">
+          <div className="macro-toolbar-grid grid gap-3">
             <div className="relative min-w-0">
               <IconSearch className="pointer-events-none absolute left-3.5 top-1/2 size-[18px] -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -1040,7 +1040,7 @@ export function Macros({ status, active = true }: ViewProps) {
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="outline"
-                  className="h-11 justify-between rounded-lg px-4"
+                  className="h-11 w-full justify-between rounded-lg px-4"
                 >
                   <span className="flex min-w-0 items-center gap-2">
                     <IconFilter className="size-[18px]" strokeWidth={1.7} />
@@ -1070,7 +1070,10 @@ export function Macros({ status, active = true }: ViewProps) {
               </DropdownMenuContent>
             </DropdownMenu>
             <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-              <SelectTrigger className="h-11 w-full rounded-lg" aria-label="Sort macros">
+              <SelectTrigger
+                className="!h-11 w-full rounded-lg"
+                aria-label="Sort macros"
+              >
                 <IconAdjustmentsHorizontal className="size-[18px]" />
                 <SelectValue />
               </SelectTrigger>
@@ -1082,38 +1085,38 @@ export function Macros({ status, active = true }: ViewProps) {
                 <SelectItem value="events">Most actions</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-          <div
-            role="tablist"
-            aria-label="Macro views"
-            className="grid h-11 grid-cols-4 overflow-hidden rounded-lg border border-border bg-card"
-          >
-            {(
-              [
-                ["all", "All", null],
-                ["recent", "Recent", IconClock],
-                ["favorites", "Favorites", IconStar],
-                ["ready", "Ready", IconPlayerPlay],
-              ] as const
-            ).map(([value, label, Icon]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={tab === value}
-                onClick={() => setTab(value)}
-                className={cn(
-                  "relative flex items-center justify-center gap-1.5 border-l border-border/70 px-2 text-xs font-medium text-muted-foreground transition-colors first:border-l-0 hover:text-foreground",
-                  tab === value && "bg-primary/5 text-primary",
-                )}
-              >
-                {Icon && <Icon className="size-4" strokeWidth={1.7} />}
-                <span>{label}</span>
-                {tab === value && (
-                  <span className="absolute inset-x-0 bottom-0 h-0.5 bg-primary" />
-                )}
-              </button>
-            ))}
+            <div
+              role="tablist"
+              aria-label="Macro views"
+              className="macro-toolbar-tabs grid h-11 grid-cols-4 overflow-hidden rounded-lg border border-border bg-card"
+            >
+              {(
+                [
+                  ["all", "All", null],
+                  ["recent", "Recent", IconClock],
+                  ["favorites", "Favorites", IconStar],
+                  ["ready", "Ready", IconPlayerPlay],
+                ] as const
+              ).map(([value, label, Icon]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === value}
+                  onClick={() => setTab(value)}
+                  className={cn(
+                    "relative flex items-center justify-center gap-1.5 border-l border-border/70 px-2 text-xs font-medium text-muted-foreground transition-colors first:border-l-0 hover:text-foreground",
+                    tab === value && "bg-primary/5 text-primary",
+                  )}
+                >
+                  {Icon && <Icon className="size-4" strokeWidth={1.7} />}
+                  <span>{label}</span>
+                  {tab === value && (
+                    <span className="absolute inset-x-0 bottom-0 h-0.5 bg-primary" />
+                  )}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -1756,13 +1759,13 @@ function MacrosLoadingState() {
             </div>
           </header>
 
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1.75fr)_minmax(340px,1fr)]">
-            <div className="grid gap-3 sm:grid-cols-[minmax(220px,1fr)_145px_180px]">
+          <div className="macro-toolbar">
+            <div className="macro-toolbar-grid grid gap-3">
               <Skeleton className="h-11 rounded-lg" />
               <Skeleton className="h-11 rounded-lg" />
               <Skeleton className="h-11 rounded-lg" />
+              <Skeleton className="macro-toolbar-tabs h-11 rounded-lg" />
             </div>
-            <Skeleton className="h-11 rounded-lg" />
           </div>
 
           <div className="grid min-h-0 flex-1 gap-5 overflow-hidden lg:grid-cols-[minmax(0,1.75fr)_minmax(320px,1fr)]">

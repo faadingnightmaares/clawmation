@@ -385,6 +385,38 @@
     container-type: inline-size;
   }
 
+  .macro-toolbar {
+    container-type: inline-size;
+  }
+
+  .macro-toolbar-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  @container (min-width: 620px) {
+    .macro-toolbar-grid {
+      grid-template-columns: minmax(180px, 1fr) 145px 180px;
+    }
+
+    .macro-toolbar-tabs {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @container (min-width: 960px) {
+    .macro-toolbar-grid {
+      grid-template-columns:
+        minmax(220px, 1fr)
+        145px
+        180px
+        minmax(340px, 1fr);
+    }
+
+    .macro-toolbar-tabs {
+      grid-column: auto;
+    }
+  }
+
   .macro-row {
     min-height: 164px;
   }

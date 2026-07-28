@@ -20,10 +20,10 @@
 //!   watcher never spends more than [`IDLE_DUTY`] of a core hunting. Cheap
 //!   checks stay effectively as fast as before; expensive ones back off on
 //!   their own, on whatever machine they land on, with no tuning to guess at.
-//! * **A trigger that just fired runs at its own `cooldown`,** with no duty
-//!   floor at all. At the default of zero that means straight back round on the
-//!   next frame: collecting a thing that keeps reappearing goes as fast as the
-//!   hardware allows, which is the whole point of the watcher.
+//! * **Cooldown limits actions, not detection.** A visible target is still
+//!   checked at its adaptive cadence while cooling down. If it disappears, the
+//!   next appearance is armed immediately; if it stays visible, it can repeat
+//!   only after its configured cooldown.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -65,40 +65,25 @@ const BURST_FLOOR: Duration = Duration::from_millis(16);
 /// Dwell between the moves of a drag sweep, so a game registers it as a
 /// continuous drag rather than a teleport. Matches [`super::guards`].
 const STROKE_STEP: Duration = Duration::from_millis(8);
-/// Give a game one frame to observe the cursor at the target before pressing.
-/// Roblox can paint the hover state while still dropping a button-down sent in
-/// the same input burst as the move.
-const CLICK_SETTLE: Duration = Duration::from_millis(32);
-/// Keep the button down across multiple game ticks. A zero-duration down/up is
-/// legal Win32 input, but some games coalesce it before their UI sees a press.
-const CLICK_HOLD: Duration = Duration::from_millis(48);
-/// A real key press spans more than one game tick for the same reason as a
-/// mouse press. This is deliberately scoped to autonomous Watch actions;
-/// recorded macros keep their recorded timing.
-const KEY_HOLD: Duration = Duration::from_millis(48);
 
-/// The action a fired trigger performs on screen. The three cursor primitives
-/// exist for the same reason they do in [`super::guards`]: a trigger whose
-/// picture was marked with drawn strokes is a drag, not a click, and the sweep
-/// is driven from here so it stays testable without real input. `Nudge` reuses
-/// the same target a click would press, but parks the cursor there and wiggles
-/// it, so a "nudge it" trigger keeps the game seeing activity at the object
-/// instead of clicking on it.
+/// The action a fired trigger performs on screen. Click and key press are atomic
+/// so Watch uses the same release-safe controller calls as playback, checkpoints,
+/// guards, and Loops. The cursor primitives remain only for drawn drag strokes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisionAction {
-    KeyDown(String),
-    KeyUp(String),
+    FocusAt(i64, i64),
+    Click(i64, i64),
+    KeyPress(String),
     Nudge(i64, i64),
     MoveTo(i64, i64),
     MouseDown(String),
     MouseUp(String),
-    Pause(Duration),
 }
 
 /// `detect(enabled_triggers) -> {trigger_id: [detections]}`: one batched grab.
 pub type Detect = Box<dyn Fn(&[Guard]) -> HashMap<String, Vec<Detection>> + Send + Sync>;
-/// `act(action)`: perform the trigger's on-screen action.
-pub type Act = Box<dyn Fn(VisionAction) + Send + Sync>;
+/// `act(action)`: perform one release-safe trigger action.
+pub type Act = Box<dyn Fn(VisionAction) -> Result<(), String> + Send + Sync>;
 /// `on_event(kind, message)`: feed a line to the Vision panel (`kind` is one of
 /// `"start"`, `"act"`, `"stop"`).
 pub type OnEvent = Box<dyn Fn(&str, &str) + Send + Sync>;
@@ -108,6 +93,12 @@ pub type OnEvent = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// single infinite step can only be cut short by the runner itself. `Err`
 /// carries the failure reason for the event feed (Python's `except … as e`).
 pub type MacroRunner = Box<dyn Fn(&str, i64) -> Result<(), String> + Send + Sync>;
+
+#[derive(Default)]
+struct TriggerRuntime {
+    visible: bool,
+    cooldown_until: Option<Instant>,
+}
 
 struct Inner {
     detect: Detect,
@@ -121,6 +112,9 @@ struct Inner {
     /// Trigger id → when it is next due to be looked for. Entries for triggers
     /// that have gone away are dropped each pass, so an edited list cannot leak.
     due: Mutex<HashMap<String, Instant>>,
+    /// Detection state is separate from scan timing so disappearance can rearm
+    /// a trigger without waiting out the old target's action cooldown.
+    runtime: Mutex<HashMap<String, TriggerRuntime>>,
 }
 
 pub struct VisionAgent {
@@ -140,6 +134,7 @@ impl VisionAgent {
                 running: AtomicBool::new(false),
                 fired: AtomicI64::new(0),
                 due: Mutex::new(HashMap::new()),
+                runtime: Mutex::new(HashMap::new()),
             }),
             thread: Mutex::new(None),
         }
@@ -159,6 +154,7 @@ impl VisionAgent {
         let count = enabled.len();
         *self.inner.triggers.lock().unwrap() = enabled;
         self.inner.due.lock().unwrap().clear();
+        self.inner.runtime.lock().unwrap().clear();
         self.inner.fired.store(0, Ordering::SeqCst);
         self.inner.running.store(true, Ordering::SeqCst);
         let inner = Arc::clone(&self.inner);
@@ -220,10 +216,15 @@ impl Inner {
             .collect();
         if enabled.is_empty() {
             self.due.lock().unwrap().clear();
+            self.runtime.lock().unwrap().clear();
             return EMPTY_IDLE;
         }
 
         let now = Instant::now();
+        self.runtime
+            .lock()
+            .unwrap()
+            .retain(|id, _| enabled.iter().any(|t| &t.id == id));
         let (ready, soonest) = {
             // Forget triggers that have gone away, then split the rest into the
             // ones due now and the soonest of those that are not.
@@ -261,15 +262,49 @@ impl Inner {
                 .unwrap_or(&[]);
             match matched.first() {
                 Some(best) => {
-                    self.act_on(trigger, best);
-                    // Measured after acting: a trigger that runs a macro should
-                    // wait its cooldown from the end of that, not the start.
+                    let should_act = {
+                        let mut runtime = self.runtime.lock().unwrap();
+                        let state = runtime.entry(trigger.id.clone()).or_default();
+                        let appeared = !state.visible;
+                        state.visible = true;
+                        appeared
+                            || state
+                                .cooldown_until
+                                .map_or(true, |until| Instant::now() >= until)
+                    };
+                    let acted = should_act && self.act_on(trigger, best);
+                    if should_act {
+                        let mut runtime = self.runtime.lock().unwrap();
+                        let state = runtime.entry(trigger.id.clone()).or_default();
+                        if acted {
+                            // Measured after acting: a trigger that runs a macro
+                            // cools down from the end of that work.
+                            state.cooldown_until = Some(
+                                Instant::now() + Duration::from_secs_f64(trigger.cooldown.max(0.0)),
+                            );
+                        } else {
+                            // Rejected input is not a completed action. Keep it
+                            // armed so the next scan retries promptly.
+                            state.visible = false;
+                            state.cooldown_until = None;
+                        }
+                    }
                     next.push((
                         trigger.id.clone(),
-                        Duration::from_secs_f64(trigger.cooldown.max(0.0)).max(BURST_FLOOR),
+                        if acted && trigger.cooldown <= 0.0 {
+                            BURST_FLOOR
+                        } else {
+                            idle
+                        },
                     ));
                 }
-                None => next.push((trigger.id.clone(), idle)),
+                None => {
+                    if let Some(state) = self.runtime.lock().unwrap().get_mut(&trigger.id) {
+                        state.visible = false;
+                        state.cooldown_until = None;
+                    }
+                    next.push((trigger.id.clone(), idle));
+                }
             }
         }
 
@@ -287,11 +322,11 @@ impl Inner {
     }
 
     /// Perform the trigger's action, then run its macro sequence (Python's
-    /// `_act`). Each fire increments the count; a keyed trigger presses its key,
-    /// a nudging one moves onto the match and wiggles the cursor there, and a
-    /// clicking one follows the same geometric plan a guard would. Blank-named
-    /// steps are skipped and a failing macro reports its reason to the feed
-    /// without aborting the rest.
+    /// `_act`). Each successful action increments the count; a keyed trigger
+    /// presses its key, a nudging one moves onto the match and wiggles the cursor
+    /// there, and a clicking one follows the same geometric plan a guard would.
+    /// Blank-named steps are skipped and a failing macro reports its reason to
+    /// the feed without aborting the rest.
     ///
     /// The plan matters more here than it does for guards, because the Watch
     /// surface is the only one that offers "snap and mark click": the picture is
@@ -299,57 +334,68 @@ impl Inner {
     /// on the match centre instead lands wherever the middle of that picture
     /// happens to be, which for anything but a plain rectangular button is not
     /// the target at all.
-    fn act_on(&self, trigger: &Guard, best: &Detection) {
-        self.fired.fetch_add(1, Ordering::SeqCst);
-
-        if trigger.action == "key" {
+    fn act_on(&self, trigger: &Guard, best: &Detection) -> bool {
+        let result = if trigger.action == "key" {
             let key = trigger.key.trim();
             if key.is_empty() {
                 (self.on_event)(
                     "error",
                     &format!("'{}' -> no key is configured", trigger.name),
                 );
-                return;
+                return false;
             }
-            (self.act)(VisionAction::KeyDown(key.to_string()));
-            (self.act)(VisionAction::Pause(KEY_HOLD));
-            (self.act)(VisionAction::KeyUp(key.to_string()));
-            (self.on_event)("act", &format!("'{}' -> pressed {key}", trigger.name));
+            self.dispatch(VisionAction::FocusAt(best.x, best.y))
+                .and_then(|_| self.dispatch(VisionAction::KeyPress(key.to_string())))
+                .map(|_| format!("'{}' -> pressed {key}", trigger.name))
         } else if trigger.action == "nudge" {
             // Same target a click would press (a marked point or offset applied
             // to the match), but parked-and-wiggled instead of pressed: the game
             // sees activity at the object, not a click on it.
             let (x, y) = nudge_point(trigger, best);
-            (self.act)(VisionAction::Nudge(x, y));
-            (self.on_event)(
-                "act",
-                &format!("'{}' -> nudged the mouse at ({x}, {y})", trigger.name),
-            );
+            self.dispatch(VisionAction::FocusAt(x, y))
+                .and_then(|_| self.dispatch(VisionAction::Nudge(x, y)))
+                .map(|_| format!("'{}' -> nudged the mouse at ({x}, {y})", trigger.name))
         } else {
             match plan_action(trigger, best) {
                 Plan::Click(x, y) => {
-                    // Emit the press as explicit phases. Besides making the
-                    // behavior testable, this prevents games from collapsing a
-                    // move/down/up burst into a hover with no registered click.
-                    (self.act)(VisionAction::MoveTo(x, y));
-                    (self.act)(VisionAction::Pause(CLICK_SETTLE));
-                    (self.act)(VisionAction::MouseDown("left".to_string()));
-                    (self.act)(VisionAction::Pause(CLICK_HOLD));
-                    (self.act)(VisionAction::MouseUp("left".to_string()));
-                    (self.on_event)("act", &format!("'{}' -> clicked ({x}, {y})", trigger.name));
+                    // Use the controller's atomic click path. It reconciles the
+                    // cursor once, sends both edges, and retries a failed release;
+                    // splitting those phases here had left Watch behind every
+                    // newer input caller in the app.
+                    self.dispatch(VisionAction::FocusAt(x, y))
+                        .and_then(|_| self.dispatch(VisionAction::Click(x, y)))
+                        .map(|_| format!("'{}' -> clicked ({x}, {y})", trigger.name))
                 }
                 Plan::Drag { tlx, tly, strokes } => {
-                    self.sweep(tlx, tly, &strokes);
-                    (self.on_event)(
-                        "act",
-                        &format!("'{}' -> dragged {} stroke(s)", trigger.name, strokes.len()),
-                    );
+                    let focus = strokes
+                        .first()
+                        .and_then(|stroke| stroke_points(stroke, tlx, tly).first().copied())
+                        .unwrap_or((tlx, tly));
+                    self.dispatch(VisionAction::FocusAt(focus.0, focus.1))
+                        .and_then(|_| self.sweep(tlx, tly, &strokes))
+                        .map(|_| {
+                            format!("'{}' -> dragged {} stroke(s)", trigger.name, strokes.len())
+                        })
                 }
+            }
+        };
+
+        match result {
+            Ok(message) => {
+                self.fired.fetch_add(1, Ordering::SeqCst);
+                (self.on_event)("act", &message);
+            }
+            Err(reason) => {
+                (self.on_event)(
+                    "error",
+                    &format!("'{}' -> action failed: {reason}", trigger.name),
+                );
+                return false;
             }
         }
 
         if trigger.macro_sequence.is_empty() {
-            return;
+            return true;
         }
         (self.on_event)(
             "act",
@@ -382,12 +428,17 @@ impl Inner {
                 }
             }
         }
+        true
     }
 
     /// Drag along each stroke: press at the start, sweep pixel by pixel, release.
     /// The release always runs, even if `stop()` cuts the sweep short, so a held
     /// button is never stranded.
-    fn sweep(&self, tlx: i64, tly: i64, strokes: &[Vec<i64>]) {
+    fn dispatch(&self, action: VisionAction) -> Result<(), String> {
+        (self.act)(action)
+    }
+
+    fn sweep(&self, tlx: i64, tly: i64, strokes: &[Vec<i64>]) -> Result<(), String> {
         for stroke in strokes {
             let pts = stroke_points(stroke, tlx, tly);
             if pts.is_empty() {
@@ -395,18 +446,23 @@ impl Inner {
             }
             let (startx, starty) = pts[0];
             let (endx, endy) = *pts.last().unwrap();
-            (self.act)(VisionAction::MoveTo(startx, starty));
-            (self.act)(VisionAction::MouseDown("left".to_string()));
-            for &(px, py) in &pts[1..] {
-                if !self.running.load(Ordering::SeqCst) {
-                    break;
+            self.dispatch(VisionAction::MoveTo(startx, starty))?;
+            self.dispatch(VisionAction::MouseDown("left".to_string()))?;
+            let trace = (|| -> Result<(), String> {
+                for &(px, py) in &pts[1..] {
+                    if !self.running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    self.dispatch(VisionAction::MoveTo(px, py))?;
+                    thread::sleep(STROKE_STEP);
                 }
-                (self.act)(VisionAction::MoveTo(px, py));
-                thread::sleep(STROKE_STEP);
-            }
-            (self.act)(VisionAction::MoveTo(endx, endy));
-            (self.act)(VisionAction::MouseUp("left".to_string()));
+                self.dispatch(VisionAction::MoveTo(endx, endy))
+            })();
+            let release = self.dispatch(VisionAction::MouseUp("left".to_string()));
+            trace?;
+            release?;
         }
+        Ok(())
     }
 }
 
@@ -475,7 +531,10 @@ mod tests {
                 m.insert(id.clone(), dets.clone());
                 m
             }),
-            Box::new(move |a: VisionAction| alog.lock().unwrap().push(a)),
+            Box::new(move |a: VisionAction| {
+                alog.lock().unwrap().push(a);
+                Ok(())
+            }),
             Box::new(move |k: &str, msg: &str| {
                 elog.lock().unwrap().push((k.to_string(), msg.to_string()))
             }),
@@ -501,13 +560,7 @@ mod tests {
     }
 
     fn click_actions(x: i64, y: i64) -> Vec<VisionAction> {
-        vec![
-            VisionAction::MoveTo(x, y),
-            VisionAction::Pause(CLICK_SETTLE),
-            VisionAction::MouseDown("left".into()),
-            VisionAction::Pause(CLICK_HOLD),
-            VisionAction::MouseUp("left".into()),
-        ]
+        vec![VisionAction::FocusAt(x, y), VisionAction::Click(x, y)]
     }
 
     #[test]
@@ -556,6 +609,7 @@ mod tests {
         assert_eq!(
             *actions.lock().unwrap(),
             vec![
+                VisionAction::FocusAt(80, 190),
                 VisionAction::MoveTo(80, 190),
                 VisionAction::MouseDown("left".into()),
                 VisionAction::MoveTo(81, 190),
@@ -581,9 +635,8 @@ mod tests {
         assert_eq!(
             *actions.lock().unwrap(),
             vec![
-                VisionAction::KeyDown("e".into()),
-                VisionAction::Pause(KEY_HOLD),
-                VisionAction::KeyUp("e".into()),
+                VisionAction::FocusAt(0, 0),
+                VisionAction::KeyPress("e".into()),
             ]
         );
         assert_eq!(
@@ -619,7 +672,10 @@ mod tests {
         agent.test_tick();
         assert_eq!(
             *actions.lock().unwrap(),
-            vec![VisionAction::Nudge(300, 400)]
+            vec![
+                VisionAction::FocusAt(300, 400),
+                VisionAction::Nudge(300, 400),
+            ]
         );
         assert_eq!(
             *events.lock().unwrap(),
@@ -641,7 +697,10 @@ mod tests {
         t.click_offset = vec![4, 3];
         agent.test_prime(vec![t]);
         agent.test_tick();
-        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Nudge(84, 193)]);
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![VisionAction::FocusAt(84, 193), VisionAction::Nudge(84, 193),]
+        );
     }
 
     #[test]
@@ -682,10 +741,63 @@ mod tests {
         t.cooldown = 30.0;
         agent.test_prime(vec![t]);
         let wait = agent.test_tick();
-        // Fired once, and the next look is a cooldown away rather than now.
+        // Keep looking so disappearance can rearm the trigger, but do not act
+        // again while the same target stays visible inside its cooldown.
+        assert!(
+            (MIN_IDLE..=MAX_IDLE).contains(&wait),
+            "asked to wait {wait:?}"
+        );
+        thread::sleep(wait + Duration::from_millis(10));
         agent.test_tick();
         assert_eq!(*actions.lock().unwrap(), click_actions(1, 1));
-        assert!(wait > Duration::from_secs(25), "asked to wait {wait:?}");
+        assert_eq!(agent.fired_count(), 1);
+    }
+
+    #[test]
+    fn a_new_appearance_rearms_during_cooldown() {
+        // Regression: the released Watch trigger stores a five-second cooldown
+        // and a marked point as a zero-length stroke plus click_offset. The old
+        // scheduler stopped detecting for all five seconds after the first
+        // click, so a button that disappeared and was replaced during that time
+        // was never seen.
+        let pass = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let detect_pass = Arc::clone(&pass);
+        let actions: ActionLog = Arc::new(Mutex::new(Vec::new()));
+        let action_log = Arc::clone(&actions);
+        let agent = VisionAgent::new(
+            Box::new(move |_: &[Guard]| {
+                let detections = match detect_pass.fetch_add(1, Ordering::SeqCst) {
+                    0 | 2 => vec![sized_detection(100, 200, 175, 36)],
+                    _ => Vec::new(),
+                };
+                HashMap::from([("t".to_string(), detections)])
+            }),
+            Box::new(move |action| {
+                action_log.lock().unwrap().push(action);
+                Ok(())
+            }),
+            Box::new(|_, _| {}),
+            Box::new(|_, _| Ok(())),
+        );
+        let mut trigger = base_trigger("t");
+        trigger.cooldown = 5.0;
+        trigger.click_line = vec![87, 18, 87, 18];
+        trigger.click_lines = vec![vec![87, 18, 87, 18]];
+        trigger.click_offset = vec![87, 18];
+        agent.test_prime(vec![trigger]);
+
+        agent.test_tick(); // present: click
+        thread::sleep(MIN_IDLE + Duration::from_millis(10));
+        agent.test_tick(); // absent: rearm
+        thread::sleep(MIN_IDLE + Duration::from_millis(10));
+        agent.test_tick(); // present again: click again
+
+        assert_eq!(pass.load(Ordering::SeqCst), 3);
+        let expected_click = click_actions(100, 200);
+        let mut expected = expected_click.clone();
+        expected.extend(expected_click);
+        assert_eq!(*actions.lock().unwrap(), expected);
+        assert_eq!(agent.fired_count(), 2);
     }
 
     #[test]
@@ -766,6 +878,33 @@ mod tests {
     }
 
     #[test]
+    fn rejected_hardware_action_is_not_reported_as_fired() {
+        let events: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let elog = Arc::clone(&events);
+        let agent = VisionAgent::new(
+            Box::new(|_: &[Guard]| HashMap::from([("t".to_string(), vec![detection(10, 20)])])),
+            Box::new(|_: VisionAction| Err("Windows rejected input".into())),
+            Box::new(move |kind: &str, message: &str| {
+                elog.lock()
+                    .unwrap()
+                    .push((kind.to_string(), message.to_string()))
+            }),
+            Box::new(|_: &str, _: i64| Ok(())),
+        );
+        agent.test_prime(vec![base_trigger("t")]);
+        agent.test_tick();
+
+        assert_eq!(agent.fired_count(), 0);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![(
+                "error".into(),
+                "'Watcher' -> action failed: Windows rejected input".into()
+            )]
+        );
+    }
+
+    #[test]
     fn start_then_stop_terminates() {
         // Empty detect → the loop just polls; verify the lifecycle events and a
         // prompt, blocking-free shutdown.
@@ -773,7 +912,7 @@ mod tests {
         let elog = Arc::clone(&events);
         let agent = VisionAgent::new(
             Box::new(|_: &[Guard]| HashMap::new()),
-            Box::new(|_: VisionAction| {}),
+            Box::new(|_: VisionAction| Ok(())),
             Box::new(move |k: &str, msg: &str| {
                 elog.lock().unwrap().push((k.to_string(), msg.to_string()))
             }),

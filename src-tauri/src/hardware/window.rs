@@ -6,19 +6,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows_sys::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
+    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
 };
 
 const FOCUS_ATTEMPTS: usize = 4;
 const FOCUS_RETRY_DELAY: Duration = Duration::from_millis(45);
 const FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(180);
+const WATCH_FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const INPUT_RELEASE_ATTEMPTS: usize = 3;
 const INPUT_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(20);
 const JUMP_HOLD: Duration = Duration::from_millis(140);
@@ -29,6 +30,7 @@ const CAMERA_TRAVEL_SETTLE: Duration = Duration::from_millis(60);
 const CAMERA_DELTA: i32 = 24;
 
 use crate::engine::anti_afk::{AntiAfkAction, AntiAfkPlatform};
+use crate::hardware::dpi::PerMonitorAware;
 use crate::hardware::input::InputController;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -135,6 +137,80 @@ pub fn foreground_window_id() -> Option<String> {
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
     Some(selectable_window_id(hwnd, pid))
+}
+
+struct WindowAtPoint {
+    x: i32,
+    y: i32,
+    own_pid: u32,
+    hwnd: HWND,
+    pid: u32,
+}
+
+fn point_in_rect(x: i32, y: i32, rect: RECT) -> bool {
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+unsafe extern "system" fn collect_window_at_point(hwnd: HWND, data: LPARAM) -> BOOL {
+    let search = &mut *(data as *mut WindowAtPoint);
+    if !search.hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+        return 1;
+    }
+
+    let owner = GetWindow(hwnd, GW_OWNER);
+    let title = window_title(hwnd);
+    let mut pid = 0;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if is_selectable(true, !owner.is_null(), &title, pid, search.own_pid)
+        && GetWindowRect(hwnd, &mut rect) != 0
+        && point_in_rect(search.x, search.y, rect)
+    {
+        search.hwnd = hwnd;
+        search.pid = pid;
+        return 0;
+    }
+    1
+}
+
+/// Focus the external top-level window beneath a physical screen point.
+///
+/// Watch runs while Clawmation may still be foreground. Mouse movement alone
+/// can paint Roblox's hover state, while its first press is consumed by window
+/// activation and keyboard/raw-mouse input still goes to Clawmation. Enumerating
+/// top to bottom and skipping this process also reaches the game beneath our
+/// capture-excluded windows.
+pub fn focus_window_at_point(x: i32, y: i32) -> Result<(), String> {
+    let _aware = PerMonitorAware::new();
+    let mut search = WindowAtPoint {
+        x,
+        y,
+        own_pid: unsafe { GetCurrentProcessId() },
+        hwnd: null_mut(),
+        pid: 0,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_window_at_point),
+            &mut search as *mut WindowAtPoint as LPARAM,
+        );
+    }
+    if search.hwnd.is_null() {
+        // A desktop point has no app to activate. Keep the action useful by
+        // sending it to the current foreground window instead of dropping it.
+        return Ok(());
+    }
+    if unsafe { GetForegroundWindow() == search.hwnd } {
+        return Ok(());
+    }
+    focus_window_id(&selectable_window_id(search.hwnd, search.pid))?;
+    std::thread::sleep(WATCH_FOCUS_SETTLE_DELAY);
+    Ok(())
 }
 
 pub fn focus_window_id(id: &str) -> Result<(), String> {
@@ -312,6 +388,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_hit_testing_uses_half_open_window_bounds() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 300,
+            bottom: 400,
+        };
+        assert!(point_in_rect(100, 200, rect));
+        assert!(point_in_rect(299, 399, rect));
+        assert!(!point_in_rect(300, 399, rect));
+        assert!(!point_in_rect(299, 400, rect));
+    }
     use std::sync::{atomic::AtomicUsize, Mutex};
 
     #[derive(Default)]
