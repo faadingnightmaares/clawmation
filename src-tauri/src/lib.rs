@@ -23,7 +23,7 @@ mod test_support;
 use models::config::MacroConfig;
 use shell::hotkeys::HotkeyBindings;
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::StateFlags;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -36,6 +36,8 @@ pub fn run() {
     paths::ensure_dirs();
 
     let app_state = AppState::new(MacroConfig::load());
+    let startup_arguments: Vec<String> = std::env::args().collect();
+    let startup_cwd = std::env::current_dir().ok();
     let migration = migrations::migrate_legacy_macros(&paths::macros_dir());
     if let Some(summary) = migration.summary() {
         app_state.core.emit(
@@ -59,7 +61,8 @@ pub fn run() {
         // running app (focus its window and exit) before any window, hotkey, or
         // capture device is claimed, the port of `_acquire_single_instance` +
         // `_focus_existing_instance`.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            import_associated_files(app, &argv, Some(std::path::Path::new(&cwd)));
             shell::tray::show_main_window(app);
         }))
         .plugin(
@@ -99,7 +102,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
         .manage(HotkeyBindings::default())
-        .setup(|app| {
+        .setup(move |app| {
             // Bind the notifier's app handle, then start the backend-initiated
             // shell (global hotkeys from config and the system tray), mirroring
             // `launch_ui`'s `_register_hotkeys()` / `_start_tray()` startup calls.
@@ -112,12 +115,14 @@ pub fn run() {
             // startup continues; the overlay is optional and must never abort the
             // app. `indicator_alive` flips true only when the window really exists,
             // keeping `get_status`'s report honest (`_indicator is not None`).
+            // Attach before creation so a transient creation failure can be
+            // retried automatically on the next record/play transition.
+            app.state::<AppState>()
+                .core
+                .indicator
+                .attach(handle.clone());
             match shell::indicator::create(&handle) {
                 Ok(()) => {
-                    app.state::<AppState>()
-                        .core
-                        .indicator
-                        .attach(handle.clone());
                     app.state::<AppState>()
                         .core
                         .runtime
@@ -158,6 +163,7 @@ pub fn run() {
                     }
                 });
             }
+            import_associated_files(&handle, &startup_arguments, startup_cwd.as_deref());
             // Look for a new release once, off the startup path. Nothing waits on
             // it and a failure is silent; an offline machine must still start.
             commands::misc::check_in_background(&handle);
@@ -274,4 +280,24 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn import_associated_files(
+    app: &tauri::AppHandle,
+    arguments: &[String],
+    cwd: Option<&std::path::Path>,
+) {
+    for (path, result) in commands::transfer::import_associated_arguments(arguments, cwd) {
+        match result {
+            Ok(name) => {
+                app.state::<AppState>()
+                    .emit("ok", format!("Imported '{name}' from {}", path.display()));
+                let _ = app.emit("macros-changed", name);
+            }
+            Err(error) => app.state::<AppState>().emit(
+                "err",
+                format!("Couldn't import {}: {error}", path.display()),
+            ),
+        }
+    }
 }

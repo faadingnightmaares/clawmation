@@ -14,14 +14,13 @@ pub fn get_status(state: State<AppState>) -> Status {
     let config = core.config.lock().unwrap().clone();
     let log = core.log.lock().unwrap().tail(logbuf::TAIL);
 
-    let (mode, mode_since, last_macro, stored_recorded, indicator_alive) = {
+    let (mode, mode_since, last_macro, stored_recorded) = {
         let rt = core.runtime.lock().unwrap();
         (
             rt.mode.clone(),
             rt.mode_since,
             rt.last_macro.clone(),
             rt.recorded_count,
-            rt.indicator_alive,
         )
     };
 
@@ -35,7 +34,10 @@ pub fn get_status(state: State<AppState>) -> Status {
     // count and paused flag come off the live recorder only while recording,
     // exactly as `Api.get_status` reads them from the player/recorder objects.
     let (play_iteration, play_total_reps) = if mode == "playing" {
-        (core.player.iteration() as i64, core.player.total_reps() as i64)
+        (
+            core.player.iteration() as i64,
+            core.player.total_reps() as i64,
+        )
     } else {
         (0, 0)
     };
@@ -73,7 +75,7 @@ pub fn get_status(state: State<AppState>) -> Status {
         recorded_count,
         last_macro,
         macro_count: paths::count_ext(&paths::macros_dir(), "json"),
-        indicator_alive,
+        indicator_alive: core.indicator.is_alive(),
         config: StatusConfig {
             resolution: [config.resolution.0, config.resolution.1],
             capture_backend: config.capture_backend.clone(),

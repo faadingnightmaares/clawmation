@@ -3,7 +3,7 @@ name = "clawmation"
 # The single source of truth for the app's version: `commands/misc.rs` reads it
 # through `CARGO_PKG_VERSION`, `tauri.conf.json` repeats it for the bundler, and
 # the updater compares the manifest's version against it. Bump all three together.
-version = "1.2.0"
+version = "1.2.1"
 description = "Macro recorder and player for Windows games, with screen-watching guards"
 authors = ["faadingnightmaares"]
 license = "MIT"
@@ -36,9 +36,13 @@ tauri-plugin-opener = "2"
 # 1:1 match for the Python `tkinter.filedialog` flows; the frontend just invokes
 # `export_macro` / `import_chain` / … and gets `{ok, path}` back.
 tauri-plugin-dialog = "2"
-# `.clawbundle` export/import is a zip of macro.json + guards.json + templates/,
-# the direct port of Python's `zipfile.ZipFile(...)` bundle format.
-zip = "2"
+# Versioned `.clawmation` / `.clawbundle` archives. Only the two codecs our
+# formats need are compiled in: DEFLATE reads legacy bundles; Zstandard powers
+# the new compact payloads without pulling AES/BZip2/LZMA/Zopfli into the app.
+zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
+# Fast content checksums make imports corruption-proof and deduplicate identical
+# vision assets inside bundles without decoding or recompressing them.
+blake3 = "1"
 # Encodes the Test-button previews and saved template files
 # (`hardware/preview.rs`); already in the tree via tauri, so this is free.
 png = "0.17"

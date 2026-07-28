@@ -16,16 +16,23 @@
 //! not fail to open the way a headless `tk.Tk()` can, so a dismissed dialog is
 //! the single `"cancelled"` path, matching Python's `if not path` result.
 
+mod archive;
+
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::models::chain::Chain;
+#[cfg(test)]
 use crate::models::guard::GuardFile;
+#[cfg(test)]
 use crate::models::macro_def::Macro;
 use crate::paths;
 use crate::state::AppState;
@@ -39,6 +46,53 @@ fn strip_json(name: &str) -> &str {
 /// yields the `Path` variant, so `into_path` never actually errors here.
 fn picked(result: Option<FilePath>) -> Option<PathBuf> {
     result.and_then(|fp| fp.into_path().ok())
+}
+
+/// Import files delivered by the OS file association. Unknown command-line
+/// arguments are ignored, and relative paths are resolved against the launching
+/// process's working directory.
+pub(crate) fn import_associated_arguments(
+    arguments: &[String],
+    cwd: Option<&Path>,
+) -> Vec<(PathBuf, Result<String, String>)> {
+    arguments
+        .iter()
+        .filter_map(|argument| {
+            let path = PathBuf::from(argument);
+            let extension = path
+                .extension()
+                .and_then(|part| part.to_str())
+                .map(str::to_ascii_lowercase)?;
+            if !matches!(extension.as_str(), "clawmation" | "clawbundle") {
+                return None;
+            }
+            let path = if path.is_absolute() {
+                path
+            } else {
+                cwd.unwrap_or_else(|| Path::new(".")).join(path)
+            };
+            let result = match extension.as_str() {
+                "clawmation" => archive::read_macro(&path, &paths::macros_dir()),
+                "clawbundle" => archive::read_bundle(
+                    &path,
+                    &paths::macros_dir(),
+                    &paths::templates_dir(),
+                    &paths::guards_dir(),
+                )
+                .and_then(|name| {
+                    name.ok_or_else(|| {
+                        Box::<dyn std::error::Error>::from(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "bundle has no macro",
+                        ))
+                    })
+                }),
+                _ => unreachable!(),
+            }
+            .map_err(|error| error.to_string());
+            Some((path, result))
+        })
+        .collect()
 }
 
 // ── Chains ────────────────────────────────────────────────────────────────
@@ -124,15 +178,15 @@ pub fn export_macro(app: AppHandle, state: State<AppState>, name: String) -> Val
         app.dialog()
             .file()
             .set_title("Export macro")
-            .set_file_name(format!("{stem}.json"))
-            .add_filter("Clawmation macro", &["json"])
+            .set_file_name(format!("{stem}.clawmation"))
+            .add_filter("Clawmation macro", &["clawmation"])
             .add_filter("All files", &["*"])
             .blocking_save_file(),
     ) else {
         return json!({ "ok": false, "error": "cancelled" });
     };
-    match std::fs::copy(&src, &dest) {
-        Ok(_) => {
+    match archive::write_macro(&src, &dest) {
+        Ok(()) => {
             state.emit("ok", format!("Exported '{stem}' → {}", dest.display()));
             json!({ "ok": true, "path": dest.to_string_lossy() })
         }
@@ -146,33 +200,19 @@ pub fn import_macro(app: AppHandle, state: State<AppState>) -> Value {
         app.dialog()
             .file()
             .set_title("Import macro")
-            .add_filter("Clawmation macro", &["json"])
+            .add_filter("Clawmation macro", &["clawmation"])
+            .add_filter("Legacy JSON macro", &["json"])
             .add_filter("All files", &["*"])
             .blocking_pick_file(),
     ) else {
         return json!({ "ok": false, "error": "cancelled" });
     };
-    // Validate it's a real macro before importing.
-    let mut macro_def = match Macro::load(&src) {
-        Ok(m) => m,
-        Err(e) => return json!({ "ok": false, "error": format!("Not a valid macro: {e}") }),
-    };
-    // Avoid clobbering an existing macro of the same name.
-    let macros_dir = paths::macros_dir();
-    let base = macro_def.name.clone();
-    let mut dest = macros_dir.join(format!("{base}.json"));
-    let mut counter = 2;
-    while dest.exists() {
-        macro_def.name = format!("{base}_{counter}");
-        dest = macros_dir.join(format!("{}.json", macro_def.name));
-        counter += 1;
-    }
-    match macro_def.save_to(&dest) {
-        Ok(()) => {
-            state.emit("ok", format!("Imported '{}'", macro_def.name));
-            json!({ "ok": true, "name": macro_def.name })
+    match archive::read_macro(&src, &paths::macros_dir()) {
+        Ok(name) => {
+            state.emit("ok", format!("Imported '{name}'"));
+            json!({ "ok": true, "name": name })
         }
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => json!({ "ok": false, "error": format!("Not a valid macro: {e}") }),
     }
 }
 
@@ -196,8 +236,9 @@ pub fn bulk_export(app: AppHandle, state: State<AppState>, names: Vec<String>) -
         let stem = strip_json(name);
         let src = macros_dir.join(format!("{stem}.json"));
         if src.exists() {
-            match std::fs::copy(&src, dest_dir.join(format!("{stem}.json"))) {
-                Ok(_) => exported.push(stem.to_string()),
+            let dest = dest_dir.join(format!("{stem}.clawmation"));
+            match archive::write_macro(&src, &dest) {
+                Ok(()) => exported.push(stem.to_string()),
                 Err(_) => failed.push(stem.to_string()),
             }
         } else {
@@ -207,7 +248,11 @@ pub fn bulk_export(app: AppHandle, state: State<AppState>, names: Vec<String>) -
     if !exported.is_empty() {
         state.emit(
             "ok",
-            format!("Exported {} macro(s) → {}", exported.len(), dest_dir.display()),
+            format!(
+                "Exported {} macro(s) → {}",
+                exported.len(),
+                dest_dir.display()
+            ),
         );
     }
     json!({
@@ -239,9 +284,12 @@ pub fn export_bundle(app: AppHandle, state: State<AppState>, name: String) -> Va
         return json!({ "ok": false, "error": "cancelled" });
     };
     let guards_path = paths::guards_dir().join(format!("{stem}.json"));
-    match write_bundle(&macro_path, &guards_path, &dest) {
+    match archive::write_bundle(&macro_path, &guards_path, &dest) {
         Ok(()) => {
-            state.emit("ok", format!("Exported bundle '{stem}' → {}", dest.display()));
+            state.emit(
+                "ok",
+                format!("Exported bundle '{stem}' → {}", dest.display()),
+            );
             json!({ "ok": true, "path": dest.to_string_lossy() })
         }
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
@@ -260,7 +308,7 @@ pub fn import_bundle(app: AppHandle, state: State<AppState>) -> Value {
     ) else {
         return json!({ "ok": false, "error": "cancelled" });
     };
-    match read_bundle(
+    match archive::read_bundle(
         &src,
         &paths::macros_dir(),
         &paths::templates_dir(),
@@ -277,11 +325,12 @@ pub fn import_bundle(app: AppHandle, state: State<AppState>) -> Value {
     }
 }
 
-// ── Bundle helpers (path-parameterized so the round-trip is unit-testable) ───
+// ── Legacy bundle layout regression coverage ────────────────────────────────
 
 /// Write `dest` as a `.clawbundle` zip: `macro.json`, then `guards.json` and each
 /// distinct template image its guards reference. Mirrors Python's `export_bundle`
 /// zip assembly.
+#[cfg(test)]
 fn write_bundle(
     macro_path: &Path,
     guards_path: &Path,
@@ -289,8 +338,8 @@ fn write_bundle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(dest)?;
     let mut zip = zip::ZipWriter::new(file);
-    let opts =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
 
     // 1. The macro itself.
     zip.start_file("macro.json", opts)?;
@@ -323,6 +372,7 @@ fn write_bundle(
 /// macro (clobber-avoiding), then guards (template paths remapped to installed
 /// locations). Returns the installed macro name, or `None` if there is no
 /// `macro.json` entry. Mirrors Python's `import_bundle`.
+#[cfg(test)]
 fn read_bundle(
     src: &Path,
     macros_dir: &Path,
@@ -355,7 +405,10 @@ fn read_bundle(
             fin.read_to_end(&mut buf)?;
             std::fs::write(&dest_tpl, &buf)?;
         }
-        tpl_remap.insert(basename.to_string(), dest_tpl.to_string_lossy().into_owned());
+        tpl_remap.insert(
+            basename.to_string(),
+            dest_tpl.to_string_lossy().into_owned(),
+        );
     }
 
     // 2. Install the macro (avoid name clobber).
@@ -457,7 +510,10 @@ mod tests {
         assert_eq!(name, "__test___bundle");
 
         // Macro installed.
-        assert!(dst_macros.join("__test___bundle.json").exists(), "macro installed");
+        assert!(
+            dst_macros.join("__test___bundle.json").exists(),
+            "macro installed"
+        );
         // Template installed under the destination templates dir.
         let installed_tpl = dst_templates.join("__test___btn.png");
         assert!(installed_tpl.exists(), "template installed");
@@ -486,13 +542,8 @@ mod tests {
             zip.write_all(b"no macro here").unwrap();
             zip.finish().unwrap();
         }
-        let out = read_bundle(
-            &bundle,
-            &root.join("m"),
-            &root.join("t"),
-            &root.join("g"),
-        )
-        .expect("reads");
+        let out =
+            read_bundle(&bundle, &root.join("m"), &root.join("t"), &root.join("g")).expect("reads");
         assert!(out.is_none(), "missing macro.json → Ok(None)");
     }
 }

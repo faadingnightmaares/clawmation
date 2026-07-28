@@ -1,7 +1,7 @@
 {
   "name": "clawmation",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Macro recorder and player for Windows games, with screen-watching guards",
   "license": "MIT",
   "repository": {

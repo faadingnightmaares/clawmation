@@ -15,12 +15,10 @@ use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilde
 /// Window label; the `indicator` capability and the render page key off it.
 pub const LABEL: &str = "indicator";
 
-/// Overlay size: the 112×104 cat-tail canvas (`src/indicator/cat.ts`) at 2× so the
-/// counting eyes stay legible in the corner; see the page's `image-rendering:
-/// pixelated`. Taller than the head-only cat this replaced, because the tail now
-/// drops the length of the window before the face arrives.
-const WIDTH: f64 = 224.0;
-const HEIGHT: f64 = 208.0;
+/// Overlay size: the compact 96×88 hanging-cat canvas (`src/indicator/cat.ts`) at
+/// 2× so the counting eyes stay legible; see `indicator.html`.
+const WIDTH: f64 = 192.0;
+const HEIGHT: f64 = 176.0;
 /// Gap from the right screen edge (`NativeIndicator.MARGIN`). Horizontal only:
 /// see the vertical placement in [`create`].
 const MARGIN: f64 = 16.0;
@@ -43,6 +41,16 @@ impl Indicator {
         *self.app.lock().unwrap() = Some(app);
     }
 
+    /// Whether the overlay currently exists. Unlike the old latched runtime flag,
+    /// this reflects the live window and therefore becomes true after a self-heal.
+    pub fn is_alive(&self) -> bool {
+        self.app
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|app| app.get_webview_window(LABEL).is_some())
+    }
+
     /// Show the cat for recording/playing/paused, hide it at idle: the port of
     /// `NativeIndicator.set_state`'s show/hide branch. The page reads mode and
     /// elapsed straight off `get_status`, so this only toggles window visibility;
@@ -52,8 +60,23 @@ impl Indicator {
             Some(app) => app,
             None => return,
         };
+        let show = should_show(mode, enabled);
         if let Some(win) = app.get_webview_window(LABEL) {
-            let _ = if should_show(mode, enabled) { win.show() } else { win.hide() };
+            let _ = if show { win.show() } else { win.hide() };
+            return;
+        }
+
+        // A transient WebView/Win32 setup failure used to permanently remove the
+        // indicator for the rest of the process. Recreate it on the next active
+        // transition instead; idle/disabled states do not allocate a window.
+        if show {
+            if let Err(error) = create(&app) {
+                eprintln!("Clawmation: recording indicator retry failed: {error}");
+                return;
+            }
+            if let Some(win) = app.get_webview_window(LABEL) {
+                let _ = win.show();
+            }
         }
     }
 }
@@ -71,6 +94,9 @@ fn should_show(mode: &str, enabled: bool) -> bool {
 /// caller in `setup`, which logs and continues; a failed overlay must not abort
 /// startup, matching `_run`'s try/except that leaves the indicator absent.
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
+    if app.get_webview_window(LABEL).is_some() {
+        return Ok(());
+    }
     let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("indicator.html".into()))
         .title("Clawmation Indicator")
         .inner_size(WIDTH, HEIGHT)
@@ -84,17 +110,25 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .focused(false)
         .visible(false)
         .build()?;
-    // Click-through: mouse events fall straight through to the game below.
-    win.set_ignore_cursor_events(true)?;
+    // These refinements are best-effort. The old implementation returned an
+    // error after the WebView had already been built, so setup never attached
+    // the live window and every later show/hide became a permanent no-op.
+    if let Err(error) = win.set_ignore_cursor_events(true) {
+        eprintln!("Clawmation: indicator click-through unavailable: {error}");
+    }
     // And out of every screen grab: the cat sits over the top-right corner of the
     // screen the whole time a macro plays, which is the corner a trigger watching
     // that region is trying to read.
-    let _ = crate::hardware::shield::set_excluded(win.hwnd()?.0, true);
+    match win.hwnd() {
+        Ok(hwnd) => {
+            let _ = crate::hardware::shield::set_excluded(hwnd.0, true);
+        }
+        Err(error) => eprintln!("Clawmation: indicator capture shielding unavailable: {error}"),
+    }
     // Park it against the top-right corner, in logical px. Inset from the right by
-    // MARGIN, but flush to the top at y = 0: the cat hangs by a tail whose base is
-    // drawn already cut off by the canvas edge, and only the physical screen edge
-    // makes that cut read as "the tail continues over the top". A gap there (the
-    // `MARGIN` this used to use for y) leaves the tail ending in mid-air instead.
+    // MARGIN, but flush to the top at y = 0: the cat's paws and tail are drawn
+    // already cut off by the canvas edge, and only the physical screen edge makes
+    // that cut read as a ledge. A vertical gap would leave the paws in mid-air.
     // Done after build (still hidden, so no flash), since the placement depends on
     // the monitor the window actually landed on.
     if let Ok(Some(monitor)) = win.primary_monitor() {
@@ -107,7 +141,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_show;
+    use super::{should_show, HEIGHT, WIDTH};
 
     #[test]
     fn preference_hides_the_cat_even_while_active() {
@@ -115,5 +149,21 @@ mod tests {
         assert!(should_show("recording", true));
         assert!(!should_show("playing", false));
         assert!(!should_show("idle", true));
+    }
+
+    #[test]
+    fn every_active_mode_requests_a_visible_indicator() {
+        for mode in ["recording", "playing", "paused"] {
+            assert!(should_show(mode, true), "{mode} must self-heal and show");
+        }
+        for mode in ["idle", "stopping", ""] {
+            assert!(!should_show(mode, true), "{mode} must remain hidden");
+        }
+    }
+
+    #[test]
+    fn native_window_matches_the_two_x_canvas_size() {
+        assert_eq!(WIDTH, 96.0 * 2.0);
+        assert_eq!(HEIGHT, 88.0 * 2.0);
     }
 }

@@ -1034,11 +1034,12 @@ export function importChain(): Promise<ImportChainResult> {
 }
 
 /** Copy a macro to a user-chosen `.json` file (for sharing between machines). */
+/** Export one macro as a compressed, checksummed `.clawmation` file. */
 export function exportMacro(name: string): Promise<ExportResult> {
   return invoke<ExportResult>("export_macro", { name });
 }
 
-/** Load a macro from a user-chosen `.json` file into the library (clobber-safe). */
+/** Import `.clawmation`, with legacy standalone `.json` support. */
 export function importMacro(): Promise<SaveNamedResult> {
   return invoke<SaveNamedResult>("import_macro");
 }
@@ -1056,7 +1057,7 @@ export function bulkExport(names: string[]): Promise<BulkExportResult> {
   return invoke<BulkExportResult>("bulk_export", { names });
 }
 
-/** Export a macro + its guards + referenced templates as a `.clawbundle` zip. */
+/** Export a macro, safeguards, and deduplicated vision assets as `.clawbundle`. */
 export function exportBundle(name: string): Promise<ExportResult> {
   return invoke<ExportResult>("export_bundle", { name });
 }

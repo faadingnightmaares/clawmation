@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { animate } from "animejs";
+import { listen } from "@tauri-apps/api/event";
 import {
   IconAdjustmentsHorizontal,
   IconAlertTriangle,
@@ -374,6 +375,23 @@ export function Macros({ status, active = true }: ViewProps) {
       }
     }
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("macros-changed", () => void load())
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {
+        // Browser previews and tests do not have a Tauri event bridge.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [load]);
 
   useEffect(() => {
     load();
