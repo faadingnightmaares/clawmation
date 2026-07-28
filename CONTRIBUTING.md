@@ -92,6 +92,12 @@ adding a control.
   seventy characters, then a body explaining the reasoning if the subject cannot carry it
   alone.
 
+## Contribution license
+
+Clawmation is source-available, not open source. By intentionally submitting a
+contribution, you agree to the contribution grant in [LICENSE](LICENSE). Do not submit
+code, assets or documentation you do not have the right to license on those terms.
+
 ## Reporting a bug
 
 Open an issue with your Windows version, the Clawmation version from Settings under

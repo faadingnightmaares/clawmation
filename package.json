@@ -2,8 +2,8 @@
   "name": "clawmation",
   "private": true,
   "version": "1.2.1",
-  "description": "Macro recorder and player for Windows games, with screen-watching guards",
-  "license": "MIT",
+  "description": "Windows macro recorder with visual workflows, screen detection, OCR, and local automation",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/faadingnightmaares/clawmation.git"

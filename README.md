@@ -1,177 +1,205 @@
 <div align="center">
-  <img src="public/Clawmation.svg" width="88" alt="Clawmation">
+  <img src="public/Clawmation.svg" width="76" alt="Clawmation application mark">
   <h1>Clawmation</h1>
-  <p><em>Record what you did. Play it back. Let it watch the screen while you are away.</em></p>
+  <p>Windows macro recording, screen-aware playback, and visual automation workflows.</p>
   <p>
-    <img alt="Platform: Windows 10 and 11" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0a7cbd">
-    <img alt="Built with Tauri 2, Rust and React 19" src="https://img.shields.io/badge/built%20with-Tauri%202%20%C2%B7%20Rust%20%C2%B7%20React%2019-c2410c">
-    <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-444">
+    <a href="https://github.com/faadingnightmaares/clawmation/releases/latest"><img alt="Latest Clawmation release" src="https://img.shields.io/github/v/release/faadingnightmaares/clawmation?display_name=tag&style=flat-square&color=b88746"></a>
+    <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-3f3a34?style=flat-square">
+    <img alt="Source available license" src="https://img.shields.io/badge/license-source--available-3f3a34?style=flat-square">
+  </p>
+  <p>
+    <a href="https://github.com/faadingnightmaares/clawmation/releases/download/v1.2.1/clawmation_1.2.1_x64-setup.exe"><strong>Download the Windows installer</strong></a>
+    ·
+    <a href="https://github.com/faadingnightmaares/clawmation/releases/latest">View the latest release</a>
   </p>
 </div>
 
-Clawmation is a macro recorder and player for Windows games. You play through a task
-once, every click, keypress and pause is captured, and it repeats that for as long as
-you like.
+Clawmation is a local Windows 10 and 11 macro recorder and macro player for
+games, including Roblox. It records mouse and keyboard input, replays editable
+macros, detects screen changes with image matching, colour detection, pixel
+detection, and OCR, and connects those actions through visual Loops. Download
+the current installer above or review the source, architecture, and portable
+file formats below.
 
-On its own that is a stopwatch with hands. What makes it useful for long AFK grinds is
-the part that watches the screen.
+![Clawmation Home workspace showing macro activity, quick actions, Anti-AFK settings, and recent runs](docs/media/home.webp)
 
-## What it does
+## Capabilities
 
-**Macros.** Press record, do the thing, press stop. Every step is editable afterwards:
-retime it, delete the fumble, add a keypress you forgot. Play it back once, a hundred
-times, or forever.
+- **Macros:** record mouse and keyboard input, edit metadata and repeat rules,
+  manage presets, run at different speeds, and export individual recordings.
+- **Watch:** detect a saved image, colour, or text on screen, restrict detection
+  to a region, and click, press a key, or move the pointer when it appears.
+- **Loops:** connect recorded macros, waits, screen checks, branches, recovery
+  actions, and stop conditions in a reusable visual workflow.
+- **Safeguards:** attach recovery guards and vision checkpoints directly to a
+  macro without changing the original recording.
+- **Anti-AFK:** briefly activate a selected game window, perform a configured
+  action, and return focus to the previous application.
+- **Local operation:** macro data, screenshots, OCR, and image recognition stay
+  on the computer. Clawmation has no account system, telemetry, or cloud
+  processing.
 
-**Watch.** Point Clawmation at something on screen (a colour, a picture of a button, or
-some words), say what to do when that thing appears, and leave it running. No macro
-required. Good for AFK checks, invite popups, and reward screens. If you snap a picture
-of a button you can also mark the exact spot inside it to press, which matters when the
-button is not a plain rectangle.
+## Visual workflows
 
-**Autopilot.** Two halves of running unattended, in one place.
+Loops turn independent recordings and screen checks into directed workflows.
+Each output is explicit, including **If works** and **If fails** paths, so error
+recovery and stop conditions remain visible.
 
-*Guards* attach to a macro and poll a corner of the screen while it plays. The classic
-setup is a farming loop set to infinite reps with a guard watching for the *Reconnect*
-button: the moment it appears the guard pauses the macro, clicks it, waits for the game
-to load, and resumes exactly where it left off, so the loop never dies overnight.
+![Clawmation Loops workspace showing a Daily Quest Rotation with an embedded macro, image wait, branch, recovery, delay, and stop paths](docs/media/loops.webp)
 
-*Chains* play several macros back to back, optionally on a schedule, so an evening's
-routine runs itself.
+The example above embeds a snapshot of the `Daily Quest Route` macro, waits for
+a reward image, branches on the result, runs a recovery path when required, and
+finishes through explicit stop nodes. Embedded macros remain independent from
+later edits to the source recording.
 
-**You can watch it look.** Whenever a detection loop is running, a transparent overlay
-draws a box around everything the triggers are currently finding, the way an object
-detector's demo video does. A trigger matching the wrong thing used to look identical to
-one matching nothing; now you can see which it is without guessing.
+## Macro library
 
-**A recording indicator that stays out of the way.** A small cat hangs from the top of
-the screen while recording, counts down before playback starts, and is click through, so
-it never steals a click from the game underneath.
+The Macros workspace keeps recording, filtering, playback controls, repeat
+rules, presets, safeguards, notes, and run statistics in one view.
 
-## Privacy
+![Clawmation Macros workspace showing an editable Daily Quest Route and a populated macro library](docs/media/macros.webp)
 
-Everything runs locally. There is no account and no telemetry. The app captures your
-screen because that is the whole point, and none of what it captures ever leaves the
-machine. The one network call it makes is the update check, which asks a release
-manifest for a version number and nothing else.
+## Screen detection
+
+Watch can respond without starting a macro. A trigger combines one visual
+condition with one action, a confidence threshold, an optional screen region,
+and a cooldown. Testing shows the captured frame and the detected target before
+the trigger is armed.
+
+![Clawmation Watch workspace showing a detected reward button and the configured click action](docs/media/watch.webp)
+
+## Portable file formats
+
+Clawmation uses two versioned, compressed formats:
+
+| Format | Contents | Use |
+| --- | --- | --- |
+| `.clawmation` | One macro | Share or archive a recording |
+| `.clawbundle` | A macro, safeguards, and referenced vision images | Move a complete screen-aware automation setup |
+
+Both formats use a manifest with declared sizes and BLAKE3 digests. JSON
+payloads use Zstandard compression, duplicate images are stored once, and
+imports reject traversal paths, unsafe names, undeclared files, invalid
+digests, and excessive expanded sizes. Existing macros are never overwritten.
+See [Portable file formats](docs/FILE-FORMATS.md) for the complete container and
+compatibility contract.
+
+## Privacy and network access
+
+Recording, playback, screen capture, template matching, pixel detection, and
+OCR run locally. Captured content is not uploaded. The application contacts
+GitHub only to check the signed release manifest used by its updater.
 
 ## Requirements
 
-- **Windows 10 or 11.** The hardware layer is Win32 specific throughout: DXGI Desktop
-  Duplication for capture, `SendInput` for playback, low level hooks for recording, and
-  `Windows.Media.Ocr` for text triggers. There is no cross platform path.
-- **Rust** (stable) with the **MSVC** toolchain: `rustup default stable-msvc`, plus the
-  Visual Studio Build Tools "Desktop development with C++" workload.
-- **Node.js 20 or newer.**
-- **WebView2**, preinstalled on Windows 11 and on up to date Windows 10.
+- Windows 10 or Windows 11
+- WebView2, included with Windows 11 and current Windows 10 installations
+- A 64-bit Windows installation for the published installer
 
-There is deliberately no OpenCV, no Python, and no vcpkg step. See
-[Vision without OpenCV](#vision-without-opencv) below.
+Development additionally requires Node.js 20 or newer, Rust stable with the
+MSVC toolchain, and the Visual Studio Build Tools workload **Desktop
+development with C++**.
 
-## Getting started
+## Installation
+
+1. Download
+   [`clawmation_1.2.1_x64-setup.exe`](https://github.com/faadingnightmaares/clawmation/releases/download/v1.2.1/clawmation_1.2.1_x64-setup.exe).
+2. Run the installer.
+3. Launch Clawmation and configure the record, play, and emergency-stop
+   shortcuts in Settings.
+
+The application checks the signed Tauri update manifest at launch. Release
+assets and notes are available on the [Releases
+page](https://github.com/faadingnightmaares/clawmation/releases).
+
+## Development
+
+Install the frontend dependencies:
 
 ```bash
 npm install
 ```
 
+Run the Tauri development application:
+
 ```bash
 npm run tauri dev
 ```
 
-A debug build resolves its data root to the repository folder, so `config/`, `macros/`,
-`templates/` and `snapshots/` appear here as you use it. They are gitignored, because
-that is one developer's state rather than source. A release build keeps the same four
-folders next to the `.exe`, which is what makes the installed app portable.
+Build the frontend:
 
-To produce installers (MSI and NSIS, written to `src-tauri/target/release/bundle/`):
+```bash
+npm run build
+```
+
+Build the Windows installers:
 
 ```bash
 npm run tauri build
 ```
 
-The app updates itself: it checks a signed release manifest at launch and offers the new
-version from Settings, under About. Publishing a build that installed copies will accept,
-including the signing key you need to hold in order to do it, is documented in
-[docs/RELEASING.md](docs/RELEASING.md).
+Release bundles are written under `src-tauri/target/release/bundle/`. Debug
+builds store local data in the repository working directory; release builds
+store portable data beside the executable.
 
 ## Tests
+
+Run the frontend suite and TypeScript checks:
+
+```bash
+npm test
+npx tsc --noEmit
+```
+
+Run the Rust suite:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-```bash
-npm test && npx tsc --noEmit
-```
-
-That is 223 Rust tests and 37 frontend tests. Eleven more Rust tests are marked
-`#[ignore]`: ten drive real hardware, moving the cursor, taking over the screen with a
-fullscreen overlay, or reading the live desktop, and one is a hover timing benchmark that
-only prints. Run them deliberately, one at a time, on a machine you are not otherwise
-using:
+Hardware tests that move the cursor, capture the live desktop, or display
+native overlays are ignored by default. Run those individually on a machine
+that is not in active use:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored --test-threads=1
 ```
 
-Note that `libtest` takes a single positional filter. Passing two test names matches
-nothing and reports success.
+## Architecture
 
-## Layout
-
-| Path | What lives there |
+| Path | Responsibility |
 | --- | --- |
-| `src/` | React 19 and TypeScript UI. `views/` holds the four surfaces plus Settings, `components/ui/` is shadcn/ui, and `api.ts` is the single typed seam over `invoke`. |
-| `src-tauri/src/commands/` | The Tauri command surface, one thin module per feature area. Commands validate and delegate; they hold no logic. |
-| `src-tauri/src/core.rs` | The wiring hub every command reaches through: config, runtime state, the capture and detector pair, the log buffer. |
-| `src-tauri/src/engine/` | The long lived loops: guard engine, chain runner, scheduler, watch agent. |
-| `src-tauri/src/hardware/` | Everything that touches the OS: capture, input synthesis, recording, OCR, the picker overlays, and `vision/`. |
-| `src-tauri/src/models/` | Serde types for the on disk formats. These define the file compatibility contract. |
-| `src-tauri/src/shell/` | The desktop furniture that runs without the UI asking: tray icon, global hotkeys, the recording indicator window, and the detection overlay. |
-| `assets/` | The raster logo master. Regenerate the whole window, taskbar and tray icon set with `npm run tauri -- icon assets/Clawmation.png`. |
-| `public/` | Static files the UI loads at runtime, including `Clawmation.svg`, the vector logo the app draws in its title bar. |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), the [design contract](docs/DESIGN.md), the [release process](docs/RELEASING.md), and the notes behind the deliberate oddities in the port. |
+| `src/` | React 19 and TypeScript interface, typed API seam, and view components |
+| `src-tauri/src/commands/` | Validated Tauri command surface |
+| `src-tauri/src/engine/` | Macro, Watch, guard, schedule, chain, and Loop execution |
+| `src-tauri/src/hardware/` | DXGI capture, Win32 input, recording hooks, OCR, pickers, and vision |
+| `src-tauri/src/models/` | Persistent configuration and file-format contracts |
+| `src-tauri/src/shell/` | Tray, global hotkeys, updater, overlays, and indicator windows |
 
-New here? [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the map: the four layers, how
-a detection actually flows, what lives on disk, and where to start reading for the kind
-of change you have in mind.
+Read [Architecture](docs/ARCHITECTURE.md) for the dependency map and
+[Design](docs/DESIGN.md) for the interface contract.
 
-## Vision without OpenCV
+## Vision implementation
 
-`src-tauri/src/hardware/vision/` is a hand transcription of the OpenCV calls this app
-used to make through a Python sidecar: `cvtColor`, `inRange`, `morphologyEx`,
-`findContours` (Suzuki and Abe), `resize`, `floodFill`, `CLAHE`, `Canny`, and masked
-`matchTemplate` with `TM_CCOEFF_NORMED`. Only `image`, for decoding template files, and
-`rayon`, for row parallel correlation, back it.
-
-Two things are worth knowing before changing anything in there.
-
-**It reproduces OpenCV's arithmetic, quirks included.** That covers the fixed point Canny
-constants, `BORDER_REFLECT_101` edge handling, Python's `int()` truncation at every scale
-step, and CLAHE padding a whole extra tile when a dimension already divides evenly. That
-is not carelessness. The detection thresholds users have tuned against their own games
-were derived from those exact numbers, and a cleaner reimplementation silently changes
-what their guards fire on.
-
-**Matching runs in tiers, and the first hit wins.** Tier 0 correlates at native scale in
-a small window around wherever the template was last seen, which is what makes a guard
-polling at 50 ms affordable. Tier 1 is a coarse to fine multi scale sweep on CLAHE
-equalised pixels. Tier 2 repeats the sweep on Canny edges at a relaxed threshold. A
-fourth ORB and FLANN tier existed in the Python version and was deliberately not ported:
-reproducing OpenCV's hard coded rBRIEF sampling table has no derivation, and on flat game
-UI it rarely found the six good matches it needed.
+The vision layer is implemented in Rust without a Python or OpenCV runtime. It
+contains native implementations of the image operations used by the detector,
+including colour conversion, morphology, contours, resizing, CLAHE, Canny, and
+masked template correlation. Matching uses a fast local search around the last
+known location before broader multi-scale and edge-based passes.
 
 ## Contributing
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), which covers
-the house style, the three test suites, and what a good pull request looks like here.
-
-The short version: match the surrounding code, document *why* rather than *what*, and
-lean on the type system instead of defensive branches. A `catch` and continue that hides
-a real failure is treated as a bug being introduced, not as robustness.
-
-If you are changing detection behaviour, say so explicitly in the description. Those
-paths are load bearing for setups nobody in this repository can see.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Changes
+to detection, input synthesis, persistence, portable formats, or updater
+behavior require focused regression coverage and a clear compatibility note.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Clawmation is source-available, not open source. Personal, non-commercial use of
+official binaries and private evaluation of the source are permitted under the
+[Clawmation Source-Available License 1.0](LICENSE). Redistribution, commercial
+use, hosted use, rebranding, derivative distribution, and machine-learning
+training use are prohibited without prior written permission.
+
+Versions previously released under the MIT License remain governed by the
+license that accompanied those versions.

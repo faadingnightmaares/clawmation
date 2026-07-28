@@ -8,8 +8,24 @@
 //   • Data OUT keeps Rust's serde field names, which are snake_case, so the
 //     return interfaces below are snake_case. Do not "tidy" a return field to
 //     camelCase; it must match the JSON the command actually emits.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+const docsCapture =
+  import.meta.env.DEV &&
+  new URLSearchParams(globalThis.location?.search ?? "").get("docs") === "1";
+
+function invoke<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  if (docsCapture) {
+    return import("./lib/docsFixture").then(({ docsInvoke }) =>
+      docsInvoke<T>(command, args),
+    );
+  }
+  return tauriInvoke<T>(command, args);
+}
 
 /** Arbitrary JSON object, used where a command takes or returns an open map. */
 export type Json = Record<string, unknown>;
