@@ -489,6 +489,9 @@ describe("NodeGraphEditor canvas menu", () => {
     fireEvent.change(name, { target: { value: "Daily Farm" } });
     fireEvent.keyDown(name, { key: "Enter" });
     await waitFor(() => expect(onRenameLoop).toHaveBeenCalledWith("demo", "Daily Farm"));
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Current Loop" })).toBeInTheDocument(),
+    );
 
     fireEvent.contextMenu(screen.getByRole("combobox", { name: "Current Loop" }), {
       clientX: 760,
