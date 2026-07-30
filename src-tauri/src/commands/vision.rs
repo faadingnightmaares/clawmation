@@ -19,6 +19,7 @@ use crate::core::Core;
 use crate::engine::vision_agent::{Act, Detect, MacroRunner, OnEvent, VisionAction, VisionAgent};
 use crate::models::guard::Guard;
 use crate::models::macro_def::Macro;
+use crate::models::vision_images::candidate_limit_error;
 use crate::paths;
 use crate::state::AppState;
 
@@ -36,6 +37,13 @@ pub fn vision_save(state: State<AppState>, triggers: Option<Vec<Value>>) -> Valu
             return json!({ "ok": false, "error": e.to_string() });
         }
     };
+    if let Some(error) = objs
+        .iter()
+        .find_map(|guard| candidate_limit_error(&guard.template_path, &guard.template_paths))
+    {
+        state.emit("err", format!("Vision save failed: {error}"));
+        return json!({ "ok": false, "error": error });
+    }
     let count = objs.len();
     let path = paths::guards_dir().join("_vision.json");
     let bytes = serde_json::to_vec_pretty(&json!({ "triggers": objs }))
@@ -93,19 +101,16 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
             VisionAction::FocusAt(x, y) => {
                 crate::hardware::window::focus_window_at_point(x as i32, y as i32)
             }
-            VisionAction::Click(x, y) => core
-                .controller
-                .try_click(x as i32, y as i32, "left")
-                .map_err(|error| error.to_string()),
-            VisionAction::KeyPress(key) => core
-                .controller
-                .try_key_press(&key)
-                .map_err(|error| error.to_string()),
-            VisionAction::Nudge(x, y) => core
-                .controller
-                .try_move_to(x as i32, y as i32)
-                .and_then(|_| core.controller.try_nudge())
-                .map_err(|error| error.to_string()),
+            VisionAction::Click(x, y) => {
+                core.reliable_input.click_at(x as i32, y as i32).map(|_| ())
+            }
+            VisionAction::KeyPressAt(x, y, key) => core
+                .reliable_input
+                .key_at(x as i32, y as i32, &key)
+                .map(|_| ()),
+            VisionAction::Nudge(x, y) => {
+                core.reliable_input.nudge_at(x as i32, y as i32).map(|_| ())
+            }
             VisionAction::MoveTo(x, y) => core
                 .controller
                 .try_move_to(x as i32, y as i32)

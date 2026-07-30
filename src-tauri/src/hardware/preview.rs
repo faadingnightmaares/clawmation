@@ -9,8 +9,7 @@
 //! `hardware::picker`, which replaced the cv2 `imwrite`/`imencode` calls the
 //! Python pickers ended on.
 
-use std::fs::File;
-use std::io::{BufWriter, Cursor};
+use std::io::Cursor;
 use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD;
@@ -59,7 +58,11 @@ impl Canvas {
         for px in frame.bgr.chunks_exact(3) {
             rgb.extend_from_slice(&[px[2], px[1], px[0]]);
         }
-        Self { rgb, width: frame.width as i32, height: frame.height as i32 }
+        Self {
+            rgb,
+            width: frame.width as i32,
+            height: frame.height as i32,
+        }
     }
 
     /// Convert and box-average down by `factor` in one pass. Averaging rather
@@ -88,7 +91,11 @@ impl Canvas {
                 rgb.extend_from_slice(&[(r / n) as u8, (g / n) as u8, (b / n) as u8]);
             }
         }
-        Self { rgb, width: ow as i32, height: oh as i32 }
+        Self {
+            rgb,
+            width: ow as i32,
+            height: oh as i32,
+        }
     }
 
     /// Paint one pixel, ignoring anything outside the canvas. Clipping here (not
@@ -128,9 +135,16 @@ impl Canvas {
         for r in (radius - thickness + 1).max(1)..=radius {
             let (mut x, mut y, mut err) = (r, 0, 0);
             while x >= y {
-                for (dx, dy) in
-                    [(x, y), (y, x), (-y, x), (-x, y), (-x, -y), (-y, -x), (y, -x), (x, -y)]
-                {
+                for (dx, dy) in [
+                    (x, y),
+                    (y, x),
+                    (-y, x),
+                    (-x, y),
+                    (-x, -y),
+                    (-y, -x),
+                    (y, -x),
+                    (x, -y),
+                ] {
                     self.put(cx + dx, cy + dy, color);
                 }
                 y += 1;
@@ -175,9 +189,15 @@ impl Canvas {
         let (ow, oh) = (width.max(1), height.max(1));
         let mut rgb = Vec::with_capacity((ow * oh * 3) as usize);
         for oy in 0..oh {
-            let (y0, y1) = (oy * self.height / oh, ((oy + 1) * self.height / oh).max(oy * self.height / oh + 1));
+            let (y0, y1) = (
+                oy * self.height / oh,
+                ((oy + 1) * self.height / oh).max(oy * self.height / oh + 1),
+            );
             for ox in 0..ow {
-                let (x0, x1) = (ox * self.width / ow, ((ox + 1) * self.width / ow).max(ox * self.width / ow + 1));
+                let (x0, x1) = (
+                    ox * self.width / ow,
+                    ((ox + 1) * self.width / ow).max(ox * self.width / ow + 1),
+                );
                 let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
                 for y in y0..y1.min(self.height) {
                     for x in x0..x1.min(self.width) {
@@ -192,7 +212,11 @@ impl Canvas {
                 rgb.extend_from_slice(&[(r / n) as u8, (g / n) as u8, (b / n) as u8]);
             }
         }
-        Self { rgb, width: ow, height: oh }
+        Self {
+            rgb,
+            width: ow,
+            height: oh,
+        }
     }
 
     /// Straight line, thickened perpendicular to its dominant axis. Only the
@@ -267,7 +291,14 @@ fn draw(
     let s = |v: i64| (v / i64::from(factor)) as i32;
 
     let (x1, y1, x2, y2) = region;
-    canvas.rect(s(x1.into()), s(y1.into()), s(x2.into()), s(y2.into()), box_color, 2);
+    canvas.rect(
+        s(x1.into()),
+        s(y1.into()),
+        s(x2.into()),
+        s(y2.into()),
+        box_color,
+        2,
+    );
 
     for m in matches.iter().take(MAX_RINGS) {
         canvas.circle(s(m.x), s(m.y), 8, MATCH, 2);
@@ -296,14 +327,13 @@ fn preview_factor(width: u32) -> u32 {
 /// the detector later reads back through `vision::read_frame`. Replaces
 /// `cv2.imwrite`.
 pub fn save_png(path: &Path, frame: &Frame) -> std::io::Result<()> {
-    let canvas = Canvas::from_frame(frame);
-    let file = BufWriter::new(File::create(path)?);
-    let mut encoder = png::Encoder::new(file, canvas.width as u32, canvas.height as u32);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .and_then(|mut w| w.write_image_data(&canvas.rgb))
+    crate::util::write_atomic(path, &png_bytes(frame)?)
+}
+
+/// Encode a frame to the same canonical PNG bytes used by [`save_png`].
+pub fn png_bytes(frame: &Frame) -> std::io::Result<Vec<u8>> {
+    Canvas::from_frame(frame)
+        .to_png()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
 }
 
@@ -337,7 +367,11 @@ fn scaled_thumb(frame: &Frame, height: u32) -> (Canvas, f64, f64) {
     let w = ((f64::from(canvas.width) * scale) as i32).max(1);
     let h = (height as i32).max(1);
     let thumb = canvas.resized(w, h);
-    (thumb, f64::from(w) / f64::from(canvas.width.max(1)), f64::from(h) / f64::from(canvas.height.max(1)))
+    (
+        thumb,
+        f64::from(w) / f64::from(canvas.width.max(1)),
+        f64::from(h) / f64::from(canvas.height.max(1)),
+    )
 }
 
 /// Encode to base64 PNG; an encoder failure yields `""`, the same empty-thumb
@@ -354,7 +388,11 @@ mod tests {
     use super::*;
 
     fn frame(w: u32, h: u32) -> Frame {
-        Frame { bgr: vec![0u8; (w * h * 3) as usize], width: w, height: h }
+        Frame {
+            bgr: vec![0u8; (w * h * 3) as usize],
+            width: w,
+            height: h,
+        }
     }
 
     fn pixel(c: &Canvas, x: i32, y: i32) -> [u8; 3] {
@@ -365,7 +403,11 @@ mod tests {
     #[test]
     fn bgr_frame_becomes_rgb_canvas() {
         // One pure-red pixel, which is [0,0,255] in BGR.
-        let f = Frame { bgr: vec![0, 0, 255], width: 1, height: 1 };
+        let f = Frame {
+            bgr: vec![0, 0, 255],
+            width: 1,
+            height: 1,
+        };
         assert_eq!(pixel(&Canvas::from_frame(&f), 0, 0), [255, 0, 0]);
     }
 
@@ -461,7 +503,11 @@ mod tests {
                 bgr.extend_from_slice(&[0, 0, 255]);
             }
         }
-        let f = Frame { bgr, width: 4, height: 2 };
+        let f = Frame {
+            bgr,
+            width: 4,
+            height: 2,
+        };
         let c = Canvas::from_frame_scaled(&f, 2);
         assert_eq!((c.width, c.height), (2, 1));
         assert_eq!(pixel(&c, 0, 0), [0, 0, 255]); // blue, as RGB
@@ -470,7 +516,11 @@ mod tests {
 
     #[test]
     fn scaling_by_one_is_a_plain_conversion() {
-        let f = Frame { bgr: vec![10, 20, 30], width: 1, height: 1 };
+        let f = Frame {
+            bgr: vec![10, 20, 30],
+            width: 1,
+            height: 1,
+        };
         assert_eq!(pixel(&Canvas::from_frame_scaled(&f, 1), 0, 0), [30, 20, 10]);
     }
 }

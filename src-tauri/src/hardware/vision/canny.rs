@@ -13,8 +13,16 @@ const CANNY_SHIFT: i32 = 15;
 const TG22: i32 = 13573;
 
 /// The 8 neighbours, for hysteresis propagation.
-const NEIGHBOURS: [(i32, i32); 8] =
-    [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+const NEIGHBOURS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 pub fn canny(src: &Gray, low: i32, high: i32) -> Gray {
     let (low, high) = if low > high { (high, low) } else { (low, high) };
@@ -25,7 +33,11 @@ pub fn canny(src: &Gray, low: i32, high: i32) -> Gray {
     let (dx, dy) = sobel3(src);
 
     // L1 magnitude, OpenCV's default (`L2gradient=False`).
-    let mag: Vec<i32> = dx.iter().zip(&dy).map(|(&x, &y)| x.abs() + y.abs()).collect();
+    let mag: Vec<i32> = dx
+        .iter()
+        .zip(&dy)
+        .map(|(&x, &y)| x.abs() + y.abs())
+        .collect();
     let magnitude = |x: i32, y: i32| -> i32 {
         if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
             0
@@ -93,7 +105,13 @@ pub fn canny(src: &Gray, low: i32, high: i32) -> Gray {
         }
     }
 
-    Gray::from_vec(w, h, map.into_iter().map(|v| if v == 2 { 255 } else { 0 }).collect())
+    Gray::from_vec(
+        w,
+        h,
+        map.into_iter()
+            .map(|v| if v == 2 { 255 } else { 0 })
+            .collect(),
+    )
 }
 
 /// The two 3x3 Sobel derivatives, `BORDER_REPLICATE` at the edges, the same

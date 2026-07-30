@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 
-import { onUpdateAvailable } from "@/api";
+import { onAssociatedImport, onUpdateAvailable } from "@/api";
 import { notifyAction } from "@/lib/toast";
 import { useStatus } from "@/useStatus";
 import { NAV, type ViewId } from "@/nav";
@@ -132,6 +132,25 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [navigate]);
+
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void onAssociatedImport((imported) => {
+      if (imported.kind !== "loop") return;
+      localStorage.setItem("clawmation:pending-loop-selection", imported.name);
+      navigate("nodes");
+    })
+      .then((off) => {
+        if (alive) unlisten = off;
+        else off();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
   }, [navigate]);
 
   // The backend checks for a release once at launch and announces the result

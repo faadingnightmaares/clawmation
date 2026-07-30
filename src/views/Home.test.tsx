@@ -202,4 +202,61 @@ describe("Home workspace", () => {
       screen.getByRole("region", { name: "Recent activity" }),
     ).toHaveClass("h-full");
   });
+
+  it("refreshes activity when the cached Home view becomes active again", async () => {
+    let historyLoads = 0;
+    invoke.mockImplementation(async (cmd) => {
+      if (cmd === "get_stats_summary") {
+        return {
+          total_macros: 0,
+          total_guards: 0,
+          total_chains: 0,
+          total_schedules: 0,
+          total_play_seconds: 0,
+          most_played: "",
+          most_played_count: 0,
+        };
+      }
+      if (cmd === "get_run_history") {
+        historyLoads += 1;
+        return historyLoads === 1
+          ? [
+              {
+                name: "Deleted macro",
+                timestamp: 1,
+                duration: 1,
+                status: "completed",
+              },
+            ]
+          : [];
+      }
+      if (cmd === "anti_afk_list_windows") return [];
+      if (cmd === "anti_afk_get") {
+        return {
+          enabled: false,
+          target_id: null,
+          interval_min: 15,
+          action: "random",
+          status: "off",
+          error: null,
+        };
+      }
+      return { ok: true };
+    });
+
+    const rendered = render(
+      <Home status={null} navigate={() => {}} active />,
+    );
+    expect(await screen.findByText("Deleted macro")).toBeInTheDocument();
+
+    rendered.rerender(
+      <Home status={null} navigate={() => {}} active={false} />,
+    );
+    rendered.rerender(
+      <Home status={null} navigate={() => {}} active />,
+    );
+
+    expect(await screen.findByText("No activity yet")).toBeInTheDocument();
+    expect(screen.queryByText("Deleted macro")).not.toBeInTheDocument();
+  });
 });

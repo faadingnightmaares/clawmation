@@ -21,7 +21,11 @@ pub struct Clahe {
 
 impl Clahe {
     pub fn new(clip_limit: f64, tiles_x: usize, tiles_y: usize) -> Self {
-        Self { clip_limit, tiles_x, tiles_y }
+        Self {
+            clip_limit,
+            tiles_x,
+            tiles_y,
+        }
     }
 
     /// The detector's settings: `clipLimit=2.0`, `tileGridSize=(8, 8)`.
@@ -197,7 +201,11 @@ mod tests {
         // lands mid-range rather than mapping the one occupied bin to 255.
         let src = Gray::from_vec(16, 16, vec![40; 256]);
         let out = Clahe::detector_default().apply(&src);
-        assert!(out.data.iter().all(|&v| v == 128), "got {:?}", &out.data[..8]);
+        assert!(
+            out.data.iter().all(|&v| v == 128),
+            "got {:?}",
+            &out.data[..8]
+        );
     }
 
     #[test]

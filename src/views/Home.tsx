@@ -41,12 +41,13 @@ const MacrosIcon = VIEW_ICONS.macros;
 const WatchIcon = VIEW_ICONS.vision;
 const LoopsIcon = VIEW_ICONS.nodes;
 
-export function Home({ status, navigate }: ViewProps) {
+export function Home({ status, navigate, active }: ViewProps) {
   const [stats, setStats] = useState<StatsSummary | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (active === false) return;
     let alive = true;
     void (async () => {
       const [statsResult, historyResult] = await Promise.allSettled([
@@ -63,7 +64,7 @@ export function Home({ status, navigate }: ViewProps) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [active]);
 
   const hour = new Date().getHours();
   const greeting =

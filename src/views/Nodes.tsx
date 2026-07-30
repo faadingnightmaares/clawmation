@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
-import { Plus, SpinnerGap } from "@phosphor-icons/react";
+import {
+  BookOpenText,
+  DownloadSimple,
+  Plus,
+  SpinnerGap,
+} from "@phosphor-icons/react";
 
 import {
   listChains,
   listMacros,
+  importLoop,
   nodeGraphCreate,
   nodeGraphDelete,
   nodeGraphList,
   nodeGraphRename,
+  nodeGraphSave,
   type Chain,
   type MacroListItem,
   type NodeLoopItem,
@@ -24,6 +31,11 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import {
+  LOOP_TEMPLATES,
+  createLoopTemplateGraph,
+  type LoopTemplateId,
+} from "@/lib/nodeGraphTemplates";
 import { notify } from "@/lib/toast";
 import { VIEW_ICONS, VIEW_ICON_STROKE_WIDTH } from "@/nav";
 import type { ViewProps } from "./types";
@@ -66,7 +78,9 @@ export function Nodes({ status, active = true }: ViewProps) {
   }, []);
 
   useEffect(() => {
-    void load();
+    const pending = localStorage.getItem("clawmation:pending-loop-selection");
+    if (pending) localStorage.removeItem("clawmation:pending-loop-selection");
+    void load(pending || undefined);
   }, [load]);
 
   useEffect(() => {
@@ -89,18 +103,61 @@ export function Nodes({ status, active = true }: ViewProps) {
     };
   }, [active, emptyMenu]);
 
-  const createLoop = async () => {
+  const createLoop = async (templateId?: LoopTemplateId) => {
     setBusy(true);
+    let createdName: string | null = null;
     try {
-      const result = await nodeGraphCreate("Loop");
+      const template = templateId
+        ? LOOP_TEMPLATES.find((candidate) => candidate.id === templateId)
+        : undefined;
+      const result = await nodeGraphCreate(template?.name ?? "Loop");
       if (!result.ok || !result.name) {
         notify("error", result.error || "Couldn’t create the Loop.");
         return;
       }
+      createdName = result.name;
+      if (templateId) {
+        const saved = await nodeGraphSave(
+          result.name,
+          createLoopTemplateGraph(templateId, result.name),
+        );
+        if (!saved.ok) {
+          await nodeGraphDelete(result.name);
+          createdName = null;
+          notify("error", saved.error || "Could not create the Loop template.");
+          return;
+        }
+      }
       setEmptyMenu(null);
       await load(result.name);
     } catch (createError) {
+      if (createdName && templateId) {
+        try {
+          await nodeGraphDelete(createdName);
+        } catch {
+          // Preserve the original template error if cleanup also fails.
+        }
+      }
       notify("error", String(createError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importPortableLoop = async () => {
+    setBusy(true);
+    try {
+      const result = await importLoop();
+      if (!result.ok || !result.name) {
+        if (result.error !== "cancelled") {
+          notify("error", result.error || "Couldn’t import the Loop.");
+        }
+        return;
+      }
+      await load(result.name);
+      notify("success", `Imported “${result.name}” with all images.`);
+    } catch (importError) {
+      notify("error", String(importError));
     } finally {
       setBusy(false);
     }
@@ -182,6 +239,7 @@ export function Nodes({ status, active = true }: ViewProps) {
           workspaceBusy={busy}
           onSelectLoop={setSelectedName}
           onCreateLoop={createLoop}
+          onImportLoop={importPortableLoop}
           onRenameLoop={renameLoop}
           onDeleteLoop={setDeleteTarget}
           onChanged={() => load(selectedName)}
@@ -209,10 +267,30 @@ export function Nodes({ status, active = true }: ViewProps) {
               A Loop is a complete node workflow containing any number of macros, waits, guards,
               and branches.
             </p>
-            <Button className="mt-4" size="sm" onClick={() => void createLoop()} disabled={busy}>
-              {busy ? <SpinnerGap className="size-4 animate-spin" /> : <Plus className="size-4" />}
-              New Loop
-            </Button>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              <Button size="sm" onClick={() => void createLoop()} disabled={busy}>
+                {busy ? <SpinnerGap className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                New Loop
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void createLoop("learn-loops")}
+                disabled={busy}
+              >
+                <BookOpenText className="size-4" weight="duotone" />
+                Learn Loops
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void importPortableLoop()}
+                disabled={busy}
+              >
+                <DownloadSimple className="size-4" />
+                Import
+              </Button>
+            </div>
             <p className="mt-3 text-[10px] text-muted-foreground">
               You can also right-click anywhere on the canvas.
             </p>
@@ -234,6 +312,24 @@ export function Nodes({ status, active = true }: ViewProps) {
               >
                 <Plus className="size-4 text-primary" weight="bold" />
                 New Loop
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs font-medium text-popover-foreground hover:bg-accent"
+                onClick={() => void createLoop("learn-loops")}
+              >
+                <BookOpenText className="size-4 text-primary" weight="duotone" />
+                Learn Loops
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs font-medium text-popover-foreground hover:bg-accent"
+                onClick={() => void importPortableLoop()}
+              >
+                <DownloadSimple className="size-4 text-primary" />
+                Import Loop
               </button>
             </div>
           )}

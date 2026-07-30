@@ -67,13 +67,14 @@ const BURST_FLOOR: Duration = Duration::from_millis(16);
 const STROKE_STEP: Duration = Duration::from_millis(8);
 
 /// The action a fired trigger performs on screen. Click and key press are atomic
-/// so Watch uses the same release-safe controller calls as playback, checkpoints,
-/// guards, and Loops. The cursor primitives remain only for drawn drag strokes.
+/// — each is a single release-safe controller call, never a set of button edges
+/// the engine sequences itself. The cursor primitives remain only for drawn drag
+/// strokes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisionAction {
     FocusAt(i64, i64),
     Click(i64, i64),
-    KeyPress(String),
+    KeyPressAt(i64, i64, String),
     Nudge(i64, i64),
     MoveTo(i64, i64),
     MouseDown(String),
@@ -344,26 +345,25 @@ impl Inner {
                 );
                 return false;
             }
-            self.dispatch(VisionAction::FocusAt(best.x, best.y))
-                .and_then(|_| self.dispatch(VisionAction::KeyPress(key.to_string())))
+            self.dispatch(VisionAction::KeyPressAt(best.x, best.y, key.to_string()))
                 .map(|_| format!("'{}' -> pressed {key}", trigger.name))
         } else if trigger.action == "nudge" {
             // Same target a click would press (a marked point or offset applied
             // to the match), but parked-and-wiggled instead of pressed: the game
             // sees activity at the object, not a click on it.
             let (x, y) = nudge_point(trigger, best);
-            self.dispatch(VisionAction::FocusAt(x, y))
-                .and_then(|_| self.dispatch(VisionAction::Nudge(x, y)))
+            self.dispatch(VisionAction::Nudge(x, y))
                 .map(|_| format!("'{}' -> nudged the mouse at ({x}, {y})", trigger.name))
         } else {
             match plan_action(trigger, best) {
                 Plan::Click(x, y) => {
-                    // Use the controller's atomic click path. It reconciles the
-                    // cursor once, sends both edges, and retries a failed release;
-                    // splitting those phases here had left Watch behind every
-                    // newer input caller in the app.
-                    self.dispatch(VisionAction::FocusAt(x, y))
-                        .and_then(|_| self.dispatch(VisionAction::Click(x, y)))
+                    // Use the controller's Watch click path. It lands the cursor
+                    // once, lets the target UI see the hover position, holds the
+                    // press across game frames so a frame-polled UI cannot miss
+                    // it, and retries a failed release; splitting those phases
+                    // here had left Watch behind every newer input caller in the
+                    // app.
+                    self.dispatch(VisionAction::Click(x, y))
                         .map(|_| format!("'{}' -> clicked ({x}, {y})", trigger.name))
                 }
                 Plan::Drag { tlx, tly, strokes } => {
@@ -560,7 +560,7 @@ mod tests {
     }
 
     fn click_actions(x: i64, y: i64) -> Vec<VisionAction> {
-        vec![VisionAction::FocusAt(x, y), VisionAction::Click(x, y)]
+        vec![VisionAction::Click(x, y)]
     }
 
     #[test]
@@ -634,10 +634,7 @@ mod tests {
         agent.test_tick();
         assert_eq!(
             *actions.lock().unwrap(),
-            vec![
-                VisionAction::FocusAt(0, 0),
-                VisionAction::KeyPress("e".into()),
-            ]
+            vec![VisionAction::KeyPressAt(0, 0, "e".into())]
         );
         assert_eq!(
             *events.lock().unwrap(),
@@ -672,10 +669,7 @@ mod tests {
         agent.test_tick();
         assert_eq!(
             *actions.lock().unwrap(),
-            vec![
-                VisionAction::FocusAt(300, 400),
-                VisionAction::Nudge(300, 400),
-            ]
+            vec![VisionAction::Nudge(300, 400)]
         );
         assert_eq!(
             *events.lock().unwrap(),
@@ -697,10 +691,7 @@ mod tests {
         t.click_offset = vec![4, 3];
         agent.test_prime(vec![t]);
         agent.test_tick();
-        assert_eq!(
-            *actions.lock().unwrap(),
-            vec![VisionAction::FocusAt(84, 193), VisionAction::Nudge(84, 193),]
-        );
+        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Nudge(84, 193)]);
     }
 
     #[test]
@@ -902,6 +893,33 @@ mod tests {
                 "'Watcher' -> action failed: Windows rejected input".into()
             )]
         );
+    }
+
+    #[test]
+    fn rejected_hardware_action_stays_armed_and_retries_next_scan() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let action_attempts = attempts.clone();
+        let agent = VisionAgent::new(
+            Box::new(|_: &[Guard]| HashMap::from([("t".to_string(), vec![detection(10, 20)])])),
+            Box::new(move |_: VisionAction| {
+                if action_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("foreground was lost".into())
+                } else {
+                    Ok(())
+                }
+            }),
+            Box::new(|_, _| {}),
+            Box::new(|_: &str, _: i64| Ok(())),
+        );
+        agent.test_prime(vec![base_trigger("t")]);
+
+        let wait = agent.test_tick();
+        assert_eq!(agent.fired_count(), 0);
+        thread::sleep(wait + Duration::from_millis(10));
+        agent.test_tick();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(agent.fired_count(), 1);
     }
 
     #[test]

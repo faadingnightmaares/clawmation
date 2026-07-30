@@ -39,13 +39,17 @@ pub fn round1(v: f64) -> f64 {
 /// exact value with ties-to-even, so it reproduces `round(x, 2)` across the tie
 /// cases (`0.125→0.12`, `0.375→0.38`, `2.675→2.67`).
 pub fn round2(v: f64) -> f64 {
-    format!("{v:.2}").parse().expect("a fixed-precision float always reparses")
+    format!("{v:.2}")
+        .parse()
+        .expect("a fixed-precision float always reparses")
 }
 
 /// The same trick at three decimals: `round(x, 3)`, which is the precision both
 /// Test buttons report a match confidence at.
 pub fn round3(v: f64) -> f64 {
-    format!("{v:.3}").parse().expect("a fixed-precision float always reparses")
+    format!("{v:.3}")
+        .parse()
+        .expect("a fixed-precision float always reparses")
 }
 
 /// Format a float like Python's `str(float)`: integer-valued floats keep one
@@ -110,8 +114,8 @@ mod tests {
         assert_eq!(round2(0.5), 0.5);
         assert_eq!(round2(1.005), 1.0); // 1.005 is really 1.00499… in f64 → 1.0
         assert_eq!(round2(2.675), 2.67); // 2.675 is really 2.67499… in f64 → 2.67
-        // Exact dyadic ties round to even; the naive `(v*100).round()/100` gets
-        // these wrong (and 2.675 too), so they pin the format-parse behaviour.
+                                         // Exact dyadic ties round to even; the naive `(v*100).round()/100` gets
+                                         // these wrong (and 2.675 too), so they pin the format-parse behaviour.
         assert_eq!(round2(0.125), 0.12);
         assert_eq!(round2(0.375), 0.38);
         assert_eq!(round2(0.625), 0.62);

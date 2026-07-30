@@ -44,9 +44,12 @@ fn appdata_root() -> Option<PathBuf> {
     if let Ok(appdata) = std::env::var("APPDATA") {
         return Some(PathBuf::from(appdata).join("clawmation"));
     }
-    std::env::var("USERPROFILE")
-        .ok()
-        .map(|p| PathBuf::from(p).join("AppData").join("Roaming").join("clawmation"))
+    std::env::var("USERPROFILE").ok().map(|p| {
+        PathBuf::from(p)
+            .join("AppData")
+            .join("Roaming")
+            .join("clawmation")
+    })
 }
 
 fn beside_exe_root() -> PathBuf {
@@ -213,7 +216,10 @@ mod tests {
         copy_dir_recursive(&src, &dst).unwrap();
 
         assert_eq!(std::fs::read(dst.join("macros/a.json")).unwrap(), b"a");
-        assert_eq!(std::fs::read(dst.join("macros/guards/g.json")).unwrap(), b"g");
+        assert_eq!(
+            std::fs::read(dst.join("macros/guards/g.json")).unwrap(),
+            b"g"
+        );
         assert_eq!(std::fs::read(dst.join("config.json")).unwrap(), b"c");
     }
 

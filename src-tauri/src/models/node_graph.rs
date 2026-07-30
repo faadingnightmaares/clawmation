@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::models::step::Step;
+use crate::models::vision_images::{candidate_limit_error, candidate_paths};
 
 pub const GRAPH_VERSION: u32 = 1;
 pub const MAX_GRAPH_NODES: usize = 1_000;
@@ -61,6 +62,8 @@ pub struct GraphEdge {
     pub from: String,
     pub output: String,
     pub to: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waypoints: Vec<NodePosition>,
 }
 
 impl Default for GraphEdge {
@@ -70,6 +73,7 @@ impl Default for GraphEdge {
             from: String::new(),
             output: "next".to_string(),
             to: String::new(),
+            waypoints: Vec::new(),
         }
     }
 }
@@ -120,7 +124,7 @@ fn required_outputs(node_type: &str) -> &'static [&'static str] {
     match node_type {
         "start" => &["next"],
         "branch" => &["true", "false"],
-        "loop" => &["body", "done"],
+        "loop" => &["body"],
         _ => &[],
     }
 }
@@ -162,7 +166,15 @@ impl NodeGraph {
             }
             if !matches!(
                 node.node_type.as_str(),
-                "start" | "action" | "vision" | "branch" | "loop" | "sub_macro" | "chain" | "note" | "stop"
+                "start"
+                    | "action"
+                    | "vision"
+                    | "branch"
+                    | "loop"
+                    | "sub_macro"
+                    | "chain"
+                    | "note"
+                    | "stop"
             ) {
                 errors.push(format!(
                     "Node '{}' has unknown type '{}'",
@@ -185,9 +197,13 @@ impl NodeGraph {
                         }
                         if node.node_type == "vision"
                             && step.detect_mode == "template"
-                            && step.template.trim().is_empty()
+                            && candidate_paths(&step.template, &step.templates).is_empty()
                         {
                             errors.push(format!("Vision node '{}' needs an image", node.id));
+                        }
+                        if let Some(error) = candidate_limit_error(&step.template, &step.templates)
+                        {
+                            errors.push(format!("Vision node '{}': {error}", node.id));
                         }
                         if node.node_type == "vision" && !(0.1..=1.0).contains(&step.confidence) {
                             errors.push(format!(
@@ -253,6 +269,14 @@ impl NodeGraph {
                             }) {
                                 errors.push(format!(
                                     "Sub-macro node '{}' contains an invalid embedded step",
+                                    node.id
+                                ));
+                            }
+                            if steps.iter().any(|step| {
+                                candidate_limit_error(&step.template, &step.templates).is_some()
+                            }) {
+                                errors.push(format!(
+                                    "Sub-macro node '{}' has a step exceeding the image limit",
                                     node.id
                                 ));
                             }
@@ -545,6 +569,7 @@ impl NodeGraph {
                     }
                 },
                 to: id.clone(),
+                ..Default::default()
             });
             previous = id;
         }
@@ -572,6 +597,7 @@ impl NodeGraph {
                 .unwrap_or("next")
                 .to_string(),
             to: stop_id,
+            ..Default::default()
         });
 
         Self {
@@ -589,6 +615,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_edges_default_waypoints_and_new_edges_round_trip_them() {
+        let old: GraphEdge = serde_json::from_value(json!({
+            "id":"edge",
+            "from":"start",
+            "output":"next",
+            "to":"stop"
+        }))
+        .unwrap();
+        assert!(old.waypoints.is_empty());
+
+        let edge = GraphEdge {
+            waypoints: vec![NodePosition {
+                x: -120.5,
+                y: 840.0,
+            }],
+            ..old
+        };
+        let encoded = serde_json::to_value(&edge).unwrap();
+        assert_eq!(encoded["waypoints"][0]["x"], -120.5);
+    }
+
+    #[test]
     fn validation_rejects_duplicate_outputs_and_missing_targets() {
         let graph = NodeGraph {
             entry: "start".into(),
@@ -603,12 +651,14 @@ mod tests {
                     from: "start".into(),
                     output: "next".into(),
                     to: "gone".into(),
+                    ..Default::default()
                 },
                 GraphEdge {
                     id: "b".into(),
                     from: "start".into(),
                     output: "next".into(),
                     to: "start".into(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -675,6 +725,7 @@ mod tests {
                 from: "start".into(),
                 output: "next".into(),
                 to: "stop".into(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -682,7 +733,51 @@ mod tests {
         let report = graph.validate();
 
         assert!(report.ok, "{:?}", report.errors);
-        assert!(report.warnings.iter().all(|warning| !warning.contains("note")));
+        assert!(report
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("note")));
+    }
+
+    #[test]
+    fn repeat_then_path_is_optional_when_the_repeat_ends_the_workflow() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                GraphNode {
+                    id: "start".into(),
+                    node_type: "start".into(),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "repeat".into(),
+                    node_type: "loop".into(),
+                    config: json!({"count": 3}),
+                    ..Default::default()
+                },
+            ],
+            edges: vec![
+                GraphEdge {
+                    id: "enter".into(),
+                    from: "start".into(),
+                    output: "next".into(),
+                    to: "repeat".into(),
+                    ..Default::default()
+                },
+                GraphEdge {
+                    id: "body".into(),
+                    from: "repeat".into(),
+                    output: "body".into(),
+                    to: "repeat".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let report = graph.validate();
+
+        assert!(report.ok, "{:?}", report.errors);
     }
 
     #[test]
@@ -727,12 +822,14 @@ mod tests {
                     from: "start".into(),
                     output: "error".into(),
                     to: "branch".into(),
+                    ..Default::default()
                 },
                 GraphEdge {
                     id: "b".into(),
                     from: "branch".into(),
                     output: "true".into(),
                     to: "start".into(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -769,6 +866,7 @@ mod tests {
                 from: "macro".into(),
                 output: "success".into(),
                 to: "chain".into(),
+                ..Default::default()
             }],
             ..Default::default()
         };

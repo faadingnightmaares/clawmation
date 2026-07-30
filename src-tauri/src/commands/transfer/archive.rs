@@ -15,18 +15,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::guard::GuardFile;
 use crate::models::macro_def::{Macro, CURRENT_MACRO_FORMAT_VERSION};
+use crate::models::node_graph::NodeGraph;
+use crate::models::node_graph_assets::{image_paths, remap_image_paths};
+use crate::models::vision_images::{candidate_limit_error, candidate_paths};
 
 const CONTAINER_VERSION: u32 = 1;
 const MACRO_FORMAT: &str = "com.clawmation.macro";
 const BUNDLE_FORMAT: &str = "com.clawmation.bundle";
+const LOOP_FORMAT: &str = "com.clawmation.loop";
 const MANIFEST_PATH: &str = "manifest.json";
 const MACRO_PATH: &str = "payload/macro.json";
 const GUARDS_PATH: &str = "payload/guards.json";
+const LOOP_PATH: &str = "payload/loop.json";
 
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_MACRO_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_GUARDS_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LOOP_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES: usize = 2_048;
@@ -39,9 +45,12 @@ struct Manifest {
     format_id: String,
     version: u32,
     app_version: String,
-    macro_file: FileRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    macro_file: Option<FileRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     guards_file: Option<FileRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loop_file: Option<FileRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     assets: Vec<FileRecord>,
 }
@@ -66,8 +75,9 @@ pub(super) fn write_macro(macro_path: &Path, dest: &Path) -> ArchiveResult<()> {
         format_id: MACRO_FORMAT.to_string(),
         version: CONTAINER_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        macro_file: macro_file.record.clone(),
+        macro_file: Some(macro_file.record.clone()),
         guards_file: None,
+        loop_file: None,
         assets: Vec::new(),
     };
     write_archive(dest, manifest, vec![macro_file])
@@ -90,7 +100,11 @@ pub(super) fn read_macro(src: &Path, macros_dir: &Path) -> ArchiveResult<String>
         return invalid("a .clawmation file cannot contain bundle data");
     }
     validate_declared_entries(&names, &manifest)?;
-    let bytes = read_record(&mut archive, &manifest.macro_file, MAX_MACRO_BYTES)?;
+    let macro_file = manifest
+        .macro_file
+        .as_ref()
+        .ok_or_else(|| invalid_error("missing macro payload"))?;
+    let bytes = read_record(&mut archive, macro_file, MAX_MACRO_BYTES)?;
     let macro_def: Macro = serde_json::from_slice(&bytes)?;
     install_macro(macro_def, macros_dir)
 }
@@ -113,31 +127,40 @@ pub(super) fn write_bundle(
         let mut content_paths: HashMap<String, String> = HashMap::new();
 
         for guard in &mut guards.guards {
-            if guard.template_path.is_empty() {
-                continue;
+            if let Some(error) = candidate_limit_error(&guard.template_path, &guard.template_paths)
+            {
+                return invalid(format!("guard '{}': {error}", guard.name));
             }
-            let source = Path::new(&guard.template_path);
-            if !source.is_file() {
-                return invalid(format!("vision image is missing: {}", source.display()));
+            let configured = candidate_paths(&guard.template_path, &guard.template_paths)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let mut archived = Vec::with_capacity(configured.len());
+            for configured_path in configured {
+                let source = resolve_template_path(&configured_path);
+                if !source.is_file() {
+                    return invalid(format!("vision image is missing: {}", source.display()));
+                }
+                let bytes = std::fs::read(&source)?;
+                if bytes.len() as u64 > MAX_ASSET_BYTES {
+                    return invalid(format!("vision image is too large: {}", source.display()));
+                }
+                let digest = digest(&bytes);
+                let archive_path = if let Some(existing) = content_paths.get(&digest) {
+                    existing.clone()
+                } else {
+                    let extension = safe_image_extension(&source)?;
+                    let archive_path = format!("assets/{digest}.{extension}");
+                    let compress = extension == "bmp";
+                    let file = prepared(&archive_path, bytes, compress);
+                    asset_records.push(file.record.clone());
+                    extras.push(file);
+                    content_paths.insert(digest, archive_path.clone());
+                    archive_path
+                };
+                archived.push(archive_path);
             }
-            let bytes = std::fs::read(source)?;
-            if bytes.len() as u64 > MAX_ASSET_BYTES {
-                return invalid(format!("vision image is too large: {}", source.display()));
-            }
-            let digest = digest(&bytes);
-            let archive_path = if let Some(existing) = content_paths.get(&digest) {
-                existing.clone()
-            } else {
-                let extension = safe_image_extension(source)?;
-                let archive_path = format!("assets/{digest}.{extension}");
-                let compress = extension == "bmp";
-                let file = prepared(&archive_path, bytes, compress);
-                asset_records.push(file.record.clone());
-                extras.push(file);
-                content_paths.insert(digest, archive_path.clone());
-                archive_path
-            };
-            guard.template_path = archive_path;
+            set_guard_candidates(guard, archived);
         }
 
         let bytes = serde_json::to_vec(&guards)?;
@@ -150,8 +173,9 @@ pub(super) fn write_bundle(
         format_id: BUNDLE_FORMAT.to_string(),
         version: CONTAINER_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        macro_file: macro_file.record.clone(),
+        macro_file: Some(macro_file.record.clone()),
         guards_file: guards_file.as_ref().map(|file| file.record.clone()),
+        loop_file: None,
         assets: asset_records,
     };
     extras.push(macro_file);
@@ -180,7 +204,11 @@ pub(super) fn read_bundle(
     validate_manifest(&manifest, BUNDLE_FORMAT)?;
     validate_declared_entries(&names, &manifest)?;
 
-    let macro_bytes = read_record(&mut archive, &manifest.macro_file, MAX_MACRO_BYTES)?;
+    let macro_file = manifest
+        .macro_file
+        .as_ref()
+        .ok_or_else(|| invalid_error("missing macro payload"))?;
+    let macro_bytes = read_record(&mut archive, macro_file, MAX_MACRO_BYTES)?;
     let macro_def: Macro = serde_json::from_slice(&macro_bytes)?;
     validate_macro(&macro_def)?;
 
@@ -199,13 +227,14 @@ pub(super) fn read_bundle(
         .collect();
     if let Some(guards) = &guards {
         for guard in &guards.guards {
-            if !guard.template_path.is_empty()
-                && !declared_assets.contains(guard.template_path.as_str())
+            if let Some(error) = candidate_limit_error(&guard.template_path, &guard.template_paths)
             {
-                return invalid(format!(
-                    "guard references an undeclared image: {}",
-                    guard.template_path
-                ));
+                return invalid(format!("guard '{}': {error}", guard.name));
+            }
+            for path in candidate_paths(&guard.template_path, &guard.template_paths) {
+                if !declared_assets.contains(path) {
+                    return invalid(format!("guard references an undeclared image: {path}"));
+                }
             }
         }
     }
@@ -229,13 +258,164 @@ pub(super) fn read_bundle(
     let name = install_macro(macro_def, macros_dir)?;
     if let Some(guards) = &mut guards {
         for guard in &mut guards.guards {
-            if let Some(installed) = installed_assets.get(&guard.template_path) {
-                guard.template_path = installed.to_string_lossy().into_owned();
-            }
+            let installed = candidate_paths(&guard.template_path, &guard.template_paths)
+                .into_iter()
+                .filter_map(|path| installed_assets.get(path))
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            set_guard_candidates(guard, installed);
         }
         guards.save_to(&guards_dir.join(format!("{name}.json")))?;
     }
     Ok(Some(name))
+}
+
+pub(super) fn write_loop(graph_path: &Path, dest: &Path) -> ArchiveResult<()> {
+    let mut graph = NodeGraph::load(graph_path).map_err(invalid_error)?;
+    let report = graph.validate();
+    if !report.ok {
+        return invalid(format!("invalid Loop: {}", report.errors.join("; ")));
+    }
+
+    let mut extras = Vec::new();
+    let mut asset_records = Vec::new();
+    let mut content_paths: HashMap<String, String> = HashMap::new();
+    let mut remap = HashMap::new();
+
+    for configured_path in image_paths(&graph) {
+        let source = resolve_template_path(&configured_path);
+        if !source.is_file() {
+            return invalid(format!("Loop image is missing: {}", source.display()));
+        }
+        let bytes = std::fs::read(&source)?;
+        if bytes.len() as u64 > MAX_ASSET_BYTES {
+            return invalid(format!("Loop image is too large: {}", source.display()));
+        }
+        let digest = digest(&bytes);
+        let archive_path = if let Some(existing) = content_paths.get(&digest) {
+            existing.clone()
+        } else {
+            let extension = safe_image_extension(&source)?;
+            let archive_path = format!("assets/{digest}.{extension}");
+            let file = prepared(&archive_path, bytes, extension == "bmp");
+            asset_records.push(file.record.clone());
+            extras.push(file);
+            content_paths.insert(digest, archive_path.clone());
+            archive_path
+        };
+        remap.insert(configured_path, archive_path);
+    }
+    remap_image_paths(&mut graph, &remap);
+
+    let loop_bytes = serde_json::to_vec(&graph)?;
+    if loop_bytes.len() as u64 > MAX_LOOP_BYTES {
+        return invalid("Loop data is too large");
+    }
+    let loop_file = prepared(LOOP_PATH, loop_bytes, true);
+    let manifest = Manifest {
+        format_id: LOOP_FORMAT.to_string(),
+        version: CONTAINER_VERSION,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        macro_file: None,
+        guards_file: None,
+        loop_file: Some(loop_file.record.clone()),
+        assets: asset_records,
+    };
+    extras.push(loop_file);
+    write_archive(dest, manifest, extras)
+}
+
+pub(super) fn read_loop(
+    src: &Path,
+    nodes_dir: &Path,
+    templates_dir: &Path,
+) -> ArchiveResult<String> {
+    reject_large_archive(src)?;
+    let mut archive = zip::ZipArchive::new(File::open(src)?)?;
+    let names = validate_archive(&mut archive)?;
+    if !names.contains(MANIFEST_PATH) {
+        return invalid("legacy bundles do not contain Loops");
+    }
+    let manifest = read_manifest(&mut archive)?;
+    validate_manifest(&manifest, LOOP_FORMAT)?;
+    validate_declared_entries(&names, &manifest)?;
+
+    let loop_file = manifest
+        .loop_file
+        .as_ref()
+        .ok_or_else(|| invalid_error("missing Loop payload"))?;
+    let graph_bytes = read_record(&mut archive, loop_file, MAX_LOOP_BYTES)?;
+    let mut graph: NodeGraph = serde_json::from_slice(&graph_bytes)?;
+    let report = graph.validate();
+    if !report.ok {
+        return invalid(format!("invalid Loop: {}", report.errors.join("; ")));
+    }
+
+    let declared_assets = manifest
+        .assets
+        .iter()
+        .map(|record| record.path.as_str())
+        .collect::<HashSet<_>>();
+    for path in image_paths(&graph) {
+        if !declared_assets.contains(path.as_str()) {
+            return invalid(format!("Loop references an undeclared image: {path}"));
+        }
+    }
+
+    std::fs::create_dir_all(templates_dir)?;
+    let mut installed_assets = HashMap::new();
+    for record in &manifest.assets {
+        if !record.path.starts_with("assets/") {
+            return invalid("Loop asset is outside assets/");
+        }
+        let extension = safe_image_extension(Path::new(&record.path))?;
+        let bytes = read_record(&mut archive, record, MAX_ASSET_BYTES)?;
+        let filename = format!("{}.{}", record.blake3, extension);
+        let installed = templates_dir.join(filename);
+        if !installed.exists() || digest(&std::fs::read(&installed)?) != record.blake3 {
+            crate::util::write_atomic(&installed, &bytes)?;
+        }
+        installed_assets.insert(
+            record.path.clone(),
+            installed.to_string_lossy().into_owned(),
+        );
+    }
+    remap_image_paths(&mut graph, &installed_assets);
+    install_loop(graph, nodes_dir)
+}
+
+fn resolve_template_path(configured: &str) -> PathBuf {
+    let path = Path::new(configured);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        crate::paths::templates_dir().join(path)
+    }
+}
+
+fn set_guard_candidates(guard: &mut crate::models::guard::Guard, candidates: Vec<String>) {
+    let mut candidates = candidates.into_iter();
+    guard.template_path = candidates.next().unwrap_or_default();
+    guard.template_paths = candidates.collect();
+}
+
+fn install_loop(mut graph: NodeGraph, nodes_dir: &Path) -> ArchiveResult<String> {
+    validate_macro_name(&graph.name)?;
+    std::fs::create_dir_all(nodes_dir)?;
+    let base = graph.name.clone();
+    let mut name = base.clone();
+    let mut destination = nodes_dir.join(format!("{name}.json"));
+    let mut counter = 2_u32;
+    while destination.exists() {
+        name = format!("{base} {counter}");
+        destination = nodes_dir.join(format!("{name}.json"));
+        counter = counter
+            .checked_add(1)
+            .ok_or_else(|| invalid_error("too many Loops with the same name"))?;
+    }
+    graph.name = name.clone();
+    graph.save_to(&destination).map_err(invalid_error)?;
+    Ok(name)
 }
 
 fn prepared(path: &str, bytes: Vec<u8>, compress: bool) -> PreparedFile {
@@ -339,10 +519,15 @@ fn write_archive(
         let mut zip = zip::ZipWriter::new(file);
         let manifest_bytes = serde_json::to_vec(&manifest)?;
         write_zip_file(&mut zip, MANIFEST_PATH, &manifest_bytes, true)?;
+        let primary = manifest
+            .macro_file
+            .as_ref()
+            .or(manifest.loop_file.as_ref())
+            .ok_or_else(|| invalid_error("internal archive has no primary payload"))?;
         write_zip_file(
             &mut zip,
-            &manifest.macro_file.path,
-            &extract_manifest_payload(&manifest.macro_file, &mut extras)?,
+            &primary.path,
+            &extract_manifest_payload(primary, &mut extras)?,
             true,
         )?;
         if let Some(record) = &manifest.guards_file {
@@ -368,7 +553,7 @@ fn write_archive(
 }
 
 /// `Manifest` owns records while prepared payload bytes live in `extras`. The
-/// macro/guards entries are inserted there by the constructor below.
+/// primary/guards entries are inserted there by the constructor below.
 fn extract_manifest_payload(
     record: &FileRecord,
     extras: &mut Vec<PreparedFile>,
@@ -436,21 +621,52 @@ fn validate_manifest(manifest: &Manifest, expected_format: &str) -> ArchiveResul
             manifest.version, CONTAINER_VERSION
         ));
     }
-    if manifest.macro_file.path != MACRO_PATH {
-        return invalid("invalid macro payload path");
-    }
-    if manifest
-        .guards_file
-        .as_ref()
-        .is_some_and(|record| record.path != GUARDS_PATH)
-    {
-        return invalid("invalid guards payload path");
+    match expected_format {
+        MACRO_FORMAT | BUNDLE_FORMAT => {
+            if manifest
+                .macro_file
+                .as_ref()
+                .is_none_or(|record| record.path != MACRO_PATH)
+                || manifest.loop_file.is_some()
+            {
+                return invalid("invalid macro payload path");
+            }
+            if manifest
+                .guards_file
+                .as_ref()
+                .is_some_and(|record| record.path != GUARDS_PATH)
+            {
+                return invalid("invalid guards payload path");
+            }
+            if expected_format == MACRO_FORMAT
+                && (manifest.guards_file.is_some() || !manifest.assets.is_empty())
+            {
+                return invalid("a .clawmation file cannot contain bundle data");
+            }
+        }
+        LOOP_FORMAT => {
+            if manifest
+                .loop_file
+                .as_ref()
+                .is_none_or(|record| record.path != LOOP_PATH)
+                || manifest.macro_file.is_some()
+                || manifest.guards_file.is_some()
+            {
+                return invalid("invalid Loop payload path");
+            }
+        }
+        _ => return invalid("unsupported container type"),
     }
     Ok(())
 }
 
 fn validate_declared_entries(names: &HashSet<String>, manifest: &Manifest) -> ArchiveResult<()> {
-    let mut declared = HashSet::from([MANIFEST_PATH.to_string(), manifest.macro_file.path.clone()]);
+    let primary = manifest
+        .macro_file
+        .as_ref()
+        .or(manifest.loop_file.as_ref())
+        .ok_or_else(|| invalid_error("manifest has no primary payload"))?;
+    let mut declared = HashSet::from([MANIFEST_PATH.to_string(), primary.path.clone()]);
     if let Some(record) = &manifest.guards_file {
         declared.insert(record.path.clone());
     }
@@ -578,12 +794,17 @@ fn read_legacy_bundle<R: Read + Seek>(
         let guard_bytes = read_named(&mut archive, "guards.json", MAX_GUARDS_BYTES)?;
         let mut guards: GuardFile = serde_json::from_slice(&guard_bytes)?;
         for guard in &mut guards.guards {
-            let basename = Path::new(&guard.template_path)
-                .file_name()
-                .and_then(|part| part.to_str());
-            if let Some(installed) = basename.and_then(|part| remap.get(part)) {
-                guard.template_path = installed.to_string_lossy().into_owned();
-            }
+            let installed = candidate_paths(&guard.template_path, &guard.template_paths)
+                .into_iter()
+                .filter_map(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .and_then(|part| part.to_str())
+                        .and_then(|part| remap.get(part))
+                })
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            set_guard_candidates(guard, installed);
         }
         guards.save_to(&guards_dir.join(format!("{name}.json")))?;
     }
@@ -656,7 +877,10 @@ mod tests {
     use super::*;
     use crate::models::guard::Guard;
     use crate::models::macro_def::{InputEventType, MacroEvent};
+    use crate::models::node_graph::{GraphEdge, GraphNode};
+    use crate::models::step::Step;
     use crate::test_support::temp_dir;
+    use serde_json::{json, Value};
 
     fn sample_macro(name: &str, events: usize) -> Macro {
         Macro {
@@ -679,6 +903,93 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn sample_loop(name: &str, direct: &Path, alternative: &Path, embedded: &Path) -> NodeGraph {
+        let vision_step = Step {
+            id: "vision-step".into(),
+            step_type: "find_click".into(),
+            detect_mode: "template".into(),
+            template: direct.to_string_lossy().into_owned(),
+            templates: vec![alternative.to_string_lossy().into_owned()],
+            confidence: 0.8,
+            ..Default::default()
+        };
+        let embedded_step = Step {
+            id: "embedded-step".into(),
+            step_type: "wait_for".into(),
+            detect_mode: "template".into(),
+            template: embedded.to_string_lossy().into_owned(),
+            confidence: 0.8,
+            ..Default::default()
+        };
+        NodeGraph {
+            name: name.into(),
+            entry: "start".into(),
+            nodes: vec![
+                GraphNode {
+                    id: "start".into(),
+                    node_type: "start".into(),
+                    label: "Start".into(),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "vision".into(),
+                    node_type: "vision".into(),
+                    label: "Find button".into(),
+                    config: json!({ "step": vision_step }),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "macro".into(),
+                    node_type: "sub_macro".into(),
+                    label: "Embedded macro".into(),
+                    config: json!({
+                        "macro_name": "Snapshot",
+                        "repeat": 1,
+                        "embedded_steps": [embedded_step],
+                    }),
+                    ..Default::default()
+                },
+            ],
+            edges: vec![GraphEdge {
+                id: "start-next".into(),
+                from: "start".into(),
+                output: "next".into(),
+                to: "vision".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn zip_entries(path: &Path) -> HashMap<String, Vec<u8>> {
+        let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        names
+            .into_iter()
+            .map(|name| {
+                let mut bytes = Vec::new();
+                archive
+                    .by_name(&name)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    fn write_zip_entries(path: &Path, entries: &HashMap<String, Vec<u8>>) {
+        let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        let mut names = entries.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            zip.start_file(&name, options).unwrap();
+            zip.write_all(&entries[&name]).unwrap();
+        }
+        zip.finish().unwrap();
     }
 
     #[test]
@@ -753,6 +1064,198 @@ mod tests {
             installed.guards[1].template_path
         );
         assert!(Path::new(&installed.guards[0].template_path).exists());
+    }
+
+    #[test]
+    fn bundle_packages_and_remaps_every_guard_image_alternative() {
+        let root = temp_dir("bundle_alternatives");
+        let macro_path = root.join("macro.json");
+        sample_macro("bundle_alternatives", 1)
+            .save_to(&macro_path)
+            .unwrap();
+        let normal = root.join("normal.png");
+        let hovered = root.join("hovered.png");
+        std::fs::write(&normal, b"\x89PNG\r\n\x1a\nnormal").unwrap();
+        std::fs::write(&hovered, b"\x89PNG\r\n\x1a\nhovered").unwrap();
+        let guards = GuardFile {
+            guards: vec![Guard {
+                name: "Open".into(),
+                method: "template".into(),
+                template_path: normal.to_string_lossy().into_owned(),
+                template_paths: vec![hovered.to_string_lossy().into_owned()],
+                ..Default::default()
+            }],
+        };
+        let guards_path = root.join("guards.json");
+        guards.save_to(&guards_path).unwrap();
+        let bundle = root.join("bundle.clawbundle");
+
+        write_bundle(&macro_path, &guards_path, &bundle).unwrap();
+        let imported = read_bundle(
+            &bundle,
+            &root.join("dst/macros"),
+            &root.join("dst/templates"),
+            &root.join("dst/guards"),
+        )
+        .unwrap()
+        .unwrap();
+        let installed = GuardFile::load(&root.join(format!("dst/guards/{imported}.json")));
+        let candidates = candidate_paths(
+            &installed.guards[0].template_path,
+            &installed.guards[0].template_paths,
+        );
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|path| Path::new(path).is_file()));
+    }
+
+    #[test]
+    fn loop_bundle_round_trip_includes_direct_and_embedded_images_once() {
+        let root = temp_dir("loop_round_trip");
+        let normal = root.join("normal.png");
+        let hovered = root.join("hovered.png");
+        let embedded = root.join("embedded-copy.png");
+        std::fs::write(&normal, b"\x89PNG\r\n\x1a\nnormal").unwrap();
+        std::fs::write(&hovered, b"\x89PNG\r\n\x1a\nhovered").unwrap();
+        std::fs::write(&embedded, b"\x89PNG\r\n\x1a\nhovered").unwrap();
+        let graph = sample_loop("Portable Loop", &normal, &hovered, &embedded);
+        let graph_path = root.join("loop.json");
+        graph.save_to(&graph_path).unwrap();
+        let bundle = root.join("loop.clawbundle");
+
+        write_loop(&graph_path, &bundle).unwrap();
+        let archive = zip::ZipArchive::new(File::open(&bundle).unwrap()).unwrap();
+        assert_eq!(
+            archive
+                .file_names()
+                .filter(|name| name.starts_with("assets/"))
+                .count(),
+            2,
+            "the embedded duplicate should share the hovered asset"
+        );
+
+        let imported_name = read_loop(
+            &bundle,
+            &root.join("dst/nodes"),
+            &root.join("dst/templates"),
+        )
+        .unwrap();
+        assert_eq!(imported_name, "Portable Loop");
+        let imported = NodeGraph::load(&root.join("dst/nodes/Portable Loop.json")).unwrap();
+        assert_eq!(imported.nodes.len(), graph.nodes.len());
+        assert_eq!(imported.edges.len(), graph.edges.len());
+        let installed = image_paths(&imported);
+        assert_eq!(
+            installed.len(),
+            2,
+            "content-identical paths normalize on import"
+        );
+        assert!(installed.iter().all(|path| Path::new(path).is_file()));
+        assert!(installed
+            .iter()
+            .all(|path| Path::new(path).starts_with(root.join("dst/templates"))));
+    }
+
+    #[test]
+    fn importing_a_loop_never_overwrites_an_existing_name() {
+        let root = temp_dir("loop_collision");
+        let image = root.join("image.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nimage").unwrap();
+        let graph = sample_loop("Daily", &image, &image, &image);
+        let graph_path = root.join("loop.json");
+        graph.save_to(&graph_path).unwrap();
+        let bundle = root.join("loop.clawbundle");
+        write_loop(&graph_path, &bundle).unwrap();
+        let nodes = root.join("nodes");
+        std::fs::create_dir_all(&nodes).unwrap();
+        std::fs::write(nodes.join("Daily.json"), b"keep me").unwrap();
+
+        let imported = read_loop(&bundle, &nodes, &root.join("templates")).unwrap();
+
+        assert_eq!(imported, "Daily 2");
+        assert_eq!(std::fs::read(nodes.join("Daily.json")).unwrap(), b"keep me");
+        assert!(nodes.join("Daily 2.json").is_file());
+    }
+
+    #[test]
+    fn loop_export_rejects_a_missing_referenced_image() {
+        let root = temp_dir("loop_missing_export");
+        let missing = root.join("missing.png");
+        let graph = sample_loop("Broken", &missing, &missing, &missing);
+        let graph_path = root.join("loop.json");
+        graph.save_to(&graph_path).unwrap();
+
+        let error = write_loop(&graph_path, &root.join("broken.clawbundle"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Loop image is missing"));
+        assert!(error.contains("missing.png"));
+    }
+
+    #[test]
+    fn loop_import_rejects_missing_undeclared_and_corrupt_assets() {
+        let root = temp_dir("loop_invalid_assets");
+        let image = root.join("image.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nimage").unwrap();
+        let graph = sample_loop("Portable", &image, &image, &image);
+        let graph_path = root.join("loop.json");
+        graph.save_to(&graph_path).unwrap();
+        let bundle = root.join("valid.clawbundle");
+        write_loop(&graph_path, &bundle).unwrap();
+        let valid_entries = zip_entries(&bundle);
+        let asset_name = valid_entries
+            .keys()
+            .find(|name| name.starts_with("assets/"))
+            .unwrap()
+            .clone();
+
+        let mut missing = valid_entries.clone();
+        missing.remove(&asset_name);
+        let missing_bundle = root.join("missing.clawbundle");
+        write_zip_entries(&missing_bundle, &missing);
+        assert!(read_loop(
+            &missing_bundle,
+            &root.join("missing/nodes"),
+            &root.join("missing/templates")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("missing, duplicate, or undeclared"));
+
+        let mut corrupt = valid_entries.clone();
+        corrupt.get_mut(&asset_name).unwrap().push(0);
+        let corrupt_bundle = root.join("corrupt.clawbundle");
+        write_zip_entries(&corrupt_bundle, &corrupt);
+        assert!(read_loop(
+            &corrupt_bundle,
+            &root.join("corrupt/nodes"),
+            &root.join("corrupt/templates")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("size does not match"));
+
+        let mut undeclared = valid_entries;
+        let mut manifest: Manifest = serde_json::from_slice(&undeclared[MANIFEST_PATH]).unwrap();
+        let mut imported_graph: NodeGraph = serde_json::from_slice(&undeclared[LOOP_PATH]).unwrap();
+        imported_graph.nodes[1].config["step"]["template"] =
+            Value::String("assets/undeclared.png".into());
+        let payload = serde_json::to_vec(&imported_graph).unwrap();
+        let record = manifest.loop_file.as_mut().unwrap();
+        record.bytes = payload.len() as u64;
+        record.blake3 = digest(&payload);
+        undeclared.insert(LOOP_PATH.into(), payload);
+        undeclared.insert(MANIFEST_PATH.into(), serde_json::to_vec(&manifest).unwrap());
+        let undeclared_bundle = root.join("undeclared.clawbundle");
+        write_zip_entries(&undeclared_bundle, &undeclared);
+        assert!(read_loop(
+            &undeclared_bundle,
+            &root.join("undeclared/nodes"),
+            &root.join("undeclared/templates"),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("undeclared image"));
     }
 
     #[test]

@@ -78,6 +78,66 @@ describe("Watch, saving a trigger", () => {
 
     expect(await screen.findByRole("button", { name: /^save trigger$/i })).toBeDisabled();
   });
+
+  it("saves normal and hovered images as one trigger without replacing click geometry", async () => {
+    let captures = 0;
+    invoke.mockImplementation(async (cmd) => {
+      if (cmd === "vision_load") return { ok: true, triggers: [] };
+      if (cmd === "vision_status") {
+        return { ok: true, running: false, fired: 0, log: [] };
+      }
+      if (cmd === "surgical_capture") {
+        captures += 1;
+        return captures === 1
+          ? {
+              ok: true,
+              path: "C:\\templates\\normal.png",
+              thumb: "bm9ybWFs",
+              offset: [4, -2],
+              click_line: [10, 10, 12, 10],
+              click_lines: [[10, 10, 12, 10]],
+            }
+          : {
+              ok: true,
+              path: "C:\\templates\\hovered.png",
+              thumb: "aG92ZXJlZA==",
+              offset: [99, 99],
+              click_line: [1, 1, 2, 2],
+              click_lines: [[1, 1, 2, 2]],
+            };
+      }
+      return { ok: true };
+    });
+    view();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /snap it and mark where to click/i,
+      }),
+    );
+    expect(await screen.findByText("normal.png")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Capture another state" }),
+    );
+    expect(await screen.findByText("hovered.png")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^save trigger$/i }));
+
+    await waitFor(() => expect(calls()).toContain("vision_save"));
+    const saved = invoke.mock.calls.find(([cmd]) => cmd === "vision_save")?.[1] as {
+      triggers: {
+        template_path: string;
+        template_paths: string[];
+        click_offset: number[];
+        click_line: number[];
+      }[];
+    };
+    expect(saved.triggers[0]).toMatchObject({
+      template_path: "C:\\templates\\normal.png",
+      template_paths: ["C:\\templates\\hovered.png"],
+      click_offset: [4, -2],
+      click_line: [10, 10, 12, 10],
+    });
+  });
 });
 
 describe("Watch, starting the watcher", () => {

@@ -93,8 +93,10 @@ pub fn plan_action(guard: &Guard, best: &Detection) -> Plan {
     // back either way. Pressing and releasing without travelling is a click, and
     // saying so costs three fewer input events, an 8ms hold, and a feed line
     // that claims a drag the user never drew.
-    let strokes: Vec<Vec<i64>> =
-        strokes.into_iter().filter(|s| s.len() == 4 && (s[0] != s[2] || s[1] != s[3])).collect();
+    let strokes: Vec<Vec<i64>> = strokes
+        .into_iter()
+        .filter(|s| s.len() == 4 && (s[0] != s[2] || s[1] != s[3]))
+        .collect();
     if !strokes.is_empty() {
         Plan::Drag { tlx, tly, strokes }
     } else if guard.click_offset.len() == 2 {
@@ -561,7 +563,7 @@ mod tests {
     #[test]
     fn plan_action_picks_the_right_branch() {
         let best = detection(100, 100, 20, 20); // top-left (90, 90)
-        // Plain → match centre.
+                                                // Plain → match centre.
         assert_eq!(plan_action(&base_guard("g"), &best), Plan::Click(100, 100));
         // Offset → top-left + offset.
         let mut g = base_guard("g");
@@ -588,7 +590,10 @@ mod tests {
             vec![(0, 0), (0, 1), (0, 2)]
         );
         // Offsets add the top-left; a zero-length stroke still yields start+end.
-        assert_eq!(stroke_points(&[1, 1, 1, 1], 10, 20), vec![(11, 21), (11, 21)]);
+        assert_eq!(
+            stroke_points(&[1, 1, 1, 1], 10, 20),
+            vec![(11, 21), (11, 21)]
+        );
         // Not a 4-tuple → no points (Python's `len(ln) != 4` skip).
         assert!(stroke_points(&[1, 2, 3], 0, 0).is_empty());
         assert!(stroke_points(&[], 0, 0).is_empty());

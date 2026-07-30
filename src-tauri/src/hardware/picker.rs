@@ -12,11 +12,20 @@
 //! departures are listed where they occur, and all four are cases where Python
 //! reported success after a failure it had ignored.
 
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_ESCAPE as VK_ESCAPE_KEY, VK_LBUTTON, VK_RBUTTON,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use super::capture::{Frame, ScreenCapture};
 use super::overlay::{self, Bgr, Dib, Event, Flow, Painter, Scene, Window};
@@ -146,11 +155,71 @@ fn grab_screen() -> Option<Frame> {
     frame
 }
 
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+fn key_down(key: u16) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(key)) & i16::MIN != 0 }
+}
+
+fn monitor_name(point: POINT) -> String {
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return "Desktop".to_string();
+    }
+    let mut info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) } == 0 {
+        return "Desktop".to_string();
+    }
+    let end = info
+        .szDevice
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(info.szDevice.len());
+    let device = String::from_utf16_lossy(&info.szDevice[..end]);
+    device
+        .strip_prefix("\\\\.\\")
+        .unwrap_or(&device)
+        .to_string()
+}
+
+/// Pick one physical point from the complete Windows virtual desktop.
+///
+/// `GetCursorPos` is deliberately used instead of coordinates from the primary
+/// monitor overlay. Under the process-wide Per-Monitor-V2 context it returns
+/// physical global pixels, including negative coordinates on displays arranged
+/// left or above the primary display.
+pub fn pick_screen_point() -> Value {
+    let deadline = Instant::now() + COLOR_TIMEOUT;
+
+    // Do not mistake the click that opened the picker for the requested point.
+    while key_down(VK_LBUTTON) || key_down(VK_RBUTTON) {
+        if Instant::now() >= deadline || key_down(VK_ESCAPE_KEY) {
+            return json!({ "ok": false, "error": "cancelled" });
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let mut left_was_down = false;
+    while Instant::now() < deadline {
+        if key_down(VK_ESCAPE_KEY) || key_down(VK_RBUTTON) {
+            return json!({ "ok": false, "error": "cancelled" });
+        }
+        let left_down = key_down(VK_LBUTTON);
+        if left_was_down && !left_down {
+            let mut point = POINT { x: 0, y: 0 };
+            if unsafe { GetCursorPos(&mut point) } == 0 {
+                return json!({ "ok": false, "error": "Could not read the cursor position" });
+            }
+            return json!({
+                "ok": true,
+                "x": point.x,
+                "y": point.y,
+                "monitor": monitor_name(point),
+            });
+        }
+        left_was_down = left_down;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    json!({ "ok": false, "error": "cancelled" })
 }
 
 // ── Colour sampler ───────────────────────────────────────────────────────────
@@ -1268,19 +1337,19 @@ pub fn import_template_bytes(templates_dir: &Path, bytes: &[u8]) -> Value {
     }
 }
 
-/// Save `crop` as `<prefix>_<unix>_<w>x<h>.png` under `dir`.
-fn write_template(dir: &Path, prefix: &str, crop: &Frame) -> Result<PathBuf, String> {
+/// Save `crop` by content hash under `dir`. Identical captures intentionally
+/// resolve to the same path, keeping alternative lists and bundles deduplicated.
+fn write_template(dir: &Path, _prefix: &str, crop: &Frame) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-    let name = format!(
-        "{prefix}_{}_{}x{}.png",
-        unix_seconds(),
-        crop.width,
-        crop.height
-    );
+    let bytes = preview::png_bytes(crop).map_err(|e| format!("Could not encode template: {e}"))?;
+    let hash = blake3::hash(&bytes).to_hex();
+    let name = format!("image_{}.png", &hash[..20]);
     let path = dir.join(name);
-    preview::save_png(&path, crop)
-        .map(|()| path)
-        .map_err(|e| format!("Could not save template: {e}"))
+    if !path.exists() {
+        crate::util::write_atomic(&path, &bytes)
+            .map_err(|e| format!("Could not save template: {e}"))?;
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -1683,12 +1752,22 @@ mod tests {
         let bytes = std::fs::read(source).unwrap();
 
         let result = import_template_bytes(&dir, &bytes);
+        let duplicate = import_template_bytes(&dir, &bytes);
 
         assert_eq!(result["ok"], true);
         assert_eq!(result["w"], 12);
         assert_eq!(result["h"], 10);
         assert!(Path::new(result["path"].as_str().unwrap()).exists());
         assert!(!result["thumb"].as_str().unwrap().is_empty());
+        assert_eq!(
+            result["path"], duplicate["path"],
+            "identical pixels should reuse one content-addressed template"
+        );
+        assert_eq!(
+            write_template(&dir, "template", &frame).unwrap(),
+            write_template(&dir, "surgical", &frame).unwrap(),
+            "capture method must not duplicate identical image content"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -32,6 +32,7 @@ use crate::hardware::ocr;
 use crate::hardware::player::{CheckpointDetect, MacroPlayer, PlaybackOutcome};
 use crate::hardware::preview;
 use crate::hardware::recorder::MacroRecorder;
+use crate::hardware::reliable_input::{ReliableInput, ReliableTarget};
 use crate::hardware::vision::{is_full_region, region_pixels, Detection, Detector, VisionError};
 use crate::logbuf::LogBuffer;
 use crate::models::chain::Chain;
@@ -738,6 +739,9 @@ pub struct Core {
     /// persistent player is equivalent and lets guards hold a stable handle).
     pub player: Arc<MacroPlayer>,
     pub controller: Arc<InputController>,
+    /// Serialized, focus-verified input path for Watch and Loops. Recorded
+    /// playback deliberately continues to use `controller` directly.
+    pub reliable_input: Arc<ReliableInput>,
     /// `Some` only while recording.
     pub recorder: Arc<Mutex<Option<MacroRecorder>>>,
     pub vision: Arc<Vision>,
@@ -766,6 +770,7 @@ impl Core {
         let play_stats = Arc::new(PlayStats::new(paths::config_dir().join("stats.json")));
         let player = Arc::new(MacroPlayer::new());
         let controller = Arc::new(InputController::new());
+        let reliable_input = Arc::new(ReliableInput::new(controller.clone()));
         let recorder = Arc::new(Mutex::new(None));
         let vision = Arc::new(Vision::new(log.clone()));
         let notifier = Arc::new(Notifier::new());
@@ -814,6 +819,7 @@ impl Core {
             play_stats,
             player,
             controller,
+            reliable_input,
             recorder,
             vision,
             guard_engine,
@@ -1297,7 +1303,11 @@ impl Core {
             };
             let actuate: crate::engine::ai::Actuate = {
                 let controller = core.controller.clone();
-                Box::new(move |action| execute_ai_action(&controller, action))
+                let reliable_input = core.reliable_input.clone();
+                let target = Arc::new(Mutex::new(None));
+                Box::new(move |action| {
+                    execute_ai_action(&reliable_input, &controller, &target, action)
+                })
             };
 
             core.detections.set("steps", true);
@@ -1375,7 +1385,11 @@ impl Core {
             };
             let actuate: crate::engine::ai::Actuate = {
                 let controller = core.controller.clone();
-                Box::new(move |action| execute_ai_action(&controller, action))
+                let reliable_input = core.reliable_input.clone();
+                let target = Arc::new(Mutex::new(None));
+                Box::new(move |action| {
+                    execute_ai_action(&reliable_input, &controller, &target, action)
+                })
             };
             let run_macro =
                 |name: &str, embedded_steps: &[Step], repeat: i64| -> Result<(), String> {
@@ -1527,20 +1541,87 @@ fn execute_action(player: &MacroPlayer, controller: &InputController, action: Ac
 /// `controller.*` calls. `Sleep` clamps negative/NaN to zero so
 /// `Duration::from_secs_f64` can't panic in the run thread (which would leak the
 /// mode); Python's `time.sleep` raised on a negative delay instead.
-fn execute_ai_action(controller: &InputController, action: crate::engine::ai::Action) {
+fn execute_ai_action(
+    reliable_input: &ReliableInput,
+    controller: &InputController,
+    target: &Mutex<Option<ReliableTarget>>,
+    action: crate::engine::ai::Action,
+) -> Result<(), String> {
     use crate::engine::ai::Action;
     match action {
-        Action::Click(x, y) => controller.click(x as i32, y as i32, "left"),
-        Action::KeyPress(key) => controller.key_press(&key),
-        Action::TypeText(text) => controller.type_text(&text),
+        Action::FocusAt(x, y) => {
+            let established =
+                reliable_input.establish_at(screen_coord(x, "x")?, screen_coord(y, "y")?)?;
+            *target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())? = Some(established);
+            Ok(())
+        }
+        Action::Click(x, y) => {
+            let established =
+                reliable_input.click_at(screen_coord(x, "x")?, screen_coord(y, "y")?)?;
+            *target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())? = Some(established);
+            Ok(())
+        }
+        Action::KeyPress(key) => {
+            let established = target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| {
+                    "no Vision target has been established for this Loop run".to_string()
+                })?;
+            reliable_input.key_on(&established, &key)
+        }
+        Action::TypeText(text) => {
+            let established = target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| {
+                    "no Vision target has been established for this Loop run".to_string()
+                })?;
+            for character in text.chars() {
+                reliable_input.key_on(&established, &character.to_string())?;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(())
+        }
         Action::Scroll(amount, pos) => {
-            let pos = pos.map(|(x, y)| (x as i32, y as i32));
-            controller.scroll(amount as i32, pos);
+            let pos = match pos {
+                Some((x, y)) => {
+                    let point = (screen_coord(x, "x")?, screen_coord(y, "y")?);
+                    let established = reliable_input.establish_at(point.0, point.1)?;
+                    *target
+                        .lock()
+                        .map_err(|_| "Loop target context is poisoned".to_string())? =
+                        Some(established);
+                    Some(point)
+                }
+                None => None,
+            };
+            controller
+                .try_scroll(
+                    amount
+                        .try_into()
+                        .map_err(|_| format!("scroll amount {amount} is outside the i32 range"))?,
+                    pos,
+                )
+                .map_err(|error| error.to_string())
         }
         Action::Sleep(secs) => {
             std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
+            Ok(())
         }
     }
+}
+
+fn screen_coord(value: i64, axis: &str) -> Result<i32, String> {
+    value
+        .try_into()
+        .map_err(|_| format!("{axis} coordinate {value} is outside the Windows screen range"))
 }
 
 fn has_fail_closed_checkpoint(macro_def: &Macro) -> bool {

@@ -4,6 +4,7 @@ import {
   Background,
   Handle,
   MiniMap,
+  MarkerType,
   Position,
   ReactFlow,
   addEdge,
@@ -12,26 +13,30 @@ import {
   type Connection,
   type Edge,
   type EdgeChange,
+  type FinalConnectionState,
   type NodeChange,
   type NodeProps,
+  type OnConnectStartParams,
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   ArrowClockwise,
   ArrowRight,
+  BookOpenText,
+  CaretRight,
   Command,
   Copy,
   CornersOut,
   Crosshair,
   CursorClick,
+  DownloadSimple,
+  DotsThree,
   Eye,
   FloppyDisk,
   GitBranch,
   Keyboard,
-  ImageSquare,
   LinkSimple,
-  MagicWand,
   Minus,
   MouseScroll,
   NotePencil,
@@ -48,13 +53,13 @@ import {
   Trash,
   UploadSimple,
   WarningCircle,
-  X,
 } from "@phosphor-icons/react";
 
 import {
   addChain,
   addTemplateImage,
   captureTemplate,
+  exportLoop,
   guardPickRegion,
   guardPickColor,
   nodeGraphLoad,
@@ -62,12 +67,14 @@ import {
   nodeGraphSave,
   nodeGraphValidate,
   macroToSteps,
+  pickScreenPoint,
   saveTemplateUpload,
   stepsTest,
   stopPlayback,
   updateChain,
   type CaptureTemplateResult,
   type Chain,
+  type GraphEdge,
   type GraphNode,
   type MacroListItem,
   type NodeLoopItem,
@@ -77,13 +84,26 @@ import {
 import {
   OUTPUTS,
   createGraphNode,
+  effectiveFailureMode,
   embedMacroInNode,
   flowToGraph,
   graphToFlow,
-  shouldLabelOutput,
   validateGraphClient,
+  visibleNodeOutputs,
   type MacroFlowNode,
 } from "@/lib/nodeGraph";
+import {
+  connectedEdgeIds,
+  deleteNodeAndReconnect,
+  ensureRepeatReturnEdges,
+  filterNodePalette,
+  findEdgeNearPoint,
+  insertNodeOnEdge,
+  nearestFreePosition,
+  primaryOutputForNode,
+  repeatReturnEdgeIds,
+  wrapSelectionInRepeat,
+} from "@/lib/nodeGraphAuthoring";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -96,11 +116,26 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ImageCandidateGallery } from "@/components/vision/ImageCandidateGallery";
+import {
+  appendImageCandidate,
+  imageCandidates,
+  removeImageCandidate,
+  splitImageCandidates,
+} from "@/lib/visionImages";
+import {
+  LOOP_TEMPLATES,
+  type LoopTemplateId,
+} from "@/lib/nodeGraphTemplates";
 import {
   ChainComposer,
   type ChainDraft,
 } from "./ChainComposer";
 import { useNodeGraphHistory } from "./useNodeGraphHistory";
+import {
+  ProCanvasEdge,
+  type ProCanvasEdgeData,
+} from "./ProCanvasEdge";
 
 const NODE_ICONS = {
   start: Play,
@@ -148,10 +183,14 @@ function nodeSummary(node: GraphNode): string {
     if (step.type === "scroll") return `${step.scroll_amount > 0 ? "+" : ""}${step.scroll_amount}`;
     if (step.type === "delay") return `${step.delay} second${step.delay === 1 ? "" : "s"}`;
     if (step.type === "wait_for") {
-      return step.template ? `Wait up to ${step.timeout}s` : "Choose an image";
+      return imageCandidates(step.template, step.templates).length > 0
+        ? `Wait up to ${step.timeout}s`
+        : "Choose an image";
     }
     if (step.type === "find_click") {
-      return step.template ? "Click when image appears" : "Choose an image";
+      return imageCandidates(step.template, step.templates).length > 0
+        ? "Click when image appears"
+        : "Choose an image";
     }
     return step.type;
   }
@@ -192,10 +231,8 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
               ? MouseScroll
               : CursorClick
       : NODE_ICONS[node.type];
-  const outputs = OUTPUTS[node.type];
-  const showsOutcomeLabels = ["action", "branch", "sub_macro", "chain"].includes(
-    node.type,
-  );
+  const outputs = data.outputs ?? OUTPUTS[node.type];
+  const showsOutcomeLabels = outputs.length > 1;
   const compact = node.type === "start" || node.type === "stop";
   const title =
     node.type === "sub_macro" &&
@@ -210,13 +247,17 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
     node.type === "vision" && typeof node.config.template_thumb === "string"
       ? node.config.template_thumb
       : "";
+  const templateCount =
+    node.type === "vision" && step
+      ? imageCandidates(step.template, step.templates).length
+      : 0;
   return (
     <div
       className={cn(
-        "node-card relative overflow-visible rounded-[15px] border shadow-[0_7px_18px_rgba(0,0,0,0.08)] transition-[border-color,box-shadow,opacity]",
+        "node-card group/node relative overflow-visible rounded-[15px] border shadow-[0_7px_18px_rgba(0,0,0,0.08)] transition-[border-color,box-shadow,opacity]",
         NODE_WIDTHS[node.type],
         NODE_TONES[node.type],
-        selected && "ring-1 ring-primary/70 ring-offset-1 ring-offset-background",
+        (selected || data.focused) && "ring-1 ring-primary/70 ring-offset-1 ring-offset-background",
         data.invalid && "border-destructive/70",
         !node.enabled && "opacity-50",
       )}
@@ -258,11 +299,21 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
           )}
         </div>
         {templateThumb && (
-          <img
-            src={templateThumb}
-            alt={`${node.label} template`}
-            className="size-10 shrink-0 rounded-md border border-border bg-muted/30 object-contain"
-          />
+          <span className="relative shrink-0">
+            <img
+              src={templateThumb}
+              alt={`${node.label} template`}
+              className="size-10 rounded-md border border-border bg-muted/30 object-contain"
+            />
+            {templateCount > 1 && (
+              <span
+                className="absolute -right-1.5 -top-1.5 grid min-w-4 place-items-center rounded-full border border-card bg-primary px-1 text-[8px] font-bold leading-4 text-primary-foreground"
+                aria-label={`${templateCount} image alternatives`}
+              >
+                {templateCount}
+              </span>
+            )}
+          </span>
         )}
       </div>
       {outputs.length === 1 && (
@@ -270,6 +321,7 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
           type="source"
           position={Position.Right}
           id={outputs[0].id}
+          aria-label={outputs[0].label}
           className="!right-[-6px] !size-[11px] !border-2 !border-card !bg-card-foreground/55"
         />
       )}
@@ -283,9 +335,11 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
                   aria-hidden="true"
                   className={cn(
                     "pointer-events-none absolute left-[calc(100%+21px)] z-20 w-max -translate-y-1/2 bg-background px-1.5 py-0.5 text-[9px] font-semibold leading-none before:absolute before:right-full before:top-1/2 before:h-px before:w-2 before:-translate-y-1/2 before:bg-current/45",
-                    ["true", "next", "success"].includes(output.id)
-                      ? "text-success"
-                      : "text-destructive",
+                    ["error", "missing", "false"].includes(output.id)
+                      ? "text-destructive"
+                      : ["true", "found"].includes(output.id)
+                        ? "text-success"
+                        : "text-primary",
                   )}
                   style={{ top }}
                 >
@@ -301,9 +355,11 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
                 className={cn(
                   "!size-[11px] !border-2 !border-card !bg-card-foreground/55",
                   showsOutcomeLabels &&
-                    (["true", "next", "success"].includes(output.id)
-                      ? "!bg-success"
-                      : "!bg-destructive"),
+                    (["error", "missing", "false"].includes(output.id)
+                      ? "!bg-destructive"
+                      : ["true", "found"].includes(output.id)
+                        ? "!bg-success"
+                        : "!bg-primary"),
                 )}
               />
             </div>
@@ -314,6 +370,7 @@ function MacroNodeCard({ data, selected }: NodeProps<MacroFlowNode>) {
 }
 
 const nodeTypes = { macro: MacroNodeCard };
+const edgeTypes = { pro: ProCanvasEdge };
 
 function miniMapNodeColor(node: MacroFlowNode): string {
   switch (node.data.graphNode.type) {
@@ -369,6 +426,9 @@ const FLOW_PALETTE = [
   PALETTE[12],
   PALETTE[13],
 ];
+const CONNECTED_FLOW_PALETTE = FLOW_PALETTE.filter(
+  ({ kind }) => kind !== "start",
+);
 
 function NumberField({
   label,
@@ -410,7 +470,8 @@ interface NodeGraphEditorProps {
   active?: boolean;
   workspaceBusy?: boolean;
   onSelectLoop: (name: string) => void;
-  onCreateLoop: () => void | Promise<void>;
+  onCreateLoop: (templateId?: LoopTemplateId) => void | Promise<void>;
+  onImportLoop?: () => void | Promise<void>;
   onRenameLoop: (oldName: string, newName: string) => Promise<boolean>;
   onDeleteLoop: (name: string) => void;
   onChanged?: () => void | Promise<void>;
@@ -433,6 +494,7 @@ export function NodeGraphEditor({
   workspaceBusy = false,
   onSelectLoop,
   onCreateLoop,
+  onImportLoop,
   onRenameLoop,
   onDeleteLoop,
   onChanged,
@@ -453,13 +515,45 @@ export function NodeGraphEditor({
   const [imageDragOver, setImageDragOver] = useState(false);
   const [macroImportBusy, setMacroImportBusy] = useState<string | null>(null);
   const [chainBusy, setChainBusy] = useState(false);
+  const [transferBusy, setTransferBusy] = useState<"import" | "export" | null>(
+    null,
+  );
   const [renamingLoop, setRenamingLoop] = useState<string | null>(null);
   const [loopNameDraft, setLoopNameDraft] = useState(loopName);
   const [viewportZoom, setViewportZoom] = useState(1);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [pointPickBusy, setPointPickBusy] = useState(false);
+  const [pickedMonitor, setPickedMonitor] = useState("");
+  const [repeatWrapCandidates, setRepeatWrapCandidates] = useState<string[]>([]);
+  const [recentNodeKinds, setRecentNodeKinds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("clawmation:recent-node-kinds") || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [autocomplete, setAutocomplete] = useState<{
+    left: number;
+    top: number;
+    position: { x: number; y: number };
+    source: string;
+    output: string;
+    inserting: boolean;
+    query: string;
+    activeIndex: number;
+  } | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     left: number;
     top: number;
     position: { x: number; y: number };
+    source?: string;
+    output?: string;
+  } | null>(null);
+  const [templateMenu, setTemplateMenu] = useState<{
+    left: number;
+    top: number;
   } | null>(null);
   const [loopContextMenu, setLoopContextMenu] = useState<{
     left: number;
@@ -473,6 +567,8 @@ export function NodeGraphEditor({
   const skipRenameBlurRef = useRef(false);
   const flowRef = useRef<ReactFlowInstance<MacroFlowNode, Edge> | null>(null);
   const nodeCanvasRef = useRef<HTMLDivElement | null>(null);
+  const autocompleteInputRef = useRef<HTMLInputElement | null>(null);
+  const connectingRef = useRef<{ nodeId: string; handleId: string } | null>(null);
   const draftKey = `clawmation:node-draft:${loopName}`;
 
   const selected = useMemo(
@@ -501,9 +597,73 @@ export function NodeGraphEditor({
   } = useNodeGraphHistory(historySnapshot, restoreHistory);
 
   const buildGraph = useCallback(
-    () => flowToGraph(loopName, entry, nodes, edges),
+    () => {
+      const graph = flowToGraph(loopName, entry, nodes, edges);
+      return {
+        ...graph,
+        edges: ensureRepeatReturnEdges(graph.nodes, graph.edges),
+      };
+    },
     [loopName, entry, nodes, edges],
   );
+  const graphEdges = useMemo<GraphEdge[]>(
+    () =>
+      edges.map((edge) => ({
+        id: edge.id,
+        from: edge.source,
+        output: edge.sourceHandle || "next",
+        to: edge.target,
+        ...(
+          Array.isArray(edge.data?.waypoints) && edge.data.waypoints.length > 0
+            ? { waypoints: edge.data.waypoints as GraphEdge["waypoints"] }
+            : {}
+        ),
+      })),
+    [edges],
+  );
+
+  const openAutocomplete = useCallback(
+    (
+      source: string,
+      output: string,
+      clientX: number,
+      clientY: number,
+      position?: { x: number; y: number },
+    ) => {
+      const canvas = nodeCanvasRef.current;
+      const flow = flowRef.current;
+      if (!canvas) return;
+      const bounds = canvas.getBoundingClientRect();
+      const menuWidth = 320;
+      const menuHeight = 390;
+      setContextMenu(null);
+      setAutocomplete({
+        left: Math.max(12, Math.min(clientX - bounds.left, bounds.width - menuWidth - 12)),
+        top: Math.max(12, Math.min(clientY - bounds.top, bounds.height - menuHeight - 12)),
+        position:
+          position ??
+          flow?.screenToFlowPosition({ x: clientX, y: clientY }) ?? {
+            x: clientX - bounds.left,
+            y: clientY - bounds.top,
+          },
+        source,
+        output,
+        inserting: edges.some(
+          (edge) =>
+            edge.source === source && (edge.sourceHandle || "next") === output,
+        ),
+        query: "",
+        activeIndex: 0,
+      });
+    },
+    [edges],
+  );
+
+  useEffect(() => {
+    if (!autocomplete) return;
+    const frame = requestAnimationFrame(() => autocompleteInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [autocomplete]);
 
   useEffect(() => {
     let active = true;
@@ -519,15 +679,22 @@ export function NodeGraphEditor({
           notify("error", result.error || "Couldn’t load this Loop.");
           return;
         }
+        const repairedEdges = ensureRepeatReturnEdges(
+          result.graph.nodes,
+          result.graph.edges,
+        );
         const savedSignature = JSON.stringify(result.graph);
         savedSignatureRef.current = savedSignature;
-        let graph = result.graph;
+        let graph = { ...result.graph, edges: repairedEdges };
         try {
           const draft = JSON.parse(localStorage.getItem(draftKey) || "null") as {
             graph?: typeof result.graph;
           } | null;
           if (draft?.graph?.version === result.graph.version && draft.graph.name === loopName) {
-            graph = draft.graph;
+            graph = {
+              ...draft.graph,
+              edges: ensureRepeatReturnEdges(draft.graph.nodes, draft.graph.edges),
+            };
           }
         } catch {
           localStorage.removeItem(draftKey);
@@ -588,9 +755,104 @@ export function NodeGraphEditor({
     () =>
       nodes.map((node) => ({
         ...node,
-        data: { ...node.data, invalid: clientIssues.nodeIds.has(node.id) },
+        data: {
+          ...node.data,
+          invalid: clientIssues.nodeIds.has(node.id),
+          focused: hoveredNodeId === node.id,
+          outputs: visibleNodeOutputs(
+            node.data.graphNode,
+            graphEdges,
+          ),
+        },
       })),
-    [clientIssues.nodeIds, nodes],
+    [clientIssues.nodeIds, graphEdges, hoveredNodeId, nodes],
+  );
+
+  const focusedEdgeIds = useMemo(() => {
+    if (hoveredEdgeId) return new Set([hoveredEdgeId]);
+    const focusNode = hoveredNodeId ?? selectedId;
+    if (!focusNode) return null;
+    return connectedEdgeIds(
+      graphEdges,
+      focusNode,
+    );
+  }, [graphEdges, hoveredEdgeId, hoveredNodeId, selectedId]);
+  const loopRailEdgeIds = useMemo(
+    () =>
+      repeatReturnEdgeIds(
+        nodes.map((node) => ({ ...node.data.graphNode, position: node.position })),
+        graphEdges,
+      ),
+    [graphEdges, nodes],
+  );
+
+  const beginWaypointDrag = useCallback(
+    (
+      edgeId: string,
+      index: number,
+      event: React.PointerEvent<HTMLButtonElement>,
+    ) => {
+      event.preventDefault();
+      event.stopPropagation();
+      checkpoint();
+      const move = (pointer: PointerEvent) => {
+        const point = flowRef.current?.screenToFlowPosition({
+          x: pointer.clientX,
+          y: pointer.clientY,
+        });
+        if (!point) return;
+        setEdges((current) =>
+          current.map((edge) => {
+            if (edge.id !== edgeId) return edge;
+            const waypoints = [...((edge.data?.waypoints as { x: number; y: number }[] | undefined) ?? [])];
+            waypoints[index] = point;
+            return { ...edge, data: { ...edge.data, waypoints } };
+          }),
+        );
+      };
+      const finish = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", finish);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", finish, { once: true });
+    },
+    [checkpoint, setEdges],
+  );
+
+  const deleteWaypoint = useCallback(
+    (edgeId: string, index: number) => {
+      checkpoint();
+      setEdges((current) =>
+        current.map((edge) => {
+          if (edge.id !== edgeId) return edge;
+          const waypoints = ((edge.data?.waypoints as { x: number; y: number }[] | undefined) ?? [])
+            .filter((_, waypointIndex) => waypointIndex !== index);
+          return { ...edge, data: { ...edge.data, waypoints } };
+        }),
+      );
+    },
+    [checkpoint, setEdges],
+  );
+
+  const renderEdges = useMemo<Edge[]>(
+    () =>
+      edges.filter((edge) => !loopRailEdgeIds.has(edge.id)).map((edge) => {
+        const focused = focusedEdgeIds?.has(edge.id) ?? false;
+        return {
+          ...edge,
+          type: "pro",
+          data: {
+            ...edge.data,
+            focused,
+            dimmed: focusedEdgeIds !== null && !focused,
+            outcome: edge.sourceHandle || "next",
+            onWaypointPointerDown: beginWaypointDrag,
+            onWaypointDelete: deleteWaypoint,
+          } satisfies ProCanvasEdgeData,
+        };
+      }),
+    [beginWaypointDrag, deleteWaypoint, edges, focusedEdgeIds, loopRailEdgeIds],
   );
 
   const handleNodesChange = useCallback(
@@ -614,43 +876,48 @@ export function NodeGraphEditor({
       if (!connection.source || !connection.target || connection.source === connection.target) return;
       checkpoint();
       const output = connection.sourceHandle || "next";
-      const sourceNode = nodes.find((node) => node.id === connection.source);
-      const outputLabel = sourceNode
-        ? OUTPUTS[sourceNode.data.graphNode.type].find((item) => item.id === output)?.label
-        : undefined;
-      setEdges((current) =>
-        addEdge(
+      setEdges((current) => {
+        const connected = addEdge(
           {
             ...connection,
             id: `edge-${crypto.randomUUID().slice(0, 8)}`,
-            type: "bezier",
-            label:
-              sourceNode && shouldLabelOutput(sourceNode.data.graphNode.type, output)
-                ? outputLabel || output
-                : undefined,
-            labelStyle: {
-              fill: "var(--muted-foreground)",
-              fontSize: 10,
-              fontWeight: 600,
-            },
-            labelBgStyle: {
-              fill: "var(--background)",
-              fillOpacity: 0.9,
-            },
-            labelBgPadding: [5, 3],
-            labelBgBorderRadius: 5,
+            type: "pro",
+            data: { waypoints: [] },
           },
           current.filter(
             (edge) => !(edge.source === connection.source && edge.sourceHandle === output),
           ),
-        ),
-      );
+        );
+        const graph = flowToGraph(loopName, entry, nodes, connected);
+        const repaired = ensureRepeatReturnEdges(graph.nodes, graph.edges);
+        return graphToFlow({ ...graph, edges: repaired }).edges;
+      });
     },
-    [checkpoint, nodes, setEdges],
+    [checkpoint, edges, entry, loopName, nodes, setEdges],
+  );
+
+  const autocompleteResults = useMemo(
+    () =>
+      filterNodePalette(autocomplete?.query ?? "", {
+        allowStart: false,
+        recent: recentNodeKinds,
+      }).filter(
+        (item) =>
+          !autocomplete?.inserting ||
+          !["note", "stop"].includes(item.kind),
+      ),
+    [autocomplete?.query, recentNodeKinds],
   );
 
   const openContextMenu = useCallback(
-    (event: MouseEvent | React.MouseEvent<Element>) => {
+    (
+      event: MouseEvent | React.MouseEvent<Element>,
+      connection?: {
+        source: string;
+        output: string;
+        position: { x: number; y: number };
+      },
+    ) => {
       event.preventDefault();
       const flow = flowRef.current;
       const canvas = (event.currentTarget as HTMLElement).closest(
@@ -659,8 +926,10 @@ export function NodeGraphEditor({
       if (!canvas) return;
       const bounds = canvas.getBoundingClientRect();
       const menuWidth = 192;
-      const menuHeight = 480;
+      const menuHeight = connection ? 410 : 480;
       const pointerLeft = event.clientX - bounds.left;
+      setAutocomplete(null);
+      setTemplateMenu(null);
       setContextMenu({
         left: Math.max(
           8,
@@ -673,22 +942,31 @@ export function NodeGraphEditor({
             bounds.height - menuHeight - 8,
           ),
         ),
-        position: flow
-          ? flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })
-          : {
-              x: event.clientX - bounds.left,
-              y: event.clientY - bounds.top,
-            },
+        position:
+          connection?.position ??
+          (flow
+            ? flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+            : {
+                x: event.clientX - bounds.left,
+                y: event.clientY - bounds.top,
+              }),
+        source: connection?.source,
+        output: connection?.output,
       });
     },
     [],
   );
 
   useEffect(() => {
-    if (!active || (!contextMenu && !loopContextMenu)) return;
+    if (
+      !active ||
+      (!contextMenu && !loopContextMenu && !autocomplete && !templateMenu)
+    ) return;
     const close = () => {
       setContextMenu(null);
       setLoopContextMenu(null);
+      setAutocomplete(null);
+      setTemplateMenu(null);
     };
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
@@ -699,14 +977,21 @@ export function NodeGraphEditor({
       window.removeEventListener("pointerdown", close);
       window.removeEventListener("keydown", onEscape);
     };
-  }, [active, contextMenu, loopContextMenu]);
+  }, [active, autocomplete, contextMenu, loopContextMenu, templateMenu]);
 
   const addNode = (kind: string, position?: { x: number; y: number }) => {
-    const targetPosition =
+    const desiredPosition =
       position ?? {
         x: 280 + (nodes.length % 4) * 250,
         y: 100 + Math.floor(nodes.length / 4) * 180,
       };
+    const targetPosition = nearestFreePosition(
+      desiredPosition,
+      nodes.map((node) => ({ ...node.data.graphNode, position: node.position })),
+    );
+    const selectedBeforeAdd = nodes
+      .filter((node) => node.selected && node.data.graphNode.type !== "start")
+      .map((node) => node.id);
     const existingStart = kind === "start"
       ? nodes.find((node) => node.data.graphNode.type === "start")
       : undefined;
@@ -748,8 +1033,99 @@ export function NodeGraphEditor({
       },
     ]);
     if (graphNode.type === "start") setEntry(graphNode.id);
+    if (graphNode.type === "loop") setRepeatWrapCandidates(selectedBeforeAdd);
+    else setRepeatWrapCandidates([]);
     setSelectedId(graphNode.id);
     setContextMenu(null);
+  };
+
+  const createConnectedNode = (
+    kind: string,
+    target: {
+      source: string;
+      output: string;
+      position: { x: number; y: number };
+    } | null = autocomplete,
+  ) => {
+    if (!target) return;
+    const sourceNode = nodes.find((node) => node.id === target.source);
+    if (!sourceNode) {
+      setAutocomplete(null);
+      return;
+    }
+    const targetPosition = nearestFreePosition(
+      target.position,
+      nodes.map((node) => ({ ...node.data.graphNode, position: node.position })),
+    );
+    const graphNode = createGraphNode(kind, targetPosition);
+    if (graphNode.type === "start") return;
+    const primaryOutput = primaryOutputForNode(graphNode);
+    const selectedBeforeAdd = nodes
+      .filter((node) => node.selected && node.id !== sourceNode.id)
+      .map((node) => node.id);
+    checkpoint();
+    setNodes((current) => [
+      ...current,
+      {
+        id: graphNode.id,
+        type: "macro",
+        position: graphNode.position,
+        data: { graphNode },
+      },
+    ]);
+    setEdges((current) => {
+      const existing = current.find(
+        (edge) =>
+          edge.source === target.source &&
+          (edge.sourceHandle || "next") === target.output,
+      );
+      const connected: Edge = {
+        id: existing?.id ?? `edge-${crypto.randomUUID().slice(0, 8)}`,
+        source: target.source,
+        sourceHandle: target.output,
+        target: graphNode.id,
+        targetHandle: "in",
+        type: "pro",
+        data: { waypoints: [] },
+      };
+      const next = current.filter((edge) => edge.id !== existing?.id);
+      if (existing && primaryOutput) {
+        next.push({
+          id: `edge-${crypto.randomUUID().slice(0, 8)}`,
+          source: graphNode.id,
+          sourceHandle: primaryOutput,
+          target: existing.target,
+          targetHandle: "in",
+          type: "pro",
+          data: { waypoints: existing.data?.waypoints ?? [] },
+        });
+      } else if (
+        !existing &&
+        sourceNode.data.graphNode.type === "loop" &&
+        target.output === "body" &&
+        primaryOutput
+      ) {
+        next.push({
+          id: `edge-${crypto.randomUUID().slice(0, 8)}`,
+          source: graphNode.id,
+          sourceHandle: primaryOutput,
+          target: sourceNode.id,
+          targetHandle: "in",
+          type: "pro",
+          data: { waypoints: [] },
+        });
+      }
+      return [...next, connected];
+    });
+    const recent = [kind, ...recentNodeKinds.filter((item) => item !== kind)].slice(0, 6);
+    setRecentNodeKinds(recent);
+    localStorage.setItem("clawmation:recent-node-kinds", JSON.stringify(recent));
+    setRepeatWrapCandidates(graphNode.type === "loop" ? selectedBeforeAdd : []);
+    setSelectedId(graphNode.id);
+    setSelectedEdgeId(null);
+    setAutocomplete(null);
+    setContextMenu(null);
+    setTemplateMenu(null);
   };
 
   const duplicateSelected = () => {
@@ -903,6 +1279,131 @@ export function NodeGraphEditor({
     setSelectedId(null);
   };
 
+  const removeSelectedAndReconnect = () => {
+    if (!selected) return;
+    const graphNodes = nodes.map((node) => ({
+      ...node.data.graphNode,
+      position: node.position,
+    }));
+    const graphEdges = flowToGraph(loopName, entry, nodes, edges).edges;
+    const result = deleteNodeAndReconnect(graphNodes, graphEdges, selected.id);
+    if (!result) return;
+    checkpoint();
+    const flow = graphToFlow({
+      version: 1,
+      name: loopName,
+      entry,
+      nodes: result.nodes,
+      edges: result.edges,
+    });
+    setNodes(flow.nodes);
+    setEdges(flow.edges);
+    setSelectedId(null);
+  };
+
+  const removeSelectedEdge = () => {
+    if (!selectedEdgeId) return;
+    checkpoint();
+    setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
+    setSelectedEdgeId(null);
+  };
+
+  const setFailureMode = (failureMode: "stop" | "continue" | "recovery") => {
+    if (!selectedGraphNode) return;
+    checkpoint();
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === selectedGraphNode.id
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                graphNode: {
+                  ...node.data.graphNode,
+                  config: {
+                    ...node.data.graphNode.config,
+                    failure_mode: failureMode,
+                  },
+                },
+              },
+            }
+          : node,
+      ),
+    );
+    if (failureMode !== "recovery") {
+      setEdges((current) =>
+        current.filter(
+          (edge) =>
+            !(
+              edge.source === selectedGraphNode.id &&
+              (edge.sourceHandle || "next") === "error"
+            ),
+        ),
+      );
+    }
+  };
+
+  const wrapRepeatSelection = () => {
+    if (selectedGraphNode?.type !== "loop" || repeatWrapCandidates.length === 0) return;
+    const graph = flowToGraph(loopName, entry, nodes, edges);
+    const result = wrapSelectionInRepeat(
+      graph.nodes,
+      graph.edges,
+      selectedGraphNode.id,
+      repeatWrapCandidates,
+    );
+    if (!result) {
+      notify("warning", "Select one continuous path with one entrance and one exit.");
+      return;
+    }
+    checkpoint();
+    const flow = graphToFlow({ ...graph, nodes: result.nodes, edges: result.edges });
+    setNodes(flow.nodes);
+    setEdges(flow.edges);
+    setRepeatWrapCandidates([]);
+  };
+
+  const pickClickPoint = async () => {
+    if (!selectedStep || selectedStep.type !== "click" || pointPickBusy) return;
+    setPointPickBusy(true);
+    try {
+      const result = await pickScreenPoint();
+      if (result.ok && typeof result.x === "number" && typeof result.y === "number") {
+        updateStep({ x: result.x, y: result.y });
+        setPickedMonitor(result.monitor || "Desktop");
+      } else if (result.error && result.error !== "cancelled") {
+        notify("error", result.error);
+      }
+    } catch (error) {
+      notify("error", `Couldn’t pick a screen point: ${String(error)}`);
+    } finally {
+      setPointPickBusy(false);
+    }
+  };
+
+  const insertDraggedNode = (dragged: MacroFlowNode) => {
+    if (dragged.data.graphNode.type === "start") return;
+    const graph = flowToGraph(loopName, entry, nodes, edges);
+    const draggedGraphNode = graph.nodes.find((node) => node.id === dragged.id);
+    if (!draggedGraphNode) return;
+    const targetEdge = findEdgeNearPoint(
+      {
+        x: dragged.position.x + 75,
+        y: dragged.position.y + 36,
+      },
+      dragged.id,
+      graph.nodes,
+      graph.edges,
+    );
+    if (!targetEdge) return;
+    const result = insertNodeOnEdge(graph.nodes, graph.edges, targetEdge.id, draggedGraphNode);
+    if (!result) return;
+    const flow = graphToFlow({ ...graph, nodes: result.nodes, edges: result.edges });
+    setNodes(flow.nodes);
+    setEdges(flow.edges);
+    setSelectedId(dragged.id);
+  };
+
   const pickColour = async () => {
     if (!selected) return;
     try {
@@ -931,13 +1432,37 @@ export function NodeGraphEditor({
   const applyTemplate = (result: CaptureTemplateResult, successMessage: string) => {
     if (result.error === "cancelled") return;
     if (result.ok && result.path && selectedId && selectedStep) {
+      const current = imageCandidates(selectedStep.template, selectedStep.templates);
+      const appended = appendImageCandidate(current, result.path);
+      if (appended.full) {
+        notify("warning", "A vision node can use up to 8 images.");
+        return;
+      }
+      if (!appended.added) {
+        notify("info", "That image is already included.");
+        return;
+      }
+      const split = splitImageCandidates(appended.candidates);
+      const storedThumbs = Array.isArray(selectedGraphNode?.config.template_thumbs)
+        ? (selectedGraphNode.config.template_thumbs as string[])
+        : current.map((_, index) =>
+            index === 0 && typeof selectedGraphNode?.config.template_thumb === "string"
+              ? selectedGraphNode.config.template_thumb
+              : "",
+          );
+      const nextThumbs = [
+        ...current.map((_, index) => storedThumbs[index] || ""),
+        result.thumb ? `data:image/png;base64,${result.thumb}` : "",
+      ];
       updateConfig({
         step: {
           ...selectedStep,
           detect_mode: "template",
-          template: result.path,
+          template: split.primary,
+          templates: split.alternatives,
         },
-        template_thumb: result.thumb ? `data:image/png;base64,${result.thumb}` : "",
+        template_thumb: nextThumbs[0] || "",
+        template_thumbs: nextThumbs,
       });
       notify("success", successMessage);
     } else if (result.error) {
@@ -996,11 +1521,30 @@ export function NodeGraphEditor({
     }
   };
 
-  const removeTemplate = () => {
+  const removeTemplate = (index: number) => {
     if (!selectedStep) return;
+    const current = imageCandidates(selectedStep.template, selectedStep.templates);
+    const remaining = removeImageCandidate(current, index);
+    const split = splitImageCandidates(remaining);
+    const storedThumbs = Array.isArray(selectedGraphNode?.config.template_thumbs)
+      ? (selectedGraphNode.config.template_thumbs as string[])
+      : current.map((_, candidateIndex) =>
+          candidateIndex === 0 &&
+          typeof selectedGraphNode?.config.template_thumb === "string"
+            ? selectedGraphNode.config.template_thumb
+            : "",
+        );
+    const remainingThumbs = storedThumbs.filter(
+      (_, candidateIndex) => candidateIndex !== index,
+    );
     updateConfig({
-      step: { ...selectedStep, template: "" },
-      template_thumb: "",
+      step: {
+        ...selectedStep,
+        template: split.primary,
+        templates: split.alternatives,
+      },
+      template_thumb: remainingThumbs[0] || "",
+      template_thumbs: remainingThumbs,
     });
   };
 
@@ -1107,6 +1651,35 @@ export function NodeGraphEditor({
     }
   };
 
+  const exportCurrentLoop = async () => {
+    if (transferBusy) return;
+    setLoopContextMenu(null);
+    setTransferBusy("export");
+    try {
+      if (dirty && !(await save(false))) return;
+      const result = await exportLoop(loopName);
+      if (result.ok) notify("success", "Loop exported with all of its images.");
+      else if (result.error !== "cancelled") {
+        notify("error", result.error || "Couldn’t export the Loop.");
+      }
+    } catch (error) {
+      notify("error", String(error));
+    } finally {
+      setTransferBusy(null);
+    }
+  };
+
+  const importPortableLoop = async () => {
+    if (transferBusy) return;
+    setLoopContextMenu(null);
+    setTransferBusy("import");
+    try {
+      await onImportLoop?.();
+    } finally {
+      setTransferBusy(null);
+    }
+  };
+
   const stop = async () => {
     try {
       const result = await stopPlayback();
@@ -1145,12 +1718,17 @@ export function NodeGraphEditor({
       } else if (event.key === "F2") {
         event.preventDefault();
         beginLoopRename();
+      } else if (selectedEdgeId && (event.key === "Delete" || event.key === "Backspace")) {
+        event.preventDefault();
+        removeSelectedEdge();
       } else if (selected && (event.key === "Delete" || event.key === "Backspace")) {
         event.preventDefault();
         removeSelected();
       } else if (event.key === "Escape") {
         setSelectedId(null);
+        setSelectedEdgeId(null);
         setContextMenu(null);
+        setAutocomplete(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1166,6 +1744,16 @@ export function NodeGraphEditor({
     typeof selectedGraphNode?.config.template_thumb === "string"
       ? selectedGraphNode.config.template_thumb
       : "";
+  const selectedImageCandidates = selectedStep
+    ? imageCandidates(selectedStep.template, selectedStep.templates)
+    : [];
+  const selectedTemplateThumbs = Array.isArray(
+    selectedGraphNode?.config.template_thumbs,
+  )
+    ? (selectedGraphNode.config.template_thumbs as string[])
+    : selectedImageCandidates.map((_, index) =>
+        index === 0 ? selectedTemplateThumb : "",
+      );
   const selectedChain =
     selectedGraphNode?.type === "chain"
       ? chains.find(
@@ -1176,7 +1764,15 @@ export function NodeGraphEditor({
       : null;
   const visibleErrors = issues.errors.length > 0 ? issues.errors : clientIssues.errors;
   const visibleWarnings = issues.warnings.length > 0 ? issues.warnings : clientIssues.warnings;
-
+  const currentGraphEdges = graphEdges;
+  const canReconnectSelected = Boolean(
+    selected &&
+      deleteNodeAndReconnect(
+        nodes.map((node) => ({ ...node.data.graphNode, position: node.position })),
+        currentGraphEdges,
+        selected.id,
+      ),
+  );
   const createChainForSelectedNode = async () => {
     if (selectedGraphNode?.type !== "chain" || chainBusy) return;
     setChainBusy(true);
@@ -1236,14 +1832,17 @@ export function NodeGraphEditor({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col bg-background">
-        <div className="flex min-h-[60px] shrink-0 items-center gap-3 border-b border-border bg-card/75 px-4 py-2">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="flex shrink-0 items-center gap-1.5" data-loop-picker="">
+        <div className="flex min-h-[60px] shrink-0 items-center gap-2 border-b border-border bg-card/75 px-3 py-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <div
+              className="flex min-w-36 max-w-56 flex-1 items-center"
+              data-loop-picker=""
+            >
               {renamingLoop === loopName ? (
                 <Input
                   autoFocus
                   aria-label={`Rename ${loopName}`}
-                  className="h-10 w-56 bg-background text-sm font-semibold"
+                  className="h-10 min-w-0 flex-1 bg-background text-sm font-semibold"
                   value={loopNameDraft}
                   maxLength={80}
                   disabled={workspaceBusy}
@@ -1275,7 +1874,7 @@ export function NodeGraphEditor({
                 >
                   <SelectTrigger
                     aria-label="Current Loop"
-                    className="h-10 w-56 bg-background text-sm font-semibold"
+                    className="h-10 min-w-0 flex-1 bg-background text-sm font-semibold"
                     title="Double-click or right-click to rename"
                     onDoubleClick={(event) => {
                       event.preventDefault();
@@ -1287,7 +1886,7 @@ export function NodeGraphEditor({
                       setContextMenu(null);
                       setLoopContextMenu({
                         left: Math.max(8, Math.min(event.clientX, window.innerWidth - 168)),
-                        top: Math.max(8, Math.min(event.clientY, window.innerHeight - 104)),
+                        top: Math.max(8, Math.min(event.clientY, window.innerHeight - 128)),
                         name: loopName,
                       });
                     }}
@@ -1303,13 +1902,67 @@ export function NodeGraphEditor({
                   </SelectContent>
                 </Select>
               )}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-10 shrink-0 whitespace-nowrap border-primary/35 px-3 text-primary hover:bg-primary/10 hover:text-primary"
+              aria-label="New Loop"
+              onClick={() => void onCreateLoop()}
+              disabled={workspaceBusy}
+            >
+              <Plus className="size-4" weight="bold" />
+              New Loop
+            </Button>
+            <div
+              className="flex shrink-0 items-center gap-0.5 border-l border-border pl-1.5"
+              aria-label="Loop file commands"
+              role="group"
+            >
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-sm"
-                className="shrink-0 rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
-                aria-label="Loop controls"
-                title="Loop controls"
+                size="sm"
+                className="h-10 shrink-0 whitespace-nowrap px-2.5 text-muted-foreground hover:text-foreground"
+                title="Import a .clawbundle"
+                onClick={() => void importPortableLoop()}
+                disabled={workspaceBusy || transferBusy !== null || !onImportLoop}
+              >
+                {transferBusy === "import" ? (
+                  <SpinnerGap className="size-4 animate-spin" />
+                ) : (
+                  <DownloadSimple className="size-4" />
+                )}
+                Import
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-10 shrink-0 whitespace-nowrap px-2.5 text-muted-foreground hover:text-foreground"
+                title="Export this Loop as a .clawbundle"
+                onClick={() => void exportCurrentLoop()}
+                disabled={
+                  workspaceBusy ||
+                  transferBusy !== null ||
+                  loops.length === 0 ||
+                  renamingLoop !== null
+                }
+              >
+                {transferBusy === "export" ? (
+                  <SpinnerGap className="size-4 animate-spin" />
+                ) : (
+                  <UploadSimple className="size-4" />
+                )}
+                Export
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-10 shrink-0 whitespace-nowrap px-2.5 text-muted-foreground hover:text-foreground"
+                aria-label="More"
+                title="More Loop actions"
                 disabled={
                   workspaceBusy ||
                   loops.length === 0 ||
@@ -1329,28 +1982,18 @@ export function NodeGraphEditor({
                           ),
                           top: Math.max(
                             8,
-                            Math.min(bounds.bottom + 6, window.innerHeight - 104),
+                            Math.min(bounds.bottom + 6, window.innerHeight - 128),
                           ),
                           name: loopName,
                         },
                   );
                 }}
               >
-                <PencilSimple className="size-4" />
+                <DotsThree className="size-4" weight="bold" />
+                More
               </Button>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-10 border-primary/35 px-4 text-primary hover:bg-primary/10 hover:text-primary"
-              aria-label="New Loop"
-              onClick={() => void onCreateLoop()}
-              disabled={workspaceBusy}
-            >
-              <Plus className="size-4" weight="bold" />
-              New loop
-            </Button>
-            <div className="hidden items-center gap-2.5 border-l border-border pl-3 text-xs tabular-nums text-muted-foreground lg:flex">
+            <div className="hidden items-center gap-2.5 border-l border-border pl-3 text-xs tabular-nums text-muted-foreground xl:flex">
               <ArrowRight className="size-3.5" />
               <span>{nodes.length} nodes</span>
               <span className="size-1 rounded-full bg-border" />
@@ -1364,26 +2007,28 @@ export function NodeGraphEditor({
             </div>
           </div>
 
-          {status?.mode === "playing" ? (
-            <Button variant="outline" size="sm" className="h-10 px-4 text-destructive hover:text-destructive" onClick={() => void stop()}>
-              <StopCircle className="size-4" weight="fill" />
-              Stop
+          <div className="flex shrink-0 items-center gap-2 border-l border-border pl-2">
+            {status?.mode === "playing" ? (
+              <Button variant="outline" size="sm" className="h-10 px-4 text-destructive hover:text-destructive" onClick={() => void stop()}>
+                <StopCircle className="size-4" weight="fill" />
+                Stop
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" className="h-10 px-4" onClick={() => void run()} disabled={busy !== null || nodes.length === 0}>
+                {busy === "run" ? <SpinnerGap className="size-4 animate-spin" /> : <Play className="size-4" weight="fill" />}
+                Run
+              </Button>
+            )}
+            <Button
+              size="sm"
+              className="h-10 px-4 shadow-[0_6px_16px_color-mix(in_srgb,var(--primary)_18%,transparent)]"
+              onClick={() => void save()}
+              disabled={busy !== null || !dirty}
+            >
+              {busy === "save" ? <SpinnerGap className="size-4 animate-spin" /> : <FloppyDisk className="size-4" />}
+              Save
             </Button>
-          ) : (
-            <Button variant="outline" size="sm" className="h-10 px-4" onClick={() => void run()} disabled={busy !== null || nodes.length === 0}>
-              {busy === "run" ? <SpinnerGap className="size-4 animate-spin" /> : <Play className="size-4" weight="fill" />}
-              Run
-            </Button>
-          )}
-          <Button
-            size="sm"
-            className="h-10 px-4 shadow-[0_6px_16px_color-mix(in_srgb,var(--primary)_18%,transparent)]"
-            onClick={() => void save()}
-            disabled={busy !== null || !dirty}
-          >
-            {busy === "save" ? <SpinnerGap className="size-4 animate-spin" /> : <FloppyDisk className="size-4" />}
-            Save
-          </Button>
+          </div>
         </div>
 
         <div className="flex min-h-0 min-w-0 flex-1">
@@ -1400,8 +2045,9 @@ export function NodeGraphEditor({
             ) : (
               <ReactFlow
                 nodes={renderNodes}
-                edges={edges}
+                edges={renderEdges}
                 nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
                 onInit={(instance) => {
                   flowRef.current = instance;
                   setViewportZoom(instance.getZoom());
@@ -1410,23 +2056,111 @@ export function NodeGraphEditor({
                 onNodesChange={handleNodesChange}
                 onEdgesChange={handleEdgesChange}
                 onConnect={onConnect}
+                onConnectStart={(
+                  _event: MouseEvent | TouchEvent,
+                  params: OnConnectStartParams,
+                ) => {
+                  connectingRef.current =
+                    params.nodeId && params.handleId && params.handleType === "source"
+                      ? { nodeId: params.nodeId, handleId: params.handleId }
+                      : null;
+                }}
+                onConnectEnd={(
+                  event: MouseEvent | TouchEvent,
+                  connectionState: FinalConnectionState,
+                ) => {
+                  const started = connectingRef.current;
+                  connectingRef.current = null;
+                  if (!started || connectionState.isValid || connectionState.toHandle) return;
+                  const pointer =
+                    "clientX" in event
+                      ? { x: event.clientX, y: event.clientY }
+                      : {
+                          x: event.changedTouches[0]?.clientX ?? 0,
+                          y: event.changedTouches[0]?.clientY ?? 0,
+                        };
+                  openAutocomplete(
+                    started.nodeId,
+                    started.handleId,
+                    pointer.x,
+                    pointer.y,
+                  );
+                }}
                 isValidConnection={(connection) =>
                   connection.source !== connection.target &&
                   nodes.find((node) => node.id === connection.target)?.data.graphNode.type !== "start"
                 }
-                onNodeClick={(_, node) => setSelectedId(node.id)}
+                onNodeClick={(_, node) => {
+                  setSelectedId(node.id);
+                  setSelectedEdgeId(null);
+                }}
+                onNodeContextMenu={(event, node) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const output = primaryOutputForNode(node.data.graphNode);
+                  if (!output) return;
+                  setSelectedId(node.id);
+                  setSelectedEdgeId(null);
+                  setLoopContextMenu(null);
+                  openContextMenu(event, {
+                    source: node.id,
+                    output,
+                    position: {
+                      x: node.position.x + 230,
+                      y: node.position.y,
+                    },
+                  });
+                }}
+                onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+                onNodeMouseLeave={() => setHoveredNodeId(null)}
+                onEdgeClick={(_, edge) => {
+                  setSelectedId(null);
+                  setSelectedEdgeId(edge.id);
+                }}
+                onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
+                onEdgeMouseLeave={() => setHoveredEdgeId(null)}
+                onEdgeDoubleClick={(event, edge) => {
+                  event.preventDefault();
+                  const point = flowRef.current?.screenToFlowPosition({
+                    x: event.clientX,
+                    y: event.clientY,
+                  });
+                  if (!point) return;
+                  checkpoint();
+                  setEdges((current) =>
+                    current.map((candidate) =>
+                      candidate.id === edge.id
+                        ? {
+                            ...candidate,
+                            data: {
+                              ...candidate.data,
+                              waypoints: [
+                                ...((candidate.data?.waypoints as { x: number; y: number }[] | undefined) ?? []),
+                                point,
+                              ],
+                            },
+                          }
+                        : candidate,
+                    ),
+                  );
+                  setSelectedEdgeId(edge.id);
+                }}
                 onNodeDragStart={() => {
                   if (!dragHistoryActiveRef.current) {
                     dragHistoryActiveRef.current = true;
                     checkpoint();
                   }
                 }}
-                onNodeDragStop={() => {
+                onNodeDragStop={(_, node) => {
                   dragHistoryActiveRef.current = false;
+                  insertDraggedNode(node);
                 }}
                 onPaneClick={() => {
                   setSelectedId(null);
+                  setSelectedEdgeId(null);
                   setContextMenu(null);
+                  setAutocomplete(null);
+                  setTemplateMenu(null);
                 }}
                 onPaneContextMenu={openContextMenu}
                 defaultViewport={{ x: 160, y: 0, zoom: 1 }}
@@ -1434,8 +2168,14 @@ export function NodeGraphEditor({
                 maxZoom={1.8}
                 deleteKeyCode={null}
                 defaultEdgeOptions={{
-                  type: "bezier",
+                  type: "pro",
                   style: { strokeWidth: 1.7 },
+                  markerEnd: {
+                    type: MarkerType.ArrowClosed,
+                    width: 14,
+                    height: 14,
+                    color: "color-mix(in srgb, var(--foreground) 48%, transparent)",
+                  },
                 }}
                 proOptions={{ hideAttribution: true }}
               >
@@ -1528,7 +2268,15 @@ export function NodeGraphEditor({
                     type="button"
                     role="menuitem"
                     className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-xs text-popover-foreground outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
-                    onClick={() => addNode(kind, contextMenu.position)}
+                    onClick={() =>
+                      contextMenu.source && contextMenu.output
+                        ? createConnectedNode(kind, {
+                            source: contextMenu.source,
+                            output: contextMenu.output,
+                            position: contextMenu.position,
+                          })
+                        : addNode(kind, contextMenu.position)
+                    }
                   >
                     <Icon className="size-4 text-primary" weight="duotone" />
                     {label}
@@ -1538,31 +2286,248 @@ export function NodeGraphEditor({
                 <p className="px-2 pb-1 pt-1 text-[10px] font-semibold text-muted-foreground">
                   Flow
                 </p>
-                {FLOW_PALETTE.map(({ kind, label, Icon }) => (
+                {(contextMenu.source
+                  ? CONNECTED_FLOW_PALETTE
+                  : FLOW_PALETTE
+                ).map(({ kind, label, Icon }) => (
                   <button
                     key={kind}
                     type="button"
                     role="menuitem"
                     className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-xs text-popover-foreground outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
-                    onClick={() => addNode(kind, contextMenu.position)}
+                    onClick={() =>
+                      contextMenu.source && contextMenu.output
+                        ? createConnectedNode(kind, {
+                            source: contextMenu.source,
+                            output: contextMenu.output,
+                            position: contextMenu.position,
+                          })
+                        : addNode(kind, contextMenu.position)
+                    }
                   >
                     <Icon className="size-4 text-primary" weight="duotone" />
                     {label}
                   </button>
                 ))}
-                <div className="my-1.5 h-px bg-border" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-xs font-medium text-popover-foreground outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
-                  onClick={() => {
-                    setContextMenu(null);
-                    void onCreateLoop();
-                  }}
-                >
-                  <Plus className="size-4 text-primary" weight="bold" />
-                  New Loop
-                </button>
+                {!contextMenu.source && (
+                  <>
+                    <div className="my-1.5 h-px bg-border" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-haspopup="menu"
+                      aria-expanded={templateMenu !== null}
+                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-xs font-medium text-popover-foreground outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
+                      onClick={(event) => {
+                        const canvas = nodeCanvasRef.current;
+                        if (!canvas) return;
+                        const canvasBounds = canvas.getBoundingClientRect();
+                        const anchor = event.currentTarget.getBoundingClientRect();
+                        const parentMenu =
+                          event.currentTarget.closest('[role="menu"]');
+                        const parentBounds =
+                          parentMenu?.getBoundingClientRect() ?? anchor;
+                        const menuWidth = 224;
+                        const menuHeight = 120;
+                        const right =
+                          parentBounds.right - canvasBounds.left + 8;
+                        const left =
+                          right + menuWidth <= canvasBounds.width - 8
+                            ? right
+                            : Math.max(
+                                8,
+                                parentBounds.left -
+                                  canvasBounds.left -
+                                  menuWidth -
+                                  8,
+                              );
+                        setTemplateMenu({
+                          left,
+                          top: Math.max(
+                            8,
+                            Math.min(
+                              anchor.top - canvasBounds.top,
+                              canvasBounds.height - menuHeight - 8,
+                            ),
+                          ),
+                        });
+                      }}
+                    >
+                      <BookOpenText className="size-4 text-primary" weight="duotone" />
+                      <span className="flex-1">Templates</span>
+                      <CaretRight className="size-3.5 text-muted-foreground" />
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-xs font-medium text-popover-foreground outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
+                      onClick={() => {
+                        setContextMenu(null);
+                        void onCreateLoop();
+                      }}
+                    >
+                      <Plus className="size-4 text-primary" weight="bold" />
+                      New Loop
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {templateMenu && (
+              <div
+                role="menu"
+                aria-label="Loop templates"
+                className="absolute z-30 w-56 rounded-xl border border-border bg-popover p-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.18)]"
+                style={{ left: templateMenu.left, top: templateMenu.top }}
+                onPointerDown={(event) => event.stopPropagation()}
+                onContextMenu={(event) => event.preventDefault()}
+              >
+                {LOOP_TEMPLATES.map((template) => (
+                  <button
+                    key={template.id}
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left text-popover-foreground outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
+                    onClick={() => {
+                      setTemplateMenu(null);
+                      setContextMenu(null);
+                      void onCreateLoop(template.id);
+                    }}
+                  >
+                    <BookOpenText
+                      className="mt-0.5 size-4 shrink-0 text-primary"
+                      weight="duotone"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium">
+                        {template.name}
+                      </span>
+                      <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">
+                        {template.description}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {autocomplete && (
+              <div
+                role="dialog"
+                aria-label="Add connected node"
+                className="node-autocomplete absolute z-30 w-80 overflow-hidden rounded-xl border border-border bg-popover shadow-[0_20px_52px_rgba(0,0,0,0.22)]"
+                style={{ left: autocomplete.left, top: autocomplete.top }}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+                onContextMenu={(event) => event.preventDefault()}
+              >
+                <div className="border-b border-border p-2">
+                  <div className="flex items-center gap-2 rounded-lg border border-input bg-background px-2.5 focus-within:border-primary/55 focus-within:ring-2 focus-within:ring-primary/12">
+                    <Command className="size-4 shrink-0 text-muted-foreground" />
+                    <input
+                      ref={autocompleteInputRef}
+                      autoFocus
+                      aria-label="Search nodes"
+                      value={autocomplete.query}
+                      placeholder="Search actions and flow"
+                      className="h-10 min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+                      onChange={(event) =>
+                        setAutocomplete((current) =>
+                          current
+                            ? { ...current, query: event.target.value, activeIndex: 0 }
+                            : null,
+                        )
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "ArrowDown") {
+                          event.preventDefault();
+                          setAutocomplete((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  activeIndex:
+                                    (current.activeIndex + 1) %
+                                    Math.max(1, autocompleteResults.length),
+                                }
+                              : null,
+                          );
+                        } else if (event.key === "ArrowUp") {
+                          event.preventDefault();
+                          setAutocomplete((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  activeIndex:
+                                    (current.activeIndex - 1 + Math.max(1, autocompleteResults.length)) %
+                                    Math.max(1, autocompleteResults.length),
+                                }
+                              : null,
+                          );
+                        } else if (event.key === "Enter") {
+                          event.preventDefault();
+                          const result = autocompleteResults[autocomplete.activeIndex];
+                          if (result) createConnectedNode(result.kind);
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          setAutocomplete(null);
+                        }
+                      }}
+                    />
+                    <kbd className="rounded border border-border bg-muted/45 px-1.5 py-0.5 text-[9px] text-muted-foreground">
+                      Esc
+                    </kbd>
+                  </div>
+                </div>
+                <div className="workspace-scrollbar max-h-[330px] overflow-y-auto p-1.5">
+                  {autocompleteResults.length === 0 ? (
+                    <p className="px-3 py-8 text-center text-xs text-muted-foreground">
+                      No matching nodes
+                    </p>
+                  ) : (
+                    autocompleteResults.map((item, index) => {
+                      const palette = PALETTE.find((candidate) => candidate.kind === item.kind);
+                      const Icon = palette?.Icon ?? Plus;
+                      const showCategory =
+                        index === 0 ||
+                        autocompleteResults[index - 1]?.category !== item.category;
+                      return (
+                        <div key={item.kind}>
+                          {showCategory && (
+                            <p className="px-2.5 pb-1 pt-2 text-[10px] font-semibold text-muted-foreground">
+                              {item.category}
+                            </p>
+                          )}
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={index === autocomplete.activeIndex}
+                            className={cn(
+                              "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left outline-none transition-colors",
+                              index === autocomplete.activeIndex
+                                ? "bg-accent text-accent-foreground"
+                                : "text-popover-foreground hover:bg-accent/65",
+                            )}
+                            onMouseEnter={() =>
+                              setAutocomplete((current) =>
+                                current ? { ...current, activeIndex: index } : null,
+                              )
+                            }
+                            onClick={() => createConnectedNode(item.kind)}
+                          >
+                            <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-background text-primary">
+                              <Icon className="size-4" weight="duotone" />
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block text-xs font-semibold">{item.label}</span>
+                              <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                                {item.description}
+                              </span>
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
               </div>
             )}
             {loopContextMenu && (
@@ -1656,6 +2621,17 @@ export function NodeGraphEditor({
                         <Copy className="size-4" />
                       </Button>
                     )}
+                    {canReconnectSelected && (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={removeSelectedAndReconnect}
+                        title="Delete and reconnect"
+                        aria-label="Delete and reconnect"
+                      >
+                        <LinkSimple className="size-4" />
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="icon-sm"
@@ -1688,10 +2664,51 @@ export function NodeGraphEditor({
                 )}
 
                 {selectedStep?.type === "click" && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <NumberField label="X" value={selectedStep.x} onChange={(x) => updateStep({ x })} />
-                    <NumberField label="Y" value={selectedStep.y} onChange={(y) => updateStep({ y })} />
+                  <div className="grid gap-3">
+                    <Button
+                      type="button"
+                      className="h-10 w-full"
+                      onClick={() => void pickClickPoint()}
+                      disabled={pointPickBusy}
+                    >
+                      {pointPickBusy ? (
+                        <SpinnerGap className="size-4 animate-spin" />
+                      ) : (
+                        <Crosshair className="size-4" />
+                      )}
+                      Pick on screen
+                    </Button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <NumberField label="X" value={selectedStep.x} onChange={(x) => updateStep({ x })} />
+                      <NumberField label="Y" value={selectedStep.y} onChange={(y) => updateStep({ y })} />
+                    </div>
+                    {pickedMonitor && (
+                      <p className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                        <Crosshair className="size-3.5 text-primary" />
+                        {pickedMonitor}
+                      </p>
+                    )}
                   </div>
+                )}
+                {["action", "sub_macro", "chain"].includes(selectedGraphNode.type) && (
+                  <label className="grid gap-1.5 text-xs text-muted-foreground">
+                    On failure
+                    <Select
+                      value={effectiveFailureMode(selectedGraphNode, currentGraphEdges)}
+                      onValueChange={(value) =>
+                        setFailureMode(value as "stop" | "continue" | "recovery")
+                      }
+                    >
+                      <SelectTrigger className="w-full bg-background" aria-label="On failure">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper" align="start">
+                        <SelectItem value="stop">Stop Loop</SelectItem>
+                        <SelectItem value="continue">Continue</SelectItem>
+                        <SelectItem value="recovery">Recovery path</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </label>
                 )}
                 {selectedStep?.type === "key" && (
                   <label className="grid gap-1.5 text-xs text-muted-foreground">
@@ -1736,100 +2753,17 @@ export function NodeGraphEditor({
                     </label>
 
                     {selectedStep.detect_mode === "template" ? (
-                      <div className="grid gap-2">
-                        <button
-                          type="button"
-                          aria-label="Image template"
-                          disabled={imageBusy}
-                          className={cn(
-                            "group relative grid min-h-36 place-items-center overflow-hidden rounded-md border border-dashed bg-background p-3 text-center outline-none transition-colors",
-                            imageDragOver
-                              ? "border-primary bg-primary/[0.06]"
-                              : "border-border hover:border-primary/60 hover:bg-muted/40",
-                          )}
-                          onClick={() => void chooseImage()}
-                          onDragEnter={(event) => {
-                            event.preventDefault();
-                            setImageDragOver(true);
-                          }}
-                          onDragOver={(event) => {
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = "copy";
-                            setImageDragOver(true);
-                          }}
-                          onDragLeave={(event) => {
-                            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                              setImageDragOver(false);
-                            }
-                          }}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            setImageDragOver(false);
-                            const file = event.dataTransfer.files[0];
-                            if (file) void uploadDroppedImage(file);
-                          }}
-                        >
-                          {imageBusy ? (
-                            <div>
-                              <SpinnerGap className="mx-auto size-6 animate-spin text-primary" />
-                              <p className="mt-2 text-xs text-muted-foreground">Preparing image…</p>
-                            </div>
-                          ) : selectedStep.template ? (
-                            <div className="w-full">
-                              {selectedTemplateThumb ? (
-                                <img
-                                  src={selectedTemplateThumb}
-                                  alt=""
-                                  className="mx-auto max-h-24 max-w-full rounded border border-border object-contain"
-                                />
-                              ) : (
-                                <ImageSquare className="mx-auto size-8 text-primary" weight="duotone" />
-                              )}
-                              <p className="mt-2 truncate text-xs font-medium text-foreground">
-                                {selectedStep.template.split(/[\\/]/).pop()}
-                              </p>
-                              <p className="mt-0.5 text-[10px] text-muted-foreground">
-                                Drop or click to replace
-                              </p>
-                            </div>
-                          ) : (
-                            <div>
-                              <UploadSimple className="mx-auto size-7 text-primary" weight="duotone" />
-                              <p className="mt-2 text-xs font-medium text-foreground">
-                                Drag and drop an image
-                              </p>
-                              <p className="mt-1 text-[10px] text-muted-foreground">
-                                or click to choose one
-                              </p>
-                              <p className="mt-2 text-[9px] text-muted-foreground/75">
-                                PNG, JPG, BMP or WebP · up to 20 MB
-                              </p>
-                            </div>
-                          )}
-                        </button>
-                        <div className="grid grid-cols-[1fr_auto] gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void magicSelectImage()}
-                            disabled={imageBusy}
-                          >
-                            <MagicWand className="size-4" weight="duotone" />
-                            Magic select from screen
-                          </Button>
-                          {selectedStep.template && (
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={removeTemplate}
-                              title="Remove image"
-                              aria-label="Remove image"
-                            >
-                              <X className="size-4" />
-                            </Button>
-                          )}
-                        </div>
-                      </div>
+                      <ImageCandidateGallery
+                        candidates={selectedImageCandidates}
+                        thumbnails={selectedTemplateThumbs}
+                        busy={imageBusy}
+                        dragOver={imageDragOver}
+                        onDragOverChange={setImageDragOver}
+                        onChoose={() => void chooseImage()}
+                        onMagicSelect={() => void magicSelectImage()}
+                        onRemove={removeTemplate}
+                        onDrop={(file) => void uploadDroppedImage(file)}
+                      />
                     ) : (
                       <div className="grid gap-2">
                         <Button variant="outline" size="sm" onClick={() => void pickColour()}>
@@ -1848,7 +2782,8 @@ export function NodeGraphEditor({
                         onClick={() => void testStep()}
                         disabled={
                           testNodeId === selectedId ||
-                          (selectedStep.detect_mode === "template" && !selectedStep.template)
+                          (selectedStep.detect_mode === "template" &&
+                            selectedImageCandidates.length === 0)
                         }
                       >
                         {testNodeId === selectedId ? (
@@ -1904,12 +2839,68 @@ export function NodeGraphEditor({
                   </label>
                 )}
                 {selectedGraphNode.type === "loop" && (
-                  <NumberField
-                    label="Iterations · 0 means forever"
-                    value={Number(selectedGraphNode.config.count ?? 1)}
-                    min={0}
-                    onChange={(count) => updateConfig({ count: Math.max(0, Math.floor(count)) })}
-                  />
+                  <div className="grid gap-3">
+                    <div>
+                      <p className="text-xs font-medium text-foreground">Repeat</p>
+                      <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
+                        Choose how many times the Do path should run.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-5 gap-1.5">
+                      {[2, 3, 5, 0, "custom"].map((option) => {
+                        const activeCount = Number(selectedGraphNode.config.count ?? 1);
+                        const custom = option === "custom";
+                        const active = custom
+                          ? ![0, 2, 3, 5].includes(activeCount)
+                          : activeCount === option;
+                        return (
+                          <button
+                            key={option}
+                            type="button"
+                            className={cn(
+                              "h-8 rounded-md border text-[10px] font-semibold transition-colors",
+                              active
+                                ? "border-primary/55 bg-primary/12 text-primary"
+                                : "border-border bg-background text-muted-foreground hover:text-foreground",
+                            )}
+                            onClick={() =>
+                              updateConfig({
+                                count: custom
+                                  ? ([0, 2, 3, 5].includes(activeCount) ? 1 : activeCount)
+                                  : option,
+                              })
+                            }
+                          >
+                            {custom ? "Custom" : option === 0 ? "Forever" : `${option}x`}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {![0, 2, 3, 5].includes(
+                      Number(selectedGraphNode.config.count ?? 1),
+                    ) && (
+                      <NumberField
+                        label="Count"
+                        value={Number(selectedGraphNode.config.count ?? 1)}
+                        min={1}
+                        onChange={(count) =>
+                          updateConfig({ count: Math.max(1, Math.floor(count)) })
+                        }
+                      />
+                    )}
+                    {repeatWrapCandidates.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={wrapRepeatSelection}
+                      >
+                        <Repeat className="size-4" />
+                        Wrap {repeatWrapCandidates.length} selected node
+                        {repeatWrapCandidates.length === 1 ? "" : "s"}
+                      </Button>
+                    )}
+                  </div>
                 )}
                 {selectedGraphNode.type === "sub_macro" && (
                   <div className="grid gap-3">
@@ -2058,8 +3049,8 @@ export function NodeGraphEditor({
                     )}
 
                     <p className="text-[10px] leading-4 text-muted-foreground">
-                      The whole sequence runs here. The node follows If works
-                      when every macro finishes, or If fails when one stops.
+                      The whole sequence runs here. Continue runs after every
+                      macro finishes. On failure is available when recovery is enabled.
                     </p>
                   </div>
                 )}

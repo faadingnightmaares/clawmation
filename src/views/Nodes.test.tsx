@@ -9,8 +9,19 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@/components/nodes/NodeGraphEditor", () => ({
-  NodeGraphEditor: ({ loopName }: { loopName: string }) => (
-    <div data-testid="loop-editor">Editing {loopName}</div>
+  NodeGraphEditor: ({
+    loopName,
+    onCreateLoop,
+  }: {
+    loopName: string;
+    onCreateLoop: (templateId?: string) => void;
+  }) => (
+    <div data-testid="loop-editor">
+      Editing {loopName}
+      <button type="button" onClick={() => onCreateLoop("learn-loops")}>
+        Create tutorial
+      </button>
+    </div>
   ),
 }));
 
@@ -29,6 +40,10 @@ describe("Nodes Loop workspaces", () => {
       if (command === "node_graph_create") {
         savedLoops = [{ name: "Loop", nodes: 2, valid_file: true }];
         return { ok: true, name: "Loop" };
+      }
+      if (command === "import_loop") {
+        savedLoops = [{ name: "Imported Loop", nodes: 4, valid_file: true }];
+        return { ok: true, name: "Imported Loop" };
       }
       return { ok: true };
     });
@@ -56,5 +71,93 @@ describe("Nodes Loop workspaces", () => {
       expect(invoke).toHaveBeenCalledWith("node_graph_create", { name: "Loop" }),
     );
     expect(await screen.findByTestId("loop-editor")).toHaveTextContent("Editing Loop");
+  });
+
+  it("imports a portable Loop from the empty workspace and selects it", async () => {
+    render(<Nodes status={null} navigate={vi.fn()} />);
+    expect(await screen.findByText("Create your first Loop")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("import_loop", undefined),
+    );
+    expect(await screen.findByTestId("loop-editor")).toHaveTextContent(
+      "Editing Imported Loop",
+    );
+  });
+
+  it("creates, saves, and selects a Loop template", async () => {
+    savedLoops = [{ name: "Existing", nodes: 2, valid_file: true }];
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "node_graph_list") return savedLoops;
+      if (command === "list_macros" || command === "list_chains") return [];
+      if (command === "node_graph_load") {
+        return {
+          ok: true,
+          source: "saved",
+          graph: {
+            version: 1,
+            name: "Existing",
+            entry: "start",
+            nodes: [],
+            edges: [],
+          },
+        };
+      }
+      if (command === "node_graph_create") {
+        expect(args).toEqual({ name: "Learn Loops" });
+        savedLoops = [
+          ...savedLoops,
+          { name: "Learn Loops", nodes: 7, valid_file: true },
+        ];
+        return { ok: true, name: "Learn Loops" };
+      }
+      return { ok: true };
+    });
+
+    render(<Nodes status={null} navigate={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create tutorial" }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "node_graph_save",
+        expect.objectContaining({
+          loopName: "Learn Loops",
+          graph: expect.objectContaining({
+            name: "Learn Loops",
+            entry: "start",
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByTestId("loop-editor")).toHaveTextContent(
+      "Editing Learn Loops",
+    );
+  });
+
+  it("removes a reserved Loop when its template cannot be saved", async () => {
+    savedLoops = [{ name: "Existing", nodes: 2, valid_file: true }];
+    invoke.mockImplementation(async (command) => {
+      if (command === "node_graph_list") return savedLoops;
+      if (command === "list_macros" || command === "list_chains") return [];
+      if (command === "node_graph_create") {
+        return { ok: true, name: "Learn Loops" };
+      }
+      if (command === "node_graph_save") {
+        return { ok: false, error: "save failed" };
+      }
+      if (command === "node_graph_delete") return { ok: true };
+      return { ok: true };
+    });
+
+    render(<Nodes status={null} navigate={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create tutorial" }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("node_graph_delete", {
+        name: "Learn Loops",
+      }),
+    );
   });
 });

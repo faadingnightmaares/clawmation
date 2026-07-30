@@ -17,9 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::hardware::shield;
 
@@ -74,10 +72,14 @@ impl Detections {
     /// came back. The overlay is a view onto the loops, never a step in
     /// starting one, so nothing is lost by letting it catch up on its own.
     fn show(&self, live: bool) {
-        let Some(app) = self.app.lock().unwrap().clone() else { return };
+        let Some(app) = self.app.lock().unwrap().clone() else {
+            return;
+        };
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
-            let Some(win) = handle.get_webview_window(LABEL) else { return };
+            let Some(win) = handle.get_webview_window(LABEL) else {
+                return;
+            };
             if !live {
                 let _ = win.hide();
                 return;

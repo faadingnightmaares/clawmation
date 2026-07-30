@@ -20,6 +20,9 @@ The released paths stop at intent rather than reliable delivery:
   or after an action the game never sampled.
 - Existing tests verify emitted action enums, not repeated native delivery,
   focus loss, partial sends, cursor drift, or release recovery.
+- Field testing confirmed that Roblox can visually move the cursor after an
+  absolute placement without updating its Raw Input hover state. A tiny
+  physical mouse movement immediately makes the waiting click register.
 
 ## Chosen design
 
@@ -37,9 +40,13 @@ For every request, the executor:
 4. Brings the target forward and confirms it is the actual foreground window.
 5. Moves to the requested physical pixel and confirms the cursor landed within
    one pixel.
-6. Gives the foreground and hover state time to reach the target's next rendered
+6. Arms Raw Input with a non-coalesced two-pixel relative move, waits one frame,
+   returns by the same relative delta, and resynchronizes to the exact detected
+   pixel. This preserves the target coordinate while forcing Roblox to observe
+   real mouse motion.
+7. Gives the foreground and hover state time to reach the target's next rendered
    frame.
-7. Sends a complete gesture with a frame-spanning hold:
+8. Sends a complete gesture with a frame-spanning hold:
    - click: mouse down, hold, mouse up;
    - key: key down, hold, key up;
    - nudge: relative movement out, frame dwell, relative movement back.
@@ -86,6 +93,9 @@ Add deterministic tests around injected focus, cursor, send, and wait seams:
 - concurrent detections cannot interleave gestures;
 - focus refusal retries before pressing, then surfaces failure;
 - cursor drift is corrected before pressing;
+- a Roblox-like target that rejects clicks until relative motion occurs receives
+  `absolute move -> relative out -> frame dwell -> relative back -> exact
+  resync -> hover settle -> down -> hold -> up`;
 - partial native sends retry only unsent events;
 - a failed release performs recovery and returns an error;
 - key and mouse holds span the configured game-frame window;

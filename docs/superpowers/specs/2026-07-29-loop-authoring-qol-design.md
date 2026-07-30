@@ -141,6 +141,10 @@ Adding Repeat opens a compact setup panel with:
 The node displays `Repeat 3 times` or `Repeat forever`, with **Do** and **Then**
 ports.
 
+**Do** is required. **Then** is optional: when it is unconnected, completing
+the configured repetitions ends the Loop successfully. Connecting **Then**
+continues into another node.
+
 ### Body construction
 
 Dragging from **Do** uses autocomplete to create the first body node. When the

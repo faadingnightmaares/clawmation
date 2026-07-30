@@ -90,10 +90,9 @@ mod tests {
 
     #[test]
     fn saved_custom_hotkeys_are_never_replaced_by_new_defaults() {
-        let cfg: MacroConfig = serde_yaml::from_str(
-            "hotkey_record: ctrl+shift+r\nhotkey_play: f8\nhotkey_stop: f2\n",
-        )
-        .unwrap();
+        let cfg: MacroConfig =
+            serde_yaml::from_str("hotkey_record: ctrl+shift+r\nhotkey_play: f8\nhotkey_stop: f2\n")
+                .unwrap();
 
         assert_eq!(cfg.hotkey_record, "ctrl+shift+r");
         assert_eq!(cfg.hotkey_play, "f8");
@@ -102,8 +101,8 @@ mod tests {
 
     #[test]
     fn real_settings_fixture_loads_and_absent_keys_default() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/settings.yaml");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/settings.yaml");
         let text = std::fs::read_to_string(&path).expect("fixture readable");
         // Deserialize the text directly; `MacroConfig::load` is hardcoded to the
         // real config dir and cannot point at the fixture.

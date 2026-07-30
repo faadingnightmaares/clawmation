@@ -24,6 +24,7 @@ import {
   guardPickColor,
   guardPickRegion,
   guardTest,
+  saveTemplateUpload,
   surgicalCapture,
   type Guard,
 } from "@/api";
@@ -32,6 +33,12 @@ import { useStaggerIn } from "@/lib/anime";
 import { pxRectToPct } from "@/lib/screen";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import {
+  appendImageCandidate,
+  imageCandidates,
+  removeImageCandidate,
+  splitImageCandidates,
+} from "@/lib/visionImages";
 import {
   ACCURACY_STOPS,
   REPEAT_STOPS,
@@ -50,6 +57,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ImageCandidateGallery } from "@/components/vision/ImageCandidateGallery";
 
 export interface TriggerEditorProps {
   initial: TriggerDraft;
@@ -82,7 +90,8 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
   // Until the name is typed in, a text trigger names itself after the words it
   // watches for. Typing "Reconnect" twice was the most common thing to do here.
   const [namedByHand, setNamedByHand] = useState(!!initial.name);
-  const [thumb, setThumb] = useState<string | null>(null);
+  const [thumbs, setThumbs] = useState<(string | null)[]>([]);
+  const [imageDragOver, setImageDragOver] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -96,6 +105,7 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
   const look = lookOf(d.method);
   const ready = isTriggerReady(d);
   const preview = d._preview;
+  const candidates = imageCandidates(d.template_path, d.template_paths);
   const choosing = reselect || (!ready && look !== "text");
 
   const run = async (tag: string, fn: () => Promise<void>) => {
@@ -121,22 +131,67 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
       }
     });
 
+  const appendImage = (
+    path: string,
+    thumb: string | undefined,
+    clickGeometry?: {
+      offset?: number[];
+      click_line?: number[];
+      click_lines?: number[][];
+    },
+  ) => {
+    const appended = appendImageCandidate(candidates, path);
+    if (appended.full) {
+      notify("warning", "A trigger can use up to 8 images.");
+      return false;
+    }
+    if (!appended.added) {
+      notify("info", "That image is already included.");
+      return false;
+    }
+    const split = splitImageCandidates(appended.candidates);
+    patch({
+      method: methodFor("image"),
+      template_path: split.primary,
+      template_paths: split.alternatives,
+      ...(candidates.length === 0 && clickGeometry
+        ? {
+            click_offset: clickGeometry.offset ?? [],
+            click_line: clickGeometry.click_line ?? [],
+            click_lines: clickGeometry.click_lines ?? [],
+          }
+        : {}),
+      _preview: null,
+    });
+    setThumbs((current) => [
+      ...candidates.map((_, index) => current[index] ?? null),
+      thumb ? asDataUri(thumb) : null,
+    ]);
+    setReselect(false);
+    return true;
+  };
+
   const captureImage = (surgical: boolean) =>
     run("image", async () => {
       const r = surgical ? await surgicalCapture() : await captureTemplate();
       if (r.error === CANCELLED) return;
       if (r.ok && r.path) {
-        patch({
-          method: methodFor("image"),
-          template_path: r.path,
-          click_offset: (r as { offset?: number[] }).offset ?? [],
-          click_line: (r as { click_line?: number[] }).click_line ?? [],
-          click_lines: (r as { click_lines?: number[][] }).click_lines ?? [],
-          _preview: null,
-        });
-        setReselect(false);
-        if (r.thumb) setThumb(asDataUri(r.thumb));
-        notify("success", surgical ? "Picture and click point saved." : "Picture saved.");
+        if (
+          appendImage(r.path, r.thumb, {
+            offset: (r as { offset?: number[] }).offset,
+            click_line: (r as { click_line?: number[] }).click_line,
+            click_lines: (r as { click_lines?: number[][] }).click_lines,
+          })
+        ) {
+          notify(
+            "success",
+            candidates.length === 0
+              ? surgical
+                ? "Picture and click point saved."
+                : "Picture saved."
+              : "Another visual state was added.",
+          );
+        }
       } else if (r.error) {
         notify("error", r.error);
       }
@@ -147,21 +202,48 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
       const r = await addTemplateImage();
       if (r.error === CANCELLED) return;
       if (r.ok && r.path) {
-        patch({
-          method: methodFor("image"),
-          template_path: r.path,
-          click_offset: [],
-          click_line: [],
-          click_lines: [],
-          _preview: null,
-        });
-        setReselect(false);
-        if (r.thumb) setThumb(asDataUri(r.thumb));
-        notify("success", "Image chosen.");
+        if (appendImage(r.path, r.thumb)) notify("success", "Image state added.");
       } else if (r.error) {
         notify("error", r.error);
       }
     });
+
+  const uploadDroppedImage = (file: File) =>
+    run("image", async () => {
+      if (!file.type.startsWith("image/")) {
+        notify("error", "Drop a PNG, JPG, BMP, or WebP image.");
+        return;
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        notify("error", "The image must be 20 MB or smaller.");
+        return;
+      }
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error("Could not read image"));
+        reader.readAsDataURL(file);
+      });
+      const r = await saveTemplateUpload(dataUrl.slice(dataUrl.indexOf(",") + 1));
+      if (r.ok && r.path) {
+        if (appendImage(r.path, r.thumb)) notify("success", "Dropped image state added.");
+      } else if (r.error) {
+        notify("error", r.error);
+      }
+    });
+
+  const removeImage = (index: number) => {
+    const remaining = removeImageCandidate(candidates, index);
+    const split = splitImageCandidates(remaining);
+    patch({
+      template_path: split.primary,
+      template_paths: split.alternatives,
+      _preview: null,
+    });
+    setThumbs((current) =>
+      current.filter((_, candidateIndex) => candidateIndex !== index),
+    );
+  };
 
   const chooseWords = () => {
     patch({ method: methodFor("text"), _preview: null });
@@ -286,13 +368,37 @@ export function TriggerEditor({ initial, showSurgical, saveLabel = "Save", onSav
                 <SwapLink onClick={() => setReselect(true)} />
               </div>
             </div>
+          ) : look === "image" ? (
+            <div className="space-y-3">
+              <ImageCandidateGallery
+                candidates={candidates}
+                thumbnails={thumbs}
+                busy={busy === "image"}
+                dragOver={imageDragOver}
+                magicLabel={
+                  candidates.length > 0
+                    ? "Capture another state"
+                    : showSurgical
+                      ? "Capture and mark click"
+                      : "Capture from screen"
+                }
+                onDragOverChange={setImageDragOver}
+                onChoose={chooseFile}
+                onMagicSelect={() => captureImage(!!showSurgical)}
+                onRemove={removeImage}
+                onDrop={(file) => void uploadDroppedImage(file)}
+              />
+              <div className="flex justify-end">
+                <SwapLink onClick={() => setReselect(true)} />
+              </div>
+            </div>
           ) : (
             <Specified
               look={look}
               draft={d}
-              thumb={thumb}
+              thumb={thumbs[0] ?? null}
               busy={busy}
-              onChange={() => (look === "image" ? captureImage(!!showSurgical) : pickColor())}
+              onChange={pickColor}
               onChooseFile={chooseFile}
               onSwap={() => setReselect(true)}
             />

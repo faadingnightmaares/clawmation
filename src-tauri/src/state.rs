@@ -80,10 +80,8 @@ impl AppState {
             Box::new(move |name, repeat| {
                 // Scheduled-run toast, `Api._scheduler_fire`.
                 if core.config.lock().unwrap().notify_on_schedule {
-                    core.notifier.notify(
-                        "Clawmation: Scheduled Macro",
-                        &format!("Running '{name}'"),
-                    );
+                    core.notifier
+                        .notify("Clawmation: Scheduled Macro", &format!("Running '{name}'"));
                 }
                 core.play_macro(name, Some(json!(repeat)), 1.0)
                     .get("ok")

@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
+let captureCalls = 0;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args?: Record<string, unknown>) => invoke(command, args),
 }));
@@ -11,6 +12,7 @@ import { NodeGraphEditor } from "./NodeGraphEditor";
 describe("NodeGraphEditor canvas menu", () => {
   beforeEach(() => {
     localStorage.clear();
+    captureCalls = 0;
     invoke.mockReset();
     invoke.mockImplementation(async (command) => {
       if (command === "node_graph_load") {
@@ -56,12 +58,16 @@ describe("NodeGraphEditor canvas menu", () => {
         };
       }
       if (command === "capture_template") {
+        captureCalls += 1;
         return {
           ok: true,
-          path: "C:\\templates\\magic.png",
+          path:
+            captureCalls === 1
+              ? "C:\\templates\\magic.png"
+              : "C:\\templates\\magic-hovered.png",
           w: 24,
           h: 24,
-          thumb: "bWFnaWM=",
+          thumb: captureCalls === 1 ? "bWFnaWM=" : "aG92ZXJlZA==",
         };
       }
       if (command === "macro_to_steps") {
@@ -170,7 +176,108 @@ describe("NodeGraphEditor canvas menu", () => {
     }
   });
 
-  it("keeps multi-path ports stable and labels both branch outcomes", async () => {
+  it("repairs a Forever Repeat automatically and only shows a count for Custom", async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === "node_graph_load") {
+        return {
+          ok: true,
+          source: "saved",
+          graph: {
+            version: 1,
+            name: "demo",
+            entry: "start",
+            nodes: [
+              {
+                id: "start",
+                type: "start",
+                label: "Start",
+                enabled: true,
+                position: { x: 0, y: 0 },
+                config: {},
+              },
+              {
+                id: "repeat",
+                type: "loop",
+                label: "Repeat",
+                enabled: true,
+                position: { x: 220, y: 0 },
+                config: { count: 0 },
+              },
+              {
+                id: "vision",
+                type: "vision",
+                label: "Wait for image",
+                enabled: true,
+                position: { x: 440, y: 0 },
+                config: {
+                  step: {
+                    id: "wait",
+                    type: "wait_for",
+                    enabled: true,
+                    detect_mode: "template",
+                    template: "",
+                    templates: [],
+                  },
+                },
+              },
+            ],
+            edges: [
+              { id: "enter", from: "start", output: "next", to: "repeat" },
+              { id: "body", from: "repeat", output: "body", to: "vision" },
+            ],
+          },
+        };
+      }
+      if (command === "node_graph_validate") {
+        return { ok: true, errors: [], warnings: [] };
+      }
+      return { ok: true };
+    });
+
+    render(
+      <div style={{ width: 1000, height: 700 }}>
+        <NodeGraphEditor
+          loopName="demo"
+          loops={[{ name: "demo", nodes: 3, valid_file: true }]}
+          macros={[]}
+          chains={[]}
+          status={null}
+          onSelectLoop={vi.fn()}
+          onCreateLoop={vi.fn()}
+          onRenameLoop={vi.fn(async () => true)}
+          onDeleteLoop={vi.fn()}
+        />
+      </div>,
+    );
+
+    fireEvent.click(await screen.findByText("Repeat"));
+    expect(screen.getByRole("button", { name: "Forever" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Exact count/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Custom" }));
+    expect(screen.getByLabelText("Count")).toHaveValue(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Forever" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "node_graph_run",
+        expect.objectContaining({
+          graph: expect.objectContaining({
+            edges: expect.arrayContaining([
+              expect.objectContaining({
+                from: "vision",
+                output: "found",
+                to: "repeat",
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+  });
+
+  it("shows contextual paths and keeps recovery ports hidden until enabled", async () => {
     const { container } = render(
       <div style={{ width: 1000, height: 700 }}>
         <NodeGraphEditor
@@ -195,22 +302,155 @@ describe("NodeGraphEditor canvas menu", () => {
     const clickCard = (await screen.findByText("Click")).closest(".node-card");
     expect(clickCard).not.toBeNull();
     expect(clickCard).not.toHaveClass("node-card--collapsible-outputs");
-    expect(within(clickCard as HTMLElement).getByText("If works")).toBeInTheDocument();
-    expect(within(clickCard as HTMLElement).getByText("If fails")).toBeInTheDocument();
-    expect(within(clickCard as HTMLElement).getByLabelText("If works")).toBeInTheDocument();
-    expect(within(clickCard as HTMLElement).getByLabelText("If fails")).toBeInTheDocument();
+    expect(within(clickCard as HTMLElement).getByLabelText("Continue")).toBeInTheDocument();
+    expect(within(clickCard as HTMLElement).queryByLabelText("On failure")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("combobox", { name: "On failure" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Recovery path" }));
+    expect(within(clickCard as HTMLElement).getByLabelText("On failure")).toBeInTheDocument();
 
     fireEvent.contextMenu(pane!, { clientX: 560, clientY: 360 });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Branch" }));
     const branchCard = (await screen.findByText("Branch")).closest(".node-card");
     expect(branchCard).not.toBeNull();
-    expect(within(branchCard as HTMLElement).getByText("If works")).toBeInTheDocument();
-    expect(within(branchCard as HTMLElement).getByText("If fails")).toBeInTheDocument();
-    expect(within(branchCard as HTMLElement).getByLabelText("If works")).toBeInTheDocument();
-    expect(within(branchCard as HTMLElement).getByLabelText("If fails")).toBeInTheDocument();
+    expect(within(branchCard as HTMLElement).getByText("Matches")).toBeInTheDocument();
+    expect(within(branchCard as HTMLElement).getByText("Otherwise")).toBeInTheDocument();
+    expect(within(branchCard as HTMLElement).getByLabelText("Matches")).toBeInTheDocument();
+    expect(within(branchCard as HTMLElement).getByLabelText("Otherwise")).toBeInTheDocument();
 
     expect(screen.queryByRole("button", { name: "Check" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Arrange graph" })).toBeInTheDocument();
+  });
+
+  it("uses the compact menu when right-clicking a node and continues from it", async () => {
+    render(
+      <div style={{ width: 1000, height: 700 }}>
+        <NodeGraphEditor
+          loopName="demo"
+          loops={[{ name: "demo", nodes: 2, valid_file: true }]}
+          macros={[]}
+          chains={[]}
+          status={null}
+          onSelectLoop={vi.fn()}
+          onCreateLoop={vi.fn()}
+          onRenameLoop={vi.fn(async () => true)}
+          onDeleteLoop={vi.fn()}
+        />
+      </div>,
+    );
+
+    const startCard = (await screen.findByText("Start")).closest(".node-card");
+    fireEvent.contextMenu(startCard!, { clientX: 260, clientY: 180 });
+
+    const menu = await screen.findByRole("menu", { name: "Add node" });
+    expect(
+      within(menu).queryByRole("menuitem", { name: "Start" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Add connected node" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Find & click" }));
+    expect(await screen.findByText("Find image & click")).toBeInTheDocument();
+  });
+
+  it("opens Loop templates from the compact canvas menu", async () => {
+    const onCreateLoop = vi.fn();
+    const { container } = render(
+      <div style={{ width: 1000, height: 700 }}>
+        <NodeGraphEditor
+          loopName="demo"
+          loops={[{ name: "demo", nodes: 2, valid_file: true }]}
+          macros={[]}
+          chains={[]}
+          status={null}
+          onSelectLoop={vi.fn()}
+          onCreateLoop={onCreateLoop}
+          onRenameLoop={vi.fn(async () => true)}
+          onDeleteLoop={vi.fn()}
+        />
+      </div>,
+    );
+
+    expect(await screen.findByText("Stop")).toBeInTheDocument();
+    fireEvent.contextMenu(container.querySelector(".react-flow__pane")!, {
+      clientX: 420,
+      clientY: 260,
+    });
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Templates" }),
+    );
+    const templates = await screen.findByRole("menu", {
+      name: "Loop templates",
+    });
+    fireEvent.click(
+      within(templates).getByRole("menuitem", { name: /Learn Loops/ }),
+    );
+
+    expect(onCreateLoop).toHaveBeenCalledWith("learn-loops");
+  });
+
+  it("offers direct screen targeting for Click nodes", async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === "node_graph_load") {
+        return {
+          ok: true,
+          source: "saved",
+          graph: {
+            version: 1,
+            name: "demo",
+            entry: "start",
+            nodes: [
+              { id: "start", type: "start", label: "Start", enabled: true, position: { x: 0, y: 0 }, config: {} },
+              {
+                id: "click",
+                type: "action",
+                label: "Click",
+                enabled: true,
+                position: { x: 220, y: 0 },
+                config: {
+                  step: {
+                    id: "click-1", type: "click", enabled: true, label: "Click",
+                    x: 0, y: 0, key: "", text: "", delay: 0, scroll_amount: 0,
+                    detect_mode: "color", hsv_low: [0, 0, 0], hsv_high: [179, 255, 255],
+                    template: "", templates: [], region: [0, 0, 100, 100],
+                    min_area: 40, timeout: 10, confidence: 0.8,
+                  },
+                },
+              },
+            ],
+            edges: [{ id: "edge", from: "start", output: "next", to: "click" }],
+          },
+        };
+      }
+      if (command === "pick_screen_point") {
+        return { ok: true, x: -420, y: 780, monitor: "Display 2" };
+      }
+      return { ok: true, errors: [], warnings: [] };
+    });
+
+    render(
+      <div style={{ width: 1000, height: 700 }}>
+        <NodeGraphEditor
+          loopName="demo"
+          loops={[{ name: "demo", nodes: 2, valid_file: true }]}
+          macros={[]}
+          chains={[]}
+          status={null}
+          onSelectLoop={vi.fn()}
+          onCreateLoop={vi.fn()}
+          onRenameLoop={vi.fn(async () => true)}
+          onDeleteLoop={vi.fn()}
+        />
+      </div>,
+    );
+
+    fireEvent.click(await screen.findByText("Click"));
+    fireEvent.click(screen.getByRole("button", { name: "Pick on screen" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("X")).toHaveValue(-420);
+      expect(screen.getByLabelText("Y")).toHaveValue(780);
+    });
+    expect(screen.getByText("Display 2")).toBeInTheDocument();
   });
 
   it("imports a dropped image into a wait guard", async () => {
@@ -246,11 +486,18 @@ describe("NodeGraphEditor canvas menu", () => {
     );
     expect(screen.getByRole("combobox", { name: "Watch for" }).tagName).toBe("BUTTON");
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove image" }));
+    fireEvent.click(screen.getByRole("button", { name: "Magic select from screen" }));
+    expect(await screen.findByText("magic-hovered.png")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove magic-hovered.png" }),
+    );
+    expect(screen.getByText("magic.png")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove magic.png" }));
     expect(await screen.findByText("Drag and drop an image")).toBeInTheDocument();
     expect(screen.queryByAltText("Wait for image template")).not.toBeInTheDocument();
 
-    const dropzone = screen.getByRole("button", { name: "Image template" });
+    const dropzone = screen.getByRole("button", { name: "Choose image" });
     const image = new File(["image-bytes"], "enemy.png", { type: "image/png" });
     fireEvent.drop(dropzone, { dataTransfer: { files: [image] } });
 
@@ -261,7 +508,7 @@ describe("NodeGraphEditor canvas menu", () => {
       ),
     );
     expect(await screen.findByText("enemy.png")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Remove image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove enemy.png" })).toBeInTheDocument();
     expect(screen.getByAltText("Wait for image template")).toHaveAttribute(
       "src",
       "data:image/png;base64,dGh1bWI=",
@@ -456,12 +703,17 @@ describe("NodeGraphEditor canvas menu", () => {
       screen.queryByRole("button", { name: "More actions for demo" }),
     ).not.toBeInTheDocument();
 
-    const loopControls = screen.getByRole("button", { name: "Loop controls" });
-    expect(loopControls.closest("[data-loop-picker]")).toContainElement(
+    expect(
+      screen.getByRole("combobox", { name: "Current Loop" }).closest("[data-loop-picker]"),
+    ).toContainElement(
       screen.getByRole("combobox", { name: "Current Loop" }),
     );
-    fireEvent.click(loopControls);
+    expect(screen.getByRole("button", { name: "Import" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
     expect(await screen.findByRole("menu", { name: "Loop actions" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Import Loop" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Export Loop" })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
@@ -542,5 +794,41 @@ describe("NodeGraphEditor canvas menu", () => {
     expect(inspector).toHaveClass(
       "node-floating-inspector",
     );
+  });
+
+  it("saves unsaved changes before exporting and delegates Loop imports", async () => {
+    const onImportLoop = vi.fn(async () => {});
+    render(
+      <div style={{ width: 1000, height: 700 }}>
+        <NodeGraphEditor
+          loopName="demo"
+          loops={[{ name: "demo", nodes: 2, valid_file: true }]}
+          macros={[]}
+          chains={[]}
+          status={null}
+          onSelectLoop={vi.fn()}
+          onCreateLoop={vi.fn()}
+          onImportLoop={onImportLoop}
+          onRenameLoop={vi.fn(async () => true)}
+          onDeleteLoop={vi.fn()}
+        />
+      </div>,
+    );
+
+    fireEvent.click(await screen.findByText("Start"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Label" }), {
+      target: { value: "Begin" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("export_loop", { loopName: "demo" }),
+    );
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(commands.indexOf("node_graph_save")).toBeLessThan(
+      commands.indexOf("export_loop"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(onImportLoop).toHaveBeenCalledTimes(1);
   });
 });

@@ -32,6 +32,7 @@
 mod canny;
 mod clahe;
 mod corr;
+mod gpu_corr;
 mod image;
 mod template;
 
@@ -42,11 +43,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use self::image::{bgr_to_gray, find_external_contours, hsv_in_range, morph_close, morph_open};
+use self::image::{
+    bgr_to_gray, find_external_contours, hsv_in_range, morph_close, morph_open, Gray,
+};
 use self::template::{Matcher, Template};
 use super::capture::Frame;
 use crate::models::guard::Guard;
 use crate::models::step::Step;
+use crate::models::vision_images::candidate_paths;
 use crate::paths;
 
 /// One detection. `x`/`y` are the match *centre* (not the top-left);
@@ -91,7 +95,12 @@ impl std::error::Error for VisionError {}
 /// sidecar would have cropped.
 pub fn region_pixels(region: [f64; 4], w: i32, h: i32) -> (i32, i32, i32, i32) {
     let px = |v: f64, span: i32| (v * f64::from(span) / 100.0) as i32;
-    (px(region[0], w), px(region[1], h), px(region[2], w), px(region[3], h))
+    (
+        px(region[0], w),
+        px(region[1], h),
+        px(region[2], w),
+        px(region[3], h),
+    )
 }
 
 /// Whether a region covers the whole frame, using `guard.py`'s exact tolerances.
@@ -123,7 +132,10 @@ fn roi<'a>(
 /// wrapping the way an `as u8` cast would.
 fn hsv_bounds(low: [i64; 3], high: [i64; 3]) -> ([u8; 3], [u8; 3]) {
     let clamp = |v: i64| v.clamp(0, 255) as u8;
-    ([clamp(low[0]), clamp(low[1]), clamp(low[2])], [clamp(high[0]), clamp(high[1]), clamp(high[2])])
+    (
+        [clamp(low[0]), clamp(low[1]), clamp(low[2])],
+        [clamp(high[0]), clamp(high[1]), clamp(high[2])],
+    )
 }
 
 /// Decode an image file into a BGR [`Frame`]: `cv2.imread(path,
@@ -140,7 +152,11 @@ pub fn read_frame(path: &Path) -> Result<Frame, VisionError> {
     for px in rgb.pixels() {
         bgr.extend_from_slice(&[px[2], px[1], px[0]]);
     }
-    Ok(Frame { bgr, width: w, height: h })
+    Ok(Frame {
+        bgr,
+        width: w,
+        height: h,
+    })
 }
 
 /// Where a step's template lives. The step editor stores a bare file name; a
@@ -163,6 +179,7 @@ pub struct Detector {
     /// one instead of matching the old one until restart, which is what keying
     /// by guard id did.
     templates: HashMap<String, Template>,
+    preferred_templates: HashMap<String, String>,
     matcher: Matcher,
 }
 
@@ -172,6 +189,7 @@ impl Detector {
             screen_w: screen_w as i32,
             screen_h: screen_h as i32,
             templates: HashMap::new(),
+            preferred_templates: HashMap::new(),
             matcher: Matcher::default(),
         }
     }
@@ -190,7 +208,10 @@ impl Detector {
         if !self.templates.contains_key(&key) {
             let img = read_frame(path)?;
             if img.width == 0 || img.height == 0 {
-                return Err(VisionError::Image(format!("{} has no pixels", path.display())));
+                return Err(VisionError::Image(format!(
+                    "{} has no pixels",
+                    path.display()
+                )));
             }
             let tpl = Template::from_bgr(&img.bgr, img.width as usize, img.height as usize);
             self.templates.insert(key.clone(), tpl);
@@ -269,7 +290,79 @@ impl Detector {
         // Disjoint field borrows: the template is read out of `templates` while
         // the matcher's memory is written through `matcher`.
         let tpl = &self.templates[&key];
-        Ok(self.matcher.robust(&gray, ox, oy, tpl, &key, label, threshold))
+        Ok(self
+            .matcher
+            .robust(&gray, ox, oy, tpl, &key, label, threshold))
+    }
+
+    fn match_robust_candidates(
+        &mut self,
+        frame: &Frame,
+        paths: &[PathBuf],
+        region: Option<[f64; 4]>,
+        threshold: f64,
+        label: &str,
+        operation_key: &str,
+    ) -> Result<Vec<Detection>, VisionError> {
+        let Some((roi, ox, oy)) = roi(frame, region, self.screen_w, self.screen_h) else {
+            return Ok(Vec::new());
+        };
+        let gray: Gray = bgr_to_gray(&roi.bgr, roi.width as usize, roi.height as usize);
+        let preferred = self.preferred_templates.get(operation_key).cloned();
+        let mut order = (0..paths.len()).collect::<Vec<_>>();
+        if let Some(preferred) = &preferred {
+            order.sort_by_key(|index| {
+                paths[*index].to_string_lossy().as_ref() != preferred.as_str()
+            });
+        }
+
+        let mut loaded = 0usize;
+        let mut first_error = None;
+        let mut best_candidate: Option<(f64, String, Vec<Detection>)> = None;
+
+        for index in order {
+            let path = &paths[index];
+            let cache_key = match self.ensure_template(path) {
+                Ok(key) => key,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            loaded += 1;
+            let template = &self.templates[&cache_key];
+            let hits = self
+                .matcher
+                .robust(&gray, ox, oy, template, &cache_key, label, threshold);
+            let confidence = hits.iter().map(|hit| hit.confidence).max_by(f64::total_cmp);
+            if let Some(confidence) = confidence {
+                if best_candidate
+                    .as_ref()
+                    .is_none_or(|(best, _, _)| confidence > *best)
+                {
+                    best_candidate = Some((confidence, cache_key.clone(), hits.clone()));
+                }
+                if preferred.as_deref() == Some(cache_key.as_str()) && confidence >= 0.98 {
+                    self.preferred_templates
+                        .insert(operation_key.to_string(), cache_key);
+                    return Ok(hits);
+                }
+            }
+        }
+
+        if loaded == 0 {
+            return Err(first_error.unwrap_or_else(|| {
+                VisionError::Image("no usable image candidates are configured".to_string())
+            }));
+        }
+        if let Some((_, cache_key, mut hits)) = best_candidate {
+            self.preferred_templates
+                .insert(operation_key.to_string(), cache_key);
+            hits.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+            Ok(hits)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Run a guard's configured detection against a frame: the port of
@@ -281,28 +374,41 @@ impl Detector {
         frame: &Frame,
         guard: &Guard,
     ) -> Result<Vec<Detection>, VisionError> {
-        let region = if is_full_region(guard.region) { None } else { Some(guard.region) };
+        let region = if is_full_region(guard.region) {
+            None
+        } else {
+            Some(guard.region)
+        };
         match guard.method.as_str() {
             "template" => {
-                if guard.template_path.is_empty() {
+                let candidates = candidate_paths(&guard.template_path, &guard.template_paths);
+                if candidates.is_empty() {
                     return Ok(Vec::new());
                 }
-                let path = PathBuf::from(&guard.template_path);
-                self.match_robust(frame, &path, region, guard.threshold, &guard.name)
+                let paths = candidates
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>();
+                let identity = if guard.id.trim().is_empty() {
+                    guard.name.as_str()
+                } else {
+                    guard.id.as_str()
+                };
+                self.match_robust_candidates(
+                    frame,
+                    &paths,
+                    region,
+                    guard.threshold,
+                    &guard.name,
+                    &format!("guard:{identity}"),
+                )
             }
             // Read in process by `hardware::ocr` before a guard reaches here.
             "ocr" | "text" => Ok(Vec::new()),
             // "color", and an empty method, which Python defaulted the same way.
             _ => {
                 let (lo, hi) = hsv_bounds(guard.hsv_low, guard.hsv_high);
-                Ok(self.detect_color(
-                    frame,
-                    region,
-                    lo,
-                    hi,
-                    guard.min_area as f64,
-                    &guard.name,
-                ))
+                Ok(self.detect_color(frame, region, lo, hi, guard.min_area as f64, &guard.name))
             }
         }
     }
@@ -330,11 +436,20 @@ impl Detector {
         if method == "template" && !template.is_empty() {
             let threshold = cfg.get("threshold").and_then(Value::as_f64).unwrap_or(0.75);
             return self
-                .match_robust(frame, &template_path(template), region, threshold, "checkpoint")
+                .match_robust(
+                    frame,
+                    &template_path(template),
+                    region,
+                    threshold,
+                    "checkpoint",
+                )
                 .unwrap_or_default();
         }
 
-        let (lo, hi) = hsv_bounds(hsv_from(cfg, "hsv_low", [0, 0, 0]), hsv_from(cfg, "hsv_high", [179, 255, 255]));
+        let (lo, hi) = hsv_bounds(
+            hsv_from(cfg, "hsv_low", [0, 0, 0]),
+            hsv_from(cfg, "hsv_high", [179, 255, 255]),
+        );
         let min_area = cfg.get("min_area").and_then(Value::as_i64).unwrap_or(40);
         self.detect_color(frame, region, lo, hi, min_area as f64, "checkpoint")
     }
@@ -345,30 +460,39 @@ impl Detector {
         let region = Some(step.region);
         if step.detect_mode == "color" {
             let (lo, hi) = hsv_bounds(step.hsv_low, step.hsv_high);
-            let hits =
-                self.detect_color(frame, region, lo, hi, step.min_area as f64, "target");
+            let hits = self.detect_color(frame, region, lo, hi, step.min_area as f64, "target");
             let msg = format!("{} color match(es)", hits.len());
             return (hits, msg);
         }
 
-        if step.template.is_empty() {
+        let candidates = candidate_paths(&step.template, &step.templates);
+        if candidates.is_empty() {
             return (Vec::new(), "no template selected".to_string());
         }
         // "features" was ORB in Python and is the same robust match here; the
         // wording stays so a saved step's run log reads as it always did.
-        let noun = if step.detect_mode == "features" { "feature" } else { "robust" };
-        match self.match_robust(
+        let noun = if step.detect_mode == "features" {
+            "feature"
+        } else {
+            "robust"
+        };
+        let paths = candidates
+            .into_iter()
+            .map(template_path)
+            .collect::<Vec<_>>();
+        match self.match_robust_candidates(
             frame,
-            &template_path(&step.template),
+            &paths,
             region,
             step.confidence,
             "target",
+            &format!("step:{}", step.id),
         ) {
             Ok(hits) => {
                 let msg = format!("{} {noun} match(es)", hits.len());
                 (hits, msg)
             }
-            Err(_) => (Vec::new(), format!("template '{}' not loaded", step.template)),
+            Err(error) => (Vec::new(), format!("template not loaded: {error}")),
         }
     }
 }
@@ -377,7 +501,11 @@ impl Detector {
 /// rather than per-element: a config with a malformed triple gets the default
 /// range, not a mix of the two.
 fn hsv_from(cfg: &Value, key: &str, fallback: [i64; 3]) -> [i64; 3] {
-    match cfg.get(key).and_then(Value::as_array).filter(|a| a.len() == 3) {
+    match cfg
+        .get(key)
+        .and_then(Value::as_array)
+        .filter(|a| a.len() == 3)
+    {
         Some(a) => {
             let mut out = fallback;
             for (slot, v) in out.iter_mut().zip(a) {
@@ -403,7 +531,57 @@ mod tests {
                 bgr[i..i + 3].copy_from_slice(&[0, 0, 255]);
             }
         }
-        Frame { bgr, width: fw, height: fh }
+        Frame {
+            bgr,
+            width: fw,
+            height: fh,
+        }
+    }
+
+    fn button_image(seed: usize) -> Gray {
+        let mut image = Gray::from_vec(32, 18, vec![25; 32 * 18]);
+        for y in 2..16 {
+            for x in 2..30 {
+                let border = x == 2 || x == 29 || y == 2 || y == 15;
+                let glyph = (x + seed) % 7 < 2 && (6..12).contains(&y);
+                image.set(
+                    x,
+                    y,
+                    if border {
+                        220
+                    } else if glyph {
+                        35
+                    } else {
+                        120 + ((x * 11 + y * 5 + seed * 17) % 100) as u8
+                    },
+                );
+            }
+        }
+        image
+    }
+
+    fn frame_with_image(patch: &Gray, px: usize, py: usize) -> Frame {
+        let (width, height) = (120usize, 80usize);
+        let mut gray = Gray::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                gray.set(x, y, ((x * 3 + y * 5) % 50) as u8);
+            }
+        }
+        for y in 0..patch.h {
+            for x in 0..patch.w {
+                gray.set(px + x, py + y, patch.at(x, y));
+            }
+        }
+        let mut bgr = Vec::with_capacity(width * height * 3);
+        for value in gray.data {
+            bgr.extend_from_slice(&[value, value, value]);
+        }
+        Frame {
+            bgr,
+            width: width as u32,
+            height: height as u32,
+        }
     }
 
     const RED_LOW: [u8; 3] = [0, 100, 100];
@@ -424,7 +602,9 @@ mod tests {
     fn a_blob_under_the_minimum_area_is_dropped() {
         let d = Detector::new(100, 100);
         let f = frame_with_square(100, 100, 20, 30, 5);
-        assert!(d.detect_color(&f, None, RED_LOW, RED_HIGH, 40.0, "blob").is_empty());
+        assert!(d
+            .detect_color(&f, None, RED_LOW, RED_HIGH, 40.0, "blob")
+            .is_empty());
     }
 
     #[test]
@@ -432,7 +612,14 @@ mod tests {
         let d = Detector::new(100, 100);
         let f = frame_with_square(100, 100, 60, 60, 10);
         // The right-bottom quarter, so the blob sits at (10, 10) inside the crop.
-        let hits = d.detect_color(&f, Some([50.0, 50.0, 100.0, 100.0]), RED_LOW, RED_HIGH, 40.0, "b");
+        let hits = d.detect_color(
+            &f,
+            Some([50.0, 50.0, 100.0, 100.0]),
+            RED_LOW,
+            RED_HIGH,
+            40.0,
+            "b",
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!((hits[0].x, hits[0].y), (65, 65));
         assert_eq!(hits[0].roi_offset, [50, 50]);
@@ -464,14 +651,23 @@ mod tests {
     fn a_region_resolves_by_truncation() {
         // 33.4% of 100 is 33.4 px, which Python's int() and Rust's cast both
         // take to 33.
-        assert_eq!(region_pixels([33.4, 0.0, 66.7, 100.0], 100, 50), (33, 0, 66, 50));
+        assert_eq!(
+            region_pixels([33.4, 0.0, 66.7, 100.0], 100, 50),
+            (33, 0, 66, 50)
+        );
     }
 
     #[test]
     fn a_guard_with_no_template_matches_nothing_rather_than_failing() {
         let mut d = Detector::new(100, 100);
-        let g = Guard { method: "template".into(), ..Guard::default() };
-        assert!(d.detect_guard(&frame_with_square(100, 100, 0, 0, 4), &g).unwrap().is_empty());
+        let g = Guard {
+            method: "template".into(),
+            ..Guard::default()
+        };
+        assert!(d
+            .detect_guard(&frame_with_square(100, 100, 0, 0, 4), &g)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -482,8 +678,98 @@ mod tests {
             template_path: "no-such-template-file.png".into(),
             ..Guard::default()
         };
-        let err = d.detect_guard(&frame_with_square(100, 100, 0, 0, 4), &g).unwrap_err();
-        assert!(err.to_string().contains("no-such-template-file.png"), "got {err}");
+        let err = d
+            .detect_guard(&frame_with_square(100, 100, 0, 0, 4), &g)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no-such-template-file.png"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn normal_and_hovered_images_use_or_semantics() {
+        let normal = button_image(1);
+        let hovered = button_image(9);
+        let mut detector = Detector::new(120, 80);
+        detector
+            .templates
+            .insert("normal".into(), Template::from_gray(&normal));
+        detector
+            .templates
+            .insert("hovered".into(), Template::from_gray(&hovered));
+        let guard = Guard {
+            id: "open-button".into(),
+            name: "Open".into(),
+            method: "template".into(),
+            template_path: "normal".into(),
+            template_paths: vec!["hovered".into()],
+            threshold: 0.9,
+            ..Guard::default()
+        };
+
+        let hits = detector
+            .detect_guard(&frame_with_image(&hovered, 48, 26), &guard)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1, "one hovered target should be one match");
+        assert!((hits[0].x - 64).abs() <= 2);
+        assert!((hits[0].y - 35).abs() <= 2);
+        assert_eq!(detector.preferred_templates["guard:open-button"], "hovered");
+    }
+
+    #[test]
+    fn an_unreadable_candidate_does_not_hide_a_valid_alternative() {
+        let hovered = button_image(13);
+        let mut detector = Detector::new(120, 80);
+        detector
+            .templates
+            .insert("valid".into(), Template::from_gray(&hovered));
+        let guard = Guard {
+            id: "mixed".into(),
+            method: "template".into(),
+            template_path: "definitely-missing-template.png".into(),
+            template_paths: vec!["valid".into()],
+            threshold: 0.9,
+            ..Guard::default()
+        };
+
+        let hits = detector
+            .detect_guard(&frame_with_image(&hovered, 20, 30), &guard)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(detector.preferred_templates["guard:mixed"], "valid");
+    }
+
+    #[test]
+    fn equivalent_candidates_return_only_the_strongest_candidate_result() {
+        let button = button_image(17);
+        let mut detector = Detector::new(120, 80);
+        detector
+            .templates
+            .insert("primary".into(), Template::from_gray(&button));
+        detector
+            .templates
+            .insert("alternative".into(), Template::from_gray(&button));
+        let guard = Guard {
+            id: "same-target".into(),
+            method: "template".into(),
+            template_path: "primary".into(),
+            template_paths: vec!["alternative".into()],
+            threshold: 0.9,
+            ..Guard::default()
+        };
+
+        let hits = detector
+            .detect_guard(&frame_with_image(&button, 44, 24), &guard)
+            .unwrap();
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "alternative appearances must not duplicate the action-worthy match"
+        );
     }
 
     #[test]
@@ -496,7 +782,9 @@ mod tests {
             min_area: 40,
             ..Guard::default()
         };
-        let hits = d.detect_guard(&frame_with_square(100, 100, 10, 10, 12), &g).unwrap();
+        let hits = d
+            .detect_guard(&frame_with_square(100, 100, 10, 10, 12), &g)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].label, "Revive");
     }
@@ -528,7 +816,10 @@ mod tests {
     #[test]
     fn an_ai_step_with_no_template_says_so() {
         let mut d = Detector::new(100, 100);
-        let step = Step { detect_mode: "template".into(), ..Step::default() };
+        let step = Step {
+            detect_mode: "template".into(),
+            ..Step::default()
+        };
         let (hits, msg) = d.ai_detect(&frame_with_square(100, 100, 0, 0, 4), &step);
         assert!(hits.is_empty());
         assert_eq!(msg, "no template selected");

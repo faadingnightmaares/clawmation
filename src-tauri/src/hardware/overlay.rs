@@ -29,8 +29,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, GetStockObject, GetTextExtentPoint32W,
     InvalidateRect, LineTo, MoveToEx, Rectangle, SelectObject, SetBkMode, SetTextColor,
     StretchDIBits, TextOutW, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, HDC, HGDIOBJ, NULL_BRUSH,
-    OUT_TT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, HDC, HGDIOBJ, NULL_BRUSH, OUT_TT_PRECIS,
+    PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
@@ -38,9 +38,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
-    TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
-    IDC_CROSS, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNA, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
+    TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_CROSS, MSG,
+    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNA, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
     WM_RBUTTONDOWN, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
@@ -92,7 +92,11 @@ impl Dib {
         for px in bgr.chunks_exact(3) {
             bits.extend_from_slice(&[px[0], px[1], px[2], 255]);
         }
-        Self { bits, width: width as i32, height: height as i32 }
+        Self {
+            bits,
+            width: width as i32,
+            height: height as i32,
+        }
     }
 
     #[cfg(test)]
@@ -226,13 +230,30 @@ impl Painter {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    MouseMove { x: i32, y: i32 },
-    LeftDown { x: i32, y: i32 },
-    LeftUp { x: i32, y: i32 },
-    RightDown { x: i32, y: i32 },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    LeftDown {
+        x: i32,
+        y: i32,
+    },
+    LeftUp {
+        x: i32,
+        y: i32,
+    },
+    RightDown {
+        x: i32,
+        y: i32,
+    },
     /// Notches, positive when the wheel is pushed away from the user.
-    Wheel { delta: i32 },
-    Key { vk: u32, shift: bool },
+    Wheel {
+        delta: i32,
+    },
+    Key {
+        vk: u32,
+        shift: bool,
+    },
 }
 
 /// What the overlay does after a scene handled an event.
@@ -266,7 +287,9 @@ impl Window {
     /// and on a null handle that is a Win32 no-op the callers already ignore.
     #[cfg(test)]
     pub fn detached() -> Self {
-        Self { hwnd: HWND(std::ptr::null_mut()) }
+        Self {
+            hwnd: HWND(std::ptr::null_mut()),
+        }
     }
 }
 
@@ -432,9 +455,14 @@ fn translate(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<Event> {
         WM_RBUTTONDOWN => Some(Event::RightDown { x, y }),
         WM_MOUSEWHEEL => {
             let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16;
-            Some(Event::Wheel { delta: i32::from(delta) })
+            Some(Event::Wheel {
+                delta: i32::from(delta),
+            })
         }
-        WM_KEYDOWN => Some(Event::Key { vk: wp.0 as u32, shift: shift() }),
+        WM_KEYDOWN => Some(Event::Key {
+            vk: wp.0 as u32,
+            shift: shift(),
+        }),
         _ => None,
     }
 }

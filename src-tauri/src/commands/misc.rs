@@ -164,10 +164,9 @@ mod tests {
     #[test]
     fn release_versions_stay_in_sync() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let tauri: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(root.join("tauri.conf.json")).unwrap(),
-        )
-        .unwrap();
+        let tauri: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("tauri.conf.json")).unwrap())
+                .unwrap();
         let package: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(root.parent().unwrap().join("package.json")).unwrap(),
         )

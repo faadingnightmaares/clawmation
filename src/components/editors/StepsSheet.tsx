@@ -87,6 +87,7 @@ function makeStep(type: string): Step {
     hsv_low: [0, 0, 0],
     hsv_high: [179, 255, 255],
     template: "",
+    templates: [],
     region: [0, 0, 100, 100],
     min_area: 40,
     timeout: 10,

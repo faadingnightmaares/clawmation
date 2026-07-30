@@ -331,6 +331,7 @@ impl Matcher {
         };
 
         let factor = coarse_factor(sw, sh, tpl.w.min(tpl.h));
+        let mut prepared_coarse = None;
 
         // Most Watch pictures were captured from this same display and therefore
         // reappear at (or very near) native scale. Give that overwhelmingly
@@ -341,6 +342,16 @@ impl Matcher {
             let native_floor =
                 (NATIVE_MIN_SIDE as f64 / tpl.w.min(tpl.h).max(1) as f64).min(COARSE_MAX_FACTOR);
             let native_factor = factor.max(native_floor);
+            if native_factor == factor {
+                let coarse_w = ((sw as f64 * factor) as usize).max(1);
+                let coarse_h = ((sh as f64 * factor) as usize).max(1);
+                prepared_coarse = Some(Searched::new(&resize(
+                    proc,
+                    coarse_w,
+                    coarse_h,
+                    Interp::Area,
+                )));
+            }
             if let Some(hit) = confirm_native(
                 proc,
                 base,
@@ -350,6 +361,7 @@ impl Matcher {
                 label,
                 threshold,
                 native_factor,
+                prepared_coarse.as_ref(),
             ) {
                 if work(sw, sh, hit.w, hit.h) <= FULL_NATIVE_BUDGET {
                     let all = match_corr(proc, base, mask_base, threshold, ox, oy, label);
@@ -363,7 +375,8 @@ impl Matcher {
 
         let coarse_w = ((sw as f64 * factor) as usize).max(1);
         let coarse_h = ((sh as f64 * factor) as usize).max(1);
-        let coarse = Searched::new(&resize(&proc, coarse_w, coarse_h, Interp::Area));
+        let coarse = prepared_coarse
+            .unwrap_or_else(|| Searched::new(&resize(proc, coarse_w, coarse_h, Interp::Area)));
 
         // The coarse pass nominates; it does not judge. It loses correlation to
         // the downscale, so holding it to the real threshold here throws away
@@ -525,6 +538,7 @@ fn confirm_native(
     label: &str,
     threshold: f64,
     factor: f64,
+    prepared_coarse: Option<&Searched>,
 ) -> Option<Detection> {
     let (sw, sh) = (proc.w as i64, proc.h as i64);
     let coarse_w = ((sw as f64 * factor) as usize).max(1);
@@ -537,7 +551,14 @@ fn confirm_native(
         return None;
     }
 
-    let coarse = Searched::new(&resize(proc, coarse_w, coarse_h, Interp::Area));
+    let owned_coarse;
+    let coarse = match prepared_coarse {
+        Some(coarse) => coarse,
+        None => {
+            owned_coarse = Searched::new(&resize(proc, coarse_w, coarse_h, Interp::Area));
+            &owned_coarse
+        }
+    };
     let small = resize(base, ctw, cth, Interp::Area);
     let small_mask = mask_base.map(|m| resize(m, ctw, cth, Interp::Nearest));
     let scores = coarse.ccoeff_normed(&small, small_mask.as_ref())?;
@@ -1150,6 +1171,22 @@ mod tests {
         let t = Instant::now();
         let hits = Matcher::new().robust(&absent, 0, 0, &tpl, "t", "t", 0.8);
         println!("absent: {:?} ({} hit(s))", t.elapsed(), hits.len());
+
+        let t = Instant::now();
+        let hits = Matcher::new().robust(&present, 0, 0, &tpl, "t", "t", 0.8);
+        println!(
+            "present, GPU warm / matcher cold: {:?} ({} hit(s))",
+            t.elapsed(),
+            hits.len()
+        );
+
+        let t = Instant::now();
+        let hits = Matcher::new().robust(&absent, 0, 0, &tpl, "t", "t", 0.8);
+        println!(
+            "absent, GPU warm: {:?} ({} hit(s))",
+            t.elapsed(),
+            hits.len()
+        );
     }
 
     #[test]

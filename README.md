@@ -75,7 +75,7 @@ Clawmation uses two versioned, compressed formats:
 | Format | Contents | Use |
 | --- | --- | --- |
 | `.clawmation` | One macro | Share or archive a recording |
-| `.clawbundle` | A macro, safeguards, and referenced vision images | Move a complete screen-aware automation setup |
+| `.clawbundle` | A macro or Loop plus every referenced vision image | Move a complete screen-aware automation setup |
 
 Both formats use a manifest with declared sizes and BLAKE3 digests. JSON
 payloads use Zstandard compression, duplicate images are stored once, and

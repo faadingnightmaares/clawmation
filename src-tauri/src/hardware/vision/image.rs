@@ -21,7 +21,11 @@ pub struct Gray {
 
 impl Gray {
     pub fn new(w: usize, h: usize) -> Self {
-        Self { w, h, data: vec![0; w * h] }
+        Self {
+            w,
+            h,
+            data: vec![0; w * h],
+        }
     }
 
     pub fn from_vec(w: usize, h: usize, data: Vec<u8>) -> Self {
@@ -370,8 +374,16 @@ impl Contour {
 
 /// The eight neighbour offsets in OpenCV's `icvCodeDeltas` order: 0 is east and
 /// the sequence runs counter-clockwise in image coordinates (y grows down).
-const DELTAS: [(i32, i32); 8] =
-    [(1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1)];
+const DELTAS: [(i32, i32); 8] = [
+    (1, 0),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 /// `cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)`.
 ///

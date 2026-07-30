@@ -239,6 +239,7 @@ pub fn run() {
             commands::guards::guard_test,
             commands::guards::guard_pick_color,
             commands::guards::guard_pick_region,
+            commands::guards::pick_screen_point,
             commands::guards::capture_template,
             commands::guards::add_template_image,
             commands::guards::save_template_upload,
@@ -271,6 +272,8 @@ pub fn run() {
             commands::transfer::bulk_export,
             commands::transfer::export_bundle,
             commands::transfer::import_bundle,
+            commands::transfer::export_loop,
+            commands::transfer::import_loop,
             commands::stats::get_stats_summary,
             commands::stats::get_run_history,
             commands::misc::get_version,
@@ -289,10 +292,26 @@ fn import_associated_files(
 ) {
     for (path, result) in commands::transfer::import_associated_arguments(arguments, cwd) {
         match result {
-            Ok(name) => {
-                app.state::<AppState>()
-                    .emit("ok", format!("Imported '{name}' from {}", path.display()));
-                let _ = app.emit("macros-changed", name);
+            Ok(imported) => {
+                app.state::<AppState>().emit(
+                    "ok",
+                    format!("Imported '{}' from {}", imported.name, path.display()),
+                );
+                match imported.kind {
+                    commands::transfer::AssociatedImportKind::Macro => {
+                        let _ = app.emit("macros-changed", imported.name);
+                    }
+                    commands::transfer::AssociatedImportKind::Loop => {
+                        let _ = app.emit("loops-changed", imported.name.clone());
+                        let _ = app.emit(
+                            "associated-import",
+                            serde_json::json!({
+                                "kind": "loop",
+                                "name": imported.name,
+                            }),
+                        );
+                    }
+                }
             }
             Err(error) => app.state::<AppState>().emit(
                 "err",

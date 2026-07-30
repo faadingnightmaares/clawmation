@@ -21,6 +21,16 @@ fn next<'a>(edges: &'a [GraphEdge], node: &str, output: &str) -> Option<&'a str>
         .map(|edge| edge.to.as_str())
 }
 
+fn failure_mode(graph: &NodeGraph, node: &GraphNode) -> &'static str {
+    match node.config.get("failure_mode").and_then(Value::as_str) {
+        Some("continue") => "continue",
+        Some("recovery") => "recovery",
+        Some("stop") => "stop",
+        _ if next(&graph.edges, &node.id, "error").is_some() => "recovery",
+        _ => "stop",
+    }
+}
+
 fn result_row(node: &GraphNode, ok: bool, message: impl Into<String>) -> Value {
     json!({
         "node_id": node.id,
@@ -53,6 +63,7 @@ pub fn run(
     let mut results = Vec::new();
     let mut last_ok = true;
     let mut loop_counts: HashMap<&str, i64> = HashMap::new();
+    let mut active_loops: Vec<&str> = Vec::new();
 
     while running.load(Ordering::Relaxed) {
         transitions += 1;
@@ -114,7 +125,11 @@ pub fn run(
                 } else if result.ok {
                     "next"
                 } else {
-                    "error"
+                    match failure_mode(graph, node) {
+                        "continue" => "next",
+                        "recovery" => "error",
+                        _ => "__stop_failure",
+                    }
                 }
             }
             "branch" => {
@@ -149,10 +164,16 @@ pub fn run(
                 let count = loop_counts.entry(&node.id).or_insert(0);
                 if limit == 0 || *count < limit {
                     *count += 1;
+                    if active_loops.last().copied() != Some(node.id.as_str()) {
+                        active_loops.push(node.id.as_str());
+                    }
                     results.push(result_row(node, true, format!("iteration {}", *count)));
                     "body"
                 } else {
                     loop_counts.remove(node.id.as_str());
+                    if active_loops.last().copied() == Some(node.id.as_str()) {
+                        active_loops.pop();
+                    }
                     results.push(result_row(node, true, "loop complete"));
                     "done"
                 }
@@ -183,7 +204,11 @@ pub fn run(
                     Err(message) => {
                         last_ok = false;
                         results.push(result_row(node, false, message));
-                        "error"
+                        match failure_mode(graph, node) {
+                            "continue" => "success",
+                            "recovery" => "error",
+                            _ => "__stop_failure",
+                        }
                     }
                 }
             }
@@ -202,7 +227,11 @@ pub fn run(
                     Err(message) => {
                         last_ok = false;
                         results.push(result_row(node, false, message));
-                        "error"
+                        match failure_mode(graph, node) {
+                            "continue" => "success",
+                            "recovery" => "error",
+                            _ => "__stop_failure",
+                        }
                     }
                 }
             }
@@ -253,8 +282,30 @@ pub fn run(
             });
         }
 
+        if output == "__stop_failure" {
+            let passed = results
+                .iter()
+                .filter(|result| result["ok"] == json!(true))
+                .count();
+            return json!({
+                "ok": false,
+                "error": format!("Node '{}' failed and stopped the Loop", node.id),
+                "failed_node": node.id,
+                "transitions": transitions,
+                "nodes_run": results.len(),
+                "nodes_passed": passed,
+                "results": results,
+            });
+        }
+
         match next(&graph.edges, &node.id, output) {
             Some(target) => current = target,
+            None if active_loops.last().is_some() => {
+                current = active_loops
+                    .last()
+                    .copied()
+                    .expect("active Loop checked above");
+            }
             None => {
                 let failed = matches!(output, "error" | "missing");
                 let passed = results
@@ -308,6 +359,7 @@ mod tests {
             from: from.into(),
             output: output.into(),
             to: to.into(),
+            ..Default::default()
         }
     }
 
@@ -328,7 +380,10 @@ mod tests {
         });
         let actions = Arc::new(Mutex::new(Vec::new()));
         let sink = actions.clone();
-        let actuate: Actuate = Box::new(move |action| sink.lock().unwrap().push(action));
+        let actuate: Actuate = Box::new(move |action| {
+            sink.lock().unwrap().push(action);
+            Ok(())
+        });
         (detect, actuate, actions)
     }
 
@@ -366,6 +421,119 @@ mod tests {
     }
 
     #[test]
+    fn failed_action_stops_without_a_recovery_path_by_default() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "click",
+                    "action",
+                    json!({"step":{"type":"click","x":4,"y":5}}),
+                ),
+                node("stop", "stop", json!({"success":true})),
+            ],
+            edges: vec![
+                edge("start", "next", "click"),
+                edge("click", "next", "stop"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(false);
+        let actuate: Actuate = Box::new(|_| Err("input rejected".into()));
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["nodes_run"], 1);
+        assert!(summary["error"].as_str().unwrap().contains("stopped"));
+    }
+
+    #[test]
+    fn failed_action_can_continue_on_its_primary_path() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "click",
+                    "action",
+                    json!({
+                        "failure_mode":"continue",
+                        "step":{"type":"click","x":4,"y":5}
+                    }),
+                ),
+                node("stop", "stop", json!({"success":true})),
+            ],
+            edges: vec![
+                edge("start", "next", "click"),
+                edge("click", "next", "stop"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(false);
+        let actuate: Actuate = Box::new(|_| Err("input rejected".into()));
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["results"][0]["ok"], false);
+        assert_eq!(summary["results"][1]["node_id"], "stop");
+    }
+
+    #[test]
+    fn an_existing_error_edge_keeps_legacy_recovery_behavior() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "click",
+                    "action",
+                    json!({"step":{"type":"click","x":4,"y":5}}),
+                ),
+                node("recovered", "stop", json!({"success":true})),
+            ],
+            edges: vec![
+                edge("start", "next", "click"),
+                edge("click", "error", "recovered"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(false);
+        let actuate: Actuate = Box::new(|_| Err("input rejected".into()));
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["results"][1]["node_id"], "recovered");
+    }
+
+    #[test]
     fn missing_vision_uses_missing_branch() {
         let graph = NodeGraph {
             entry: "start".into(),
@@ -393,6 +561,43 @@ mod tests {
             &running,
         );
         assert_eq!(summary["ok"], false);
+        assert_eq!(
+            summary["results"].as_array().unwrap().last().unwrap()["node_id"],
+            "bad"
+        );
+    }
+
+    #[test]
+    fn rejected_vision_action_uses_missing_branch_instead_of_claiming_success() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("vision", "vision", json!({"step":{"type":"find_click"}})),
+                node("good", "stop", json!({"success":true})),
+                node("bad", "stop", json!({"success":false})),
+            ],
+            edges: vec![
+                edge("start", "next", "vision"),
+                edge("vision", "found", "good"),
+                edge("vision", "missing", "bad"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(true);
+        let actuate: Actuate = Box::new(|_| Err("Windows rejected input".into()));
+        let running = AtomicBool::new(true);
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["results"][0]["ok"], false);
         assert_eq!(
             summary["results"].as_array().unwrap().last().unwrap()["node_id"],
             "bad"
@@ -429,6 +634,115 @@ mod tests {
         );
         assert_eq!(summary["ok"], true);
         assert_eq!(actions.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn forever_loop_without_a_return_edge_keeps_running_until_cancelled() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":0})),
+                node("key", "action", json!({"step":{"type":"key","key":"x"}})),
+            ],
+            edges: vec![edge("start", "next", "loop"), edge("loop", "body", "key")],
+            ..Default::default()
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let stop_flag = running.clone();
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let sink = actions.clone();
+        let actuate: Actuate = Box::new(move |action| {
+            let mut recorded = sink.lock().unwrap();
+            recorded.push(action);
+            if recorded.len() == 3 {
+                stop_flag.store(false, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let detect: Detect = Box::new(|_| (vec![], "unused".into()));
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            running.as_ref(),
+        );
+
+        assert_eq!(summary["cancelled"], true);
+        assert_eq!(actions.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn repeat_retries_a_missing_vision_result_without_a_return_edge() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":3})),
+                node(
+                    "vision",
+                    "vision",
+                    json!({"step":{"type":"wait_for","timeout":0.0}}),
+                ),
+            ],
+            edges: vec![
+                edge("start", "next", "loop"),
+                edge("loop", "body", "vision"),
+            ],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(
+            summary["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|result| result["node_id"] == "vision")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn loop_without_done_edge_finishes_successfully_after_its_count() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":3})),
+            ],
+            edges: vec![edge("start", "next", "loop"), edge("loop", "body", "loop")],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["nodes_run"], 4);
     }
 
     #[test]
