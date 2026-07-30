@@ -6,6 +6,7 @@ import {
   UploadSimple,
   X,
 } from "@phosphor-icons/react";
+import { useEffect, useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -39,14 +40,42 @@ export function ImageCandidateGallery({
   onDragOverChange,
 }: ImageCandidateGalleryProps) {
   const full = candidates.length >= MAX_IMAGE_CANDIDATES;
+  const hovered = useRef(false);
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      if (!hovered.current || busy || full) return;
+      const files = Array.from(event.clipboardData?.files ?? []);
+      const image =
+        files.find((file) => file.type.startsWith("image/")) ??
+        Array.from(event.clipboardData?.items ?? [])
+          .find((item) => item.kind === "file" && item.type.startsWith("image/"))
+          ?.getAsFile();
+      if (!image) return;
+      event.preventDefault();
+      onDrop(image);
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [busy, full, onDrop]);
+
   return (
     <div
+      role="region"
+      aria-label="Vision images"
       className={cn(
         "grid gap-2 rounded-lg border border-dashed p-2.5 transition-colors",
         dragOver
           ? "border-primary bg-primary/[0.06]"
           : "border-border bg-background",
       )}
+      onMouseEnter={() => {
+        hovered.current = true;
+      }}
+      onMouseLeave={() => {
+        hovered.current = false;
+      }}
       onDragEnter={(event) => {
         event.preventDefault();
         onDragOverChange?.(true);

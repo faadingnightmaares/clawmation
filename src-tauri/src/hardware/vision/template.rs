@@ -128,6 +128,40 @@ impl Template {
     }
 }
 
+/// One downscaled view shared by every appearance of the same logical target.
+///
+/// Rebuilding the screen statistics for normal, hovered, and pressed pictures
+/// made an absent full-screen target the slowest possible case. A learned-scale
+/// probe instead prepares the screen once, nominates at the last confirmed
+/// scale, and still lets native pixels enforce the user's real threshold.
+pub struct LearnedScaleSearch<'a> {
+    search: &'a Gray,
+    ox: i64,
+    oy: i64,
+    factor: f64,
+    coarse: Searched,
+}
+
+impl<'a> LearnedScaleSearch<'a> {
+    pub fn new(search: &'a Gray, ox: i64, oy: i64, target_min_side: usize) -> Self {
+        let factor = coarse_factor(
+            search.w as i64,
+            search.h as i64,
+            target_min_side.max(COARSE_MIN_SIDE),
+        );
+        let coarse_w = ((search.w as f64 * factor) as usize).max(1);
+        let coarse_h = ((search.h as f64 * factor) as usize).max(1);
+        let coarse = Searched::new(&resize(search, coarse_w, coarse_h, Interp::Area));
+        Self {
+            search,
+            ox,
+            oy,
+            factor,
+            coarse,
+        }
+    }
+}
+
 /// Derive a content mask by dilating the edges and flood-filling inwards from
 /// the border: anything the fill reaches is background.
 ///
@@ -239,6 +273,75 @@ impl Matcher {
             self.remember(key, &hits[0]);
         }
         hits
+    }
+
+    /// Correlate one small hot zone at a previously confirmed scale. This is
+    /// deliberately exact: a fast path may nominate cheaply, but it may never
+    /// weaken the threshold that decides whether an action is allowed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn focused(
+        &mut self,
+        search: &Gray,
+        ox: i64,
+        oy: i64,
+        tpl: &Template,
+        key: &str,
+        label: &str,
+        threshold: f64,
+        target_w: i64,
+        target_h: i64,
+    ) -> Vec<Detection> {
+        if target_w < 2 || target_h < 2 {
+            return Vec::new();
+        }
+        let (native, mask) = native_pair(
+            &tpl.raw,
+            tpl.mask.as_ref(),
+            target_w as usize,
+            target_h as usize,
+        );
+        let hits = match_corr(search, &native, mask.as_ref(), threshold, ox, oy, label);
+        if let Some(hit) = hits.first() {
+            self.remember(key, hit);
+        }
+        hits
+    }
+
+    /// Probe the complete search region at one already-confirmed scale, sharing
+    /// the expensive downscaled search statistics across all appearances.
+    #[allow(clippy::too_many_arguments)]
+    pub fn learned(
+        &mut self,
+        search: &LearnedScaleSearch<'_>,
+        tpl: &Template,
+        key: &str,
+        label: &str,
+        threshold: f64,
+        target_w: i64,
+        target_h: i64,
+    ) -> Vec<Detection> {
+        let Some(hit) = confirm_at_size(
+            search.search,
+            &tpl.raw,
+            tpl.mask.as_ref(),
+            search.ox,
+            search.oy,
+            label,
+            threshold,
+            target_w,
+            target_h,
+            search.factor,
+            Some(&search.coarse),
+            false,
+        ) else {
+            return Vec::new();
+        };
+        self.remember(key, &hit);
+        vec![hit]
+    }
+
+    pub fn remember_detection(&mut self, key: &str, detection: &Detection) {
+        self.remember(key, detection);
     }
 
     fn remember(&mut self, name: &str, d: &Detection) {
@@ -540,11 +643,47 @@ fn confirm_native(
     factor: f64,
     prepared_coarse: Option<&Searched>,
 ) -> Option<Detection> {
+    confirm_at_size(
+        proc,
+        base,
+        mask_base,
+        ox,
+        oy,
+        label,
+        threshold,
+        base.w as i64,
+        base.h as i64,
+        factor,
+        prepared_coarse,
+        true,
+    )
+}
+
+/// Nominate one known target size on the shared coarse screen, then confirm it
+/// against native pixels. This is the learned-scale counterpart of the broad
+/// scale ladder and therefore cannot return a coarse-only result.
+#[allow(clippy::too_many_arguments)]
+fn confirm_at_size(
+    proc: &Gray,
+    base: &Gray,
+    mask_base: Option<&Gray>,
+    ox: i64,
+    oy: i64,
+    label: &str,
+    threshold: f64,
+    target_w: i64,
+    target_h: i64,
+    factor: f64,
+    prepared_coarse: Option<&Searched>,
+    use_coarse_mask: bool,
+) -> Option<Detection> {
     let (sw, sh) = (proc.w as i64, proc.h as i64);
     let coarse_w = ((sw as f64 * factor) as usize).max(1);
     let coarse_h = ((sh as f64 * factor) as usize).max(1);
-    let tw = base.w as i64;
-    let th = base.h as i64;
+    let (tw, th) = (target_w, target_h);
+    if tw < 2 || th < 2 || tw > sw || th > sh {
+        return None;
+    }
     let ctw = (tw as f64 * factor) as usize;
     let cth = (th as f64 * factor) as usize;
     if ctw < COARSE_MIN_SIDE || cth < COARSE_MIN_SIDE || ctw > coarse_w || cth > coarse_h {
@@ -559,8 +698,19 @@ fn confirm_native(
             &owned_coarse
         }
     };
-    let small = resize(base, ctw, cth, Interp::Area);
-    let small_mask = mask_base.map(|m| resize(m, ctw, cth, Interp::Nearest));
+    let (native, native_mask) = native_pair(base, mask_base, tw as usize, th as usize);
+    let small = resize(&native, ctw, cth, Interp::Area);
+    // The learned whole-screen probe deliberately nominates without a mask:
+    // masked correlation cannot use the accelerated convolution path and made
+    // a missing target more expensive than the old complete scale sweep. Native
+    // confirmation below still applies the real mask and configured threshold.
+    let small_mask = use_coarse_mask
+        .then(|| {
+            native_mask
+                .as_ref()
+                .map(|m| resize(m, ctw, cth, Interp::Nearest))
+        })
+        .flatten();
     let scores = coarse.ccoeff_normed(&small, small_mask.as_ref())?;
     // Near-native verification is deliberately more permissive at the coarse
     // stage. A one-pixel crop drift can damage a tiny downsample badly, while
@@ -928,6 +1078,63 @@ mod tests {
         assert!((d.x - (55 + 14)).abs() <= 2, "x was {}", d.x);
         assert!((d.y - (33 + 10)).abs() <= 2, "y was {}", d.y);
         assert!(d.confidence >= 0.75);
+    }
+
+    #[test]
+    fn learned_scale_finds_a_target_that_moved_across_the_search_area() {
+        let patch = badge(28, 20);
+        let tpl = Template::from_gray(&patch);
+        let img = scene(240, 160, &patch, 175, 110);
+        let learned = LearnedScaleSearch::new(&img, 0, 0, patch.h);
+        let hits = Matcher::new().learned(
+            &learned,
+            &tpl,
+            "target",
+            "target",
+            0.85,
+            patch.w as i64,
+            patch.h as i64,
+        );
+
+        assert_eq!(hits.len(), 1, "got {hits:?}");
+        assert!((hits[0].x - 189).abs() <= 3);
+        assert!((hits[0].y - 120).abs() <= 3);
+    }
+
+    #[test]
+    fn focused_and_learned_searches_never_weaken_the_threshold() {
+        let wanted = badge(28, 20);
+        let other = flat_button(28, 20);
+        let tpl = Template::from_gray(&wanted);
+        let img = scene(180, 120, &other, 70, 45);
+        let mut matcher = Matcher::new();
+
+        assert!(matcher
+            .focused(
+                &img,
+                0,
+                0,
+                &tpl,
+                "target",
+                "target",
+                0.99,
+                wanted.w as i64,
+                wanted.h as i64,
+            )
+            .is_empty());
+
+        let learned = LearnedScaleSearch::new(&img, 0, 0, wanted.h);
+        assert!(matcher
+            .learned(
+                &learned,
+                &tpl,
+                "target",
+                "target",
+                0.99,
+                wanted.w as i64,
+                wanted.h as i64,
+            )
+            .is_empty());
     }
 
     #[test]

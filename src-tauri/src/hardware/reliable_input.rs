@@ -150,15 +150,40 @@ impl ReliableInput {
     }
 
     pub fn click_at(&self, x: i32, y: i32) -> Result<ReliableTarget, String> {
+        self.click_at_with_prior(x, y, None)
+    }
+
+    /// Click with an adaptive preparation path. A prior target only unlocks the
+    /// warm path when the point still belongs to the same foreground window.
+    /// Every failed warm preflight falls back to the full focus path before a
+    /// button edge is emitted.
+    pub fn click_at_with_prior(
+        &self,
+        x: i32,
+        y: i32,
+        prior: Option<&ReliableTarget>,
+    ) -> Result<ReliableTarget, String> {
         let _transaction = self.lock_transaction()?;
         let target = self.resolve_target(x, y)?;
-        self.prepare_pointer(&target, x, y)?;
+        let warm_eligible = prior.is_some_and(|prior| {
+            prior.id() == target.id() && self.platform.is_foreground(&target.window)
+        });
+        if !warm_eligible || self.prepare_pointer_warm_once(&target, x, y).is_err() {
+            self.prepare_pointer(&target, x, y)?;
+        }
+        self.click_prepared_target(&target)?;
+        Ok(target)
+    }
+
+    /// Complete exactly one click after pointer preparation. This deliberately
+    /// has no retry path: once mouse-down succeeds, retrying could double-click.
+    fn click_prepared_target(&self, target: &ReliableTarget) -> Result<(), String> {
         self.platform
             .mouse_down()
-            .map_err(|error| phase("mouse press", &target, error))?;
+            .map_err(|error| phase("mouse press", target, error))?;
         self.platform.sleep(PRESS_HOLD);
         let kept_focus = self.platform.is_foreground(&target.window);
-        let release = self.release_mouse(&target);
+        let release = self.release_mouse(target);
         if !kept_focus {
             // The global release clears physical state. Re-focus and send one
             // more release so a target that captured the press cannot remain
@@ -167,12 +192,11 @@ impl ReliableInput {
             let _ = self.platform.mouse_up();
             return Err(phase(
                 "mouse gesture",
-                &target,
+                target,
                 "target lost foreground while the button was held".to_string(),
             ));
         }
-        release?;
-        Ok(target)
+        release
     }
 
     pub fn key_at(&self, x: i32, y: i32, key: &str) -> Result<ReliableTarget, String> {
@@ -264,6 +288,34 @@ impl ReliableInput {
         Ok(())
     }
 
+    /// The steady-state pointer preparation for repeated Vision clicks. It
+    /// retains the raw-input wake-up wiggle and final safety checks, while
+    /// omitting only the already-established focus and hover settle delays.
+    fn prepare_pointer_warm_once(
+        &self,
+        target: &ReliableTarget,
+        x: i32,
+        y: i32,
+    ) -> Result<(), String> {
+        self.platform.move_to(x, y)?;
+        self.platform
+            .move_relative_no_coalesce(POINTER_ARM_DELTA, 0)?;
+        self.platform.sleep(POINTER_ARM_FRAME);
+        self.platform
+            .move_relative_no_coalesce(-POINTER_ARM_DELTA, 0)?;
+        self.platform.sync_cursor_to(x, y)?;
+        if !self.platform.is_foreground(&target.window) {
+            return Err("target lost foreground while positioning the cursor".to_string());
+        }
+        let (actual_x, actual_y) = self.platform.cursor_position()?;
+        if (actual_x - x).abs() > CURSOR_TOLERANCE || (actual_y - y).abs() > CURSOR_TOLERANCE {
+            return Err(format!(
+                "cursor landed at ({actual_x}, {actual_y}) instead of ({x}, {y})"
+            ));
+        }
+        Ok(())
+    }
+
     fn release_mouse(&self, target: &ReliableTarget) -> Result<(), String> {
         match self.platform.mouse_up() {
             Ok(()) => Ok(()),
@@ -326,6 +378,7 @@ mod tests {
         foreground: bool,
         cursor: (i32, i32),
         relative_motion_since_absolute: bool,
+        target_id: String,
         log: Vec<String>,
     }
 
@@ -340,8 +393,10 @@ mod tests {
 
     impl MockPlatform {
         fn new() -> Self {
+            let mut state = MockState::default();
+            state.target_id = "ABCD:42".to_string();
             Self {
-                state: Mutex::new(MockState::default()),
+                state: Mutex::new(state),
                 focus_failures: AtomicUsize::new(0),
                 cursor_drifts: AtomicUsize::new(0),
                 mouse_up_failures: AtomicUsize::new(0),
@@ -353,17 +408,18 @@ mod tests {
         fn log(&self) -> Vec<String> {
             self.state.lock().unwrap().log.clone()
         }
+
+        fn clear_log(&self) {
+            self.state.lock().unwrap().log.clear();
+        }
     }
 
     impl Platform for MockPlatform {
         fn target_at(&self, x: i32, y: i32) -> Result<SelectableWindow, String> {
-            self.state
-                .lock()
-                .unwrap()
-                .log
-                .push(format!("target:{x},{y}"));
+            let mut state = self.state.lock().unwrap();
+            state.log.push(format!("target:{x},{y}"));
             Ok(SelectableWindow {
-                id: "ABCD:42".to_string(),
+                id: state.target_id.clone(),
                 title: "Roblox".to_string(),
                 pid: 42,
             })
@@ -538,6 +594,141 @@ mod tests {
     }
 
     #[test]
+    fn a_verified_repeat_uses_the_warm_pointer_path() {
+        let platform = Arc::new(MockPlatform::new());
+        let input = ReliableInput::with_platform(platform.clone());
+        let previous = input.click_at(120, 240).unwrap();
+        platform.clear_log();
+
+        let current = input
+            .click_at_with_prior(121, 241, Some(&previous))
+            .unwrap();
+
+        assert_eq!(current.id(), previous.id());
+        assert_eq!(
+            platform.log(),
+            vec![
+                "target:121,241",
+                "move:121,241",
+                "relative:2,0",
+                "sleep:16",
+                "relative:-2,0",
+                "sync:121,241",
+                "down:121,241",
+                "sleep:80",
+                "up:121,241",
+            ]
+        );
+        let deliberate_sleep_ms: u128 = platform
+            .log()
+            .iter()
+            .filter_map(|entry| entry.strip_prefix("sleep:"))
+            .map(|millis| millis.parse::<u128>().unwrap())
+            .sum();
+        assert_eq!(deliberate_sleep_ms, 96);
+    }
+
+    #[test]
+    fn a_non_foreground_repeat_falls_back_before_pressing() {
+        let platform = Arc::new(MockPlatform::new());
+        let input = ReliableInput::with_platform(platform.clone());
+        let previous = input.click_at(120, 240).unwrap();
+        platform.clear_log();
+        platform.state.lock().unwrap().foreground = false;
+
+        input
+            .click_at_with_prior(121, 241, Some(&previous))
+            .unwrap();
+
+        let log = platform.log();
+        assert_eq!(log[0], "target:121,241");
+        assert_eq!(log[1], "focus");
+        assert!(log.contains(&"sleep:50".to_string()));
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("down:"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_changed_window_falls_back_before_pressing() {
+        let platform = Arc::new(MockPlatform::new());
+        let input = ReliableInput::with_platform(platform.clone());
+        let previous = input.click_at(120, 240).unwrap();
+        platform.clear_log();
+        platform.state.lock().unwrap().target_id = "DCBA:99".to_string();
+
+        let current = input
+            .click_at_with_prior(121, 241, Some(&previous))
+            .unwrap();
+
+        assert_eq!(current.id(), "DCBA:99");
+        let log = platform.log();
+        assert_eq!(log[0], "target:121,241");
+        assert_eq!(log[1], "focus");
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("down:"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_warm_preflight_failure_falls_back_before_pressing() {
+        let platform = Arc::new(MockPlatform::new());
+        let input = ReliableInput::with_platform(platform.clone());
+        let previous = input.click_at(120, 240).unwrap();
+        platform.clear_log();
+        platform.cursor_drifts.store(1, Ordering::SeqCst);
+
+        input
+            .click_at_with_prior(121, 241, Some(&previous))
+            .unwrap();
+
+        let log = platform.log();
+        assert_eq!(log.iter().filter(|entry| *entry == "focus").count(), 1);
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("down:"))
+                .count(),
+            1,
+            "a failed warm preflight must never press before the full fallback"
+        );
+    }
+
+    #[test]
+    fn a_post_press_warm_failure_is_never_retried() {
+        let platform = Arc::new(MockPlatform::new());
+        let input = ReliableInput::with_platform(platform.clone());
+        let previous = input.click_at(120, 240).unwrap();
+        platform.clear_log();
+        platform.mouse_up_failures.store(2, Ordering::SeqCst);
+
+        let error = input
+            .click_at_with_prior(121, 241, Some(&previous))
+            .unwrap_err();
+
+        assert!(error.contains("mouse release"));
+        let log = platform.log();
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("down:"))
+                .count(),
+            1,
+            "a release failure must not generate a second click"
+        );
+        assert_eq!(
+            log.iter().filter(|entry| entry.starts_with("up:")).count(),
+            2,
+            "the only extra edge is the existing release recovery"
+        );
+        assert!(!log.iter().any(|entry| entry == "focus"));
+    }
+
+    #[test]
     fn concurrent_actions_cannot_interleave_button_edges() {
         let platform = Arc::new(MockPlatform::new());
         let input = Arc::new(ReliableInput::with_platform(platform.clone()));
@@ -562,6 +753,42 @@ mod tests {
                 pair[0].strip_prefix("down:"),
                 pair[1].strip_prefix("up:"),
                 "a second transaction interleaved between down and up"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_warm_actions_cannot_interleave_button_edges() {
+        let platform = Arc::new(MockPlatform::new());
+        let input = Arc::new(ReliableInput::with_platform(platform.clone()));
+        let previous = Arc::new(input.click_at(100, 100).unwrap());
+        platform.clear_log();
+        let workers: Vec<_> = (0..32)
+            .map(|index| {
+                let input = input.clone();
+                let previous = previous.clone();
+                std::thread::spawn(move || {
+                    input
+                        .click_at_with_prior(index, 7, Some(previous.as_ref()))
+                        .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let edges: Vec<String> = platform
+            .log()
+            .into_iter()
+            .filter(|entry| entry.starts_with("down:") || entry.starts_with("up:"))
+            .collect();
+        assert_eq!(edges.len(), 64);
+        for pair in edges.chunks_exact(2) {
+            assert_eq!(
+                pair[0].strip_prefix("down:"),
+                pair[1].strip_prefix("up:"),
+                "a second warm transaction interleaved between down and up"
             );
         }
     }

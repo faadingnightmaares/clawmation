@@ -1558,8 +1558,15 @@ fn execute_ai_action(
             Ok(())
         }
         Action::Click(x, y) => {
-            let established =
-                reliable_input.click_at(screen_coord(x, "x")?, screen_coord(y, "y")?)?;
+            let previous = target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())?
+                .clone();
+            let established = reliable_input.click_at_with_prior(
+                screen_coord(x, "x")?,
+                screen_coord(y, "y")?,
+                previous.as_ref(),
+            )?;
             *target
                 .lock()
                 .map_err(|_| "Loop target context is poisoned".to_string())? = Some(established);

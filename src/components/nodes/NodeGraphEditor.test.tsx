@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
 let captureCalls = 0;
+let uploadCalls = 0;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args?: Record<string, unknown>) => invoke(command, args),
 }));
@@ -13,6 +14,7 @@ describe("NodeGraphEditor canvas menu", () => {
   beforeEach(() => {
     localStorage.clear();
     captureCalls = 0;
+    uploadCalls = 0;
     invoke.mockReset();
     invoke.mockImplementation(async (command) => {
       if (command === "node_graph_load") {
@@ -49,12 +51,16 @@ describe("NodeGraphEditor canvas menu", () => {
         return { ok: true, errors: [], warnings: [] };
       }
       if (command === "save_template_upload") {
+        uploadCalls += 1;
         return {
           ok: true,
-          path: "C:\\templates\\enemy.png",
+          path:
+            uploadCalls === 1
+              ? "C:\\templates\\enemy.png"
+              : "C:\\templates\\enemy-hovered.png",
           w: 16,
           h: 16,
-          thumb: "dGh1bWI=",
+          thumb: uploadCalls === 1 ? "dGh1bWI=" : "aG92ZXJlZA==",
         };
       }
       if (command === "capture_template") {
@@ -453,7 +459,7 @@ describe("NodeGraphEditor canvas menu", () => {
     expect(screen.getByText("Display 2")).toBeInTheDocument();
   });
 
-  it("imports a dropped image into a wait guard", async () => {
+  it("imports dropped and hover-pasted images into a wait guard", async () => {
     const { container } = render(
       <div style={{ width: 1000, height: 700 }}>
         <NodeGraphEditor
@@ -514,6 +520,13 @@ describe("NodeGraphEditor canvas menu", () => {
       "data:image/png;base64,dGh1bWI=",
     );
 
+    const pasted = new File(["hovered-image"], "enemy-hovered.png", {
+      type: "image/png",
+    });
+    fireEvent.mouseEnter(screen.getByRole("region", { name: "Vision images" }));
+    fireEvent.paste(window, { clipboardData: { files: [pasted] } });
+    expect(await screen.findByText("enemy-hovered.png")).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith(
@@ -524,6 +537,10 @@ describe("NodeGraphEditor canvas menu", () => {
               expect.objectContaining({
                 config: expect.objectContaining({
                   template_thumb: "data:image/png;base64,dGh1bWI=",
+                  template_thumbs: [
+                    "data:image/png;base64,dGh1bWI=",
+                    "data:image/png;base64,aG92ZXJlZA==",
+                  ],
                 }),
               }),
             ]),
