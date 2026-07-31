@@ -470,6 +470,9 @@ mod tests {
             h: 6,
             confidence: 1.0,
             roi_offset: [0, 0],
+            scale_x: 1.0,
+            scale_y: 1.0,
+            observation: None,
         }];
         let b64 = annotate(&frame(64, 48), (4, 4, 60, 44), &dets);
         assert!(!b64.is_empty());

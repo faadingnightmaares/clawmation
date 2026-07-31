@@ -48,6 +48,7 @@ use self::image::{
 };
 use self::template::{LearnedScaleSearch, Matcher, Template};
 use super::capture::Frame;
+use crate::engine::vision_runtime::FrameStamp;
 use crate::models::guard::Guard;
 use crate::models::step::Step;
 use crate::models::vision_images::candidate_paths;
@@ -66,6 +67,18 @@ pub struct Detection {
     pub h: i64,
     pub confidence: f64,
     pub roi_offset: [i64; 2],
+    #[serde(default = "unit_scale")]
+    pub scale_x: f64,
+    #[serde(default = "unit_scale")]
+    pub scale_y: f64,
+    /// Runtime-only provenance used to reject a match after a newer screen
+    /// sample supersedes it. It is intentionally absent from IPC/persistence.
+    #[serde(skip)]
+    pub observation: Option<FrameStamp>,
+}
+
+fn unit_scale() -> f64 {
+    1.0
 }
 
 /// Why a vision call failed. Detection itself never fails (nothing found is an
@@ -185,7 +198,7 @@ struct ReacquisitionState {
 }
 
 const REACQUISITION_PAD: i64 = 36;
-const GLOBAL_PROBE_INTERVAL: u32 = 3;
+const RECOVERY_TILES_PER_MISS: usize = 4;
 const RECOVERY_TILE_WIDTH: i64 = 320;
 const RECOVERY_TILE_HEIGHT: i64 = 180;
 const RECOVERY_SCALES: [f64; 8] = [
@@ -200,7 +213,7 @@ const RECOVERY_SCALES: [f64; 8] = [
 ];
 
 fn global_probe_due(miss_count: u32) -> bool {
-    miss_count.is_multiple_of(GLOBAL_PROBE_INTERVAL)
+    miss_count > 0
 }
 
 fn recovery_scale(cursor: usize) -> f64 {
@@ -260,6 +273,10 @@ pub struct Detector {
 
 impl Detector {
     pub fn new(screen_w: i64, screen_h: i64) -> Self {
+        // Adapter discovery and shader compilation are asynchronous. Starting
+        // them with the detector keeps the user's first real search off the
+        // one-time CPU/GPU cold-start path.
+        gpu_corr::warm_up();
         Self {
             screen_w: screen_w as i32,
             screen_h: screen_h as i32,
@@ -346,6 +363,25 @@ impl Detector {
         );
     }
 
+    fn annotate_action_scale(
+        &self,
+        detection: &mut Detection,
+        candidate_keys: &[String],
+        source_key: &str,
+    ) {
+        // Click marks are authored against the first (canonical) image. Hover
+        // alternatives may have slightly different intrinsic dimensions, so
+        // prefer the canonical candidate and fall back to the winning source.
+        let reference = candidate_keys
+            .iter()
+            .find_map(|key| self.templates.get(key))
+            .or_else(|| self.templates.get(source_key));
+        if let Some(template) = reference {
+            detection.scale_x = detection.w as f64 / template.w.max(1) as f64;
+            detection.scale_y = detection.h as f64 / template.h.max(1) as f64;
+        }
+    }
+
     /// Every HSV blob in `region` big enough to count, largest first. The port
     /// of `PixelDetector.detect_color`.
     pub fn detect_color(
@@ -382,6 +418,9 @@ impl Detector {
                     // The `+ 1` is Python's, and guards a zero-area contour.
                     confidence: (area / f64::from(cw * ch + 1)).min(1.0),
                     roi_offset: [ox, oy],
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    observation: None,
                 })
             })
             .collect();
@@ -408,9 +447,14 @@ impl Detector {
         // Disjoint field borrows: the template is read out of `templates` while
         // the matcher's memory is written through `matcher`.
         let tpl = &self.templates[&key];
-        Ok(self
+        let mut hits = self
             .matcher
-            .robust(&gray, ox, oy, tpl, &key, label, threshold))
+            .robust(&gray, ox, oy, tpl, &key, label, threshold);
+        for hit in &mut hits {
+            hit.scale_x = hit.w as f64 / tpl.w.max(1) as f64;
+            hit.scale_y = hit.h as f64 / tpl.h.max(1) as f64;
+        }
+        Ok(hits)
     }
 
     fn match_robust_candidates(
@@ -517,7 +561,8 @@ impl Detector {
                     );
                     if let Some(hit) = hits.first_mut() {
                         hit.roi_offset = [ox, oy];
-                        let hit = hit.clone();
+                        let mut hit = hit.clone();
+                        self.annotate_action_scale(&mut hit, &candidate_fingerprint, cache_key);
                         self.remember_reacquisition(
                             operation_key,
                             &candidate_fingerprint,
@@ -530,21 +575,26 @@ impl Detector {
                 }
             }
 
-            let recovery_cursor = {
+            let recovery_cursors = {
                 let state = self
                     .reacquisition
                     .get_mut(operation_key)
                     .expect("validated reacquisition state remains present");
                 state.miss_count = state.miss_count.saturating_add(1);
                 if global_probe_due(state.miss_count) {
-                    let cursor = state.recovery_cursor;
-                    state.recovery_cursor = state.recovery_cursor.wrapping_add(1);
-                    Some(cursor)
+                    let first = state.recovery_cursor;
+                    state.recovery_cursor =
+                        state.recovery_cursor.wrapping_add(RECOVERY_TILES_PER_MISS);
+                    Some(
+                        (0..RECOVERY_TILES_PER_MISS)
+                            .map(|offset| first.wrapping_add(offset))
+                            .collect::<Vec<_>>(),
+                    )
                 } else {
                     None
                 }
             };
-            let Some(recovery_cursor) = recovery_cursor else {
+            let Some(recovery_cursors) = recovery_cursors else {
                 return Ok(Vec::new());
             };
 
@@ -552,52 +602,56 @@ impl Detector {
             // every pixel at every appearance and two scales. On a 1440p
             // desktop that blocked fresh captures for more than half a second,
             // so a target returning at its known position could not be seen.
-            // Sweep one overlapping tile and one scale per probe instead. The
-            // hot zone above still runs first on every fresh frame, while the
-            // tiles eventually cover the complete configured region.
-            let ([x1, y1, x2, y2], recovery_multiplier) = recovery_probe(
-                recovery_cursor,
-                i64::from(roi.width),
-                i64::from(roi.height),
-                (max_w + 1) / 2,
-                (max_h + 1) / 2,
-            );
-            let Some(probe) = roi.crop(x1 as i32, y1 as i32, (x2 - x1) as i32, (y2 - y1) as i32)
-            else {
-                return Ok(Vec::new());
-            };
-            let gray = bgr_to_gray(&probe.bgr, probe.width as usize, probe.height as usize);
-            let recovery_sizes = target_sizes
-                .iter()
-                .map(|(target_w, target_h)| {
-                    (
-                        (*target_w as f64 * recovery_multiplier).round().max(2.0) as i64,
-                        (*target_h as f64 * recovery_multiplier).round().max(2.0) as i64,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let target_min_side = recovery_sizes
-                .iter()
-                .map(|(w, h)| (*w).min(*h) as usize)
-                .min()
-                .unwrap_or(2);
-            let learned = LearnedScaleSearch::new(&gray, ox + x1, oy + y1, target_min_side);
-            for (index, cache_key) in loaded.iter().enumerate() {
-                let template = &self.templates[cache_key];
-                let (target_w, target_h) = recovery_sizes[index];
-                let hits = self.matcher.learned(
-                    &learned, template, cache_key, label, threshold, target_w, target_h,
+            // Sweep a small bounded tile batch at one scale per miss. The hot
+            // zone above still runs first, while a 1440p desktop completes its
+            // same-scale spatial recovery in sixteen misses instead of 192.
+            for recovery_cursor in recovery_cursors {
+                let ([x1, y1, x2, y2], recovery_multiplier) = recovery_probe(
+                    recovery_cursor,
+                    i64::from(roi.width),
+                    i64::from(roi.height),
+                    (max_w + 1) / 2,
+                    (max_h + 1) / 2,
                 );
-                if let Some(hit) = hits.first() {
-                    let hit = hit.clone();
-                    self.remember_reacquisition(
-                        operation_key,
-                        &candidate_fingerprint,
-                        bounds,
-                        cache_key,
-                        &hit,
+                let Some(probe) =
+                    roi.crop(x1 as i32, y1 as i32, (x2 - x1) as i32, (y2 - y1) as i32)
+                else {
+                    continue;
+                };
+                let gray = bgr_to_gray(&probe.bgr, probe.width as usize, probe.height as usize);
+                let recovery_sizes = target_sizes
+                    .iter()
+                    .map(|(target_w, target_h)| {
+                        (
+                            (*target_w as f64 * recovery_multiplier).round().max(2.0) as i64,
+                            (*target_h as f64 * recovery_multiplier).round().max(2.0) as i64,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let target_min_side = recovery_sizes
+                    .iter()
+                    .map(|(w, h)| (*w).min(*h) as usize)
+                    .min()
+                    .unwrap_or(2);
+                let learned = LearnedScaleSearch::new(&gray, ox + x1, oy + y1, target_min_side);
+                for (index, cache_key) in loaded.iter().enumerate() {
+                    let template = &self.templates[cache_key];
+                    let (target_w, target_h) = recovery_sizes[index];
+                    let hits = self.matcher.learned(
+                        &learned, template, cache_key, label, threshold, target_w, target_h,
                     );
-                    return Ok(vec![hit]);
+                    if let Some(hit) = hits.first() {
+                        let mut hit = hit.clone();
+                        self.annotate_action_scale(&mut hit, &candidate_fingerprint, cache_key);
+                        self.remember_reacquisition(
+                            operation_key,
+                            &candidate_fingerprint,
+                            bounds,
+                            cache_key,
+                            &hit,
+                        );
+                        return Ok(vec![hit]);
+                    }
                 }
             }
             return Ok(Vec::new());
@@ -610,7 +664,8 @@ impl Detector {
                 .matcher
                 .robust(&gray, ox, oy, template, &cache_key, label, threshold);
             if let Some(hit) = hits.first() {
-                let hit = hit.clone();
+                let mut hit = hit.clone();
+                self.annotate_action_scale(&mut hit, &candidate_fingerprint, &cache_key);
                 self.remember_reacquisition(
                     operation_key,
                     &candidate_fingerprint,
@@ -902,6 +957,15 @@ mod tests {
             recovery_probe(tile_count, 2_560, 1_440, 0, 0).1,
             RECOVERY_SCALES[0]
         );
+    }
+
+    #[test]
+    fn same_scale_spatial_recovery_has_a_fixed_miss_bound() {
+        let (columns, rows) = recovery_grid(2_560, 1_440);
+        let tile_count = columns * rows;
+        let misses = tile_count.div_ceil(RECOVERY_TILES_PER_MISS);
+        assert_eq!(tile_count, 64);
+        assert_eq!(misses, 16);
     }
 
     fn frame_with_image_at(
@@ -1413,11 +1477,11 @@ mod tests {
     }
 
     #[test]
-    fn reacquisition_stays_local_between_bounded_global_probes() {
-        assert!(!global_probe_due(1));
-        assert!(!global_probe_due(2));
+    fn reacquisition_advances_global_recovery_on_every_miss() {
+        assert!(global_probe_due(1));
+        assert!(global_probe_due(2));
         assert!(global_probe_due(3));
-        assert!(!global_probe_due(4));
+        assert!(global_probe_due(4));
         assert!(global_probe_due(6));
     }
 

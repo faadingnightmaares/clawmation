@@ -74,6 +74,16 @@ pub struct Frame {
     pub height: u32,
 }
 
+/// One capture sample plus whether the backend copied a newly presented
+/// desktop frame. DXGI legitimately reuses its last frame when the desktop is
+/// static; exposing that fact lets Vision distinguish a new render from a
+/// later observation of unchanged pixels.
+#[derive(Clone)]
+pub struct CaptureSample {
+    pub frame: Frame,
+    pub fresh: bool,
+}
+
 impl Frame {
     /// A tight sub-frame of `self`, clamped to its bounds.
     ///
@@ -262,11 +272,14 @@ impl DxgiCapture {
         }
     }
 
-    fn grab(&mut self, region: Region) -> Option<Frame> {
+    fn grab(&mut self, region: Region) -> Option<CaptureSample> {
         if self.duplication.is_none() {
             self.duplication = unsafe { self.output.DuplicateOutput(&self.device).ok() };
             if self.duplication.is_none() {
-                return self.last_frame.clone();
+                return self.last_frame.clone().map(|frame| CaptureSample {
+                    frame,
+                    fresh: false,
+                });
             }
         }
         // Clone the COM handle (a cheap AddRef) so `self` stays free to mutate.
@@ -299,10 +312,16 @@ impl DxgiCapture {
                     }
                     if let Some(f) = frame {
                         self.last_frame = Some(f.clone());
-                        return Some(f);
+                        return Some(CaptureSample {
+                            frame: f,
+                            fresh: true,
+                        });
                     }
                     if self.last_frame.is_some() || Instant::now() >= deadline {
-                        return self.last_frame.clone();
+                        return self.last_frame.clone().map(|frame| CaptureSample {
+                            frame,
+                            fresh: false,
+                        });
                     }
                 }
                 Err(e) => {
@@ -311,12 +330,18 @@ impl DxgiCapture {
                         // Duplication invalidated (fullscreen/mode switch): drop
                         // it so the next grab rebuilds; reuse the cache meanwhile.
                         self.duplication = None;
-                        return self.last_frame.clone();
+                        return self.last_frame.clone().map(|frame| CaptureSample {
+                            frame,
+                            fresh: false,
+                        });
                     }
                     // WAIT_TIMEOUT (static screen) or a transient error: reuse the
                     // cache, else keep waiting for the first frame until deadline.
                     if self.last_frame.is_some() || Instant::now() >= deadline {
-                        return self.last_frame.clone();
+                        return self.last_frame.clone().map(|frame| CaptureSample {
+                            frame,
+                            fresh: false,
+                        });
                     }
                 }
             }
@@ -516,18 +541,32 @@ impl ScreenCapture {
         }
     }
 
-    /// Grab the current screen (or the configured region) as BGR. Returns `None`
-    /// only on a hard failure with no frame ever cached; a static screen returns
-    /// the last frame. Records an FPS sample on every call, like `_track_fps`.
-    pub fn grab(&mut self) -> Option<Frame> {
+    /// Grab the current screen together with backend freshness metadata.
+    pub fn grab_sample(&mut self) -> Option<CaptureSample> {
         let t0 = Instant::now();
-        let frame = match &mut self.backend {
+        let sample = match &mut self.backend {
             Backend::Dxgi(d) => d.grab(self.region),
-            Backend::Gdi => grab_gdi(self.region),
+            Backend::Gdi => grab_gdi(self.region).map(|frame| CaptureSample { frame, fresh: true }),
             Backend::Closed => None,
         };
         self.fps.record(t0.elapsed().as_secs_f64());
-        frame
+        sample
+    }
+
+    /// Require newly sampled pixels. DXGI may legally return its cache forever
+    /// on an unchanged desktop, so semantic post-action verification falls back
+    /// to one GDI read when it needs proof from a later screen sample.
+    pub fn grab_fresh_sample(&mut self) -> Option<CaptureSample> {
+        let sample = self.grab_sample();
+        if sample.as_ref().is_some_and(|sample| sample.fresh) {
+            return sample;
+        }
+        grab_gdi(self.region).map(|frame| CaptureSample { frame, fresh: true })
+    }
+
+    /// Compatibility read for callers that only need pixels.
+    pub fn grab(&mut self) -> Option<Frame> {
+        self.grab_sample().map(|sample| sample.frame)
     }
 
     /// Rolling-average read throughput (see the module note on the FPS metric).

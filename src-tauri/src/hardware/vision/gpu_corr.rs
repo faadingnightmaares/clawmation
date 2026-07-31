@@ -14,7 +14,10 @@ use wgpu::util::DeviceExt;
 
 const WORKGROUP_SIDE: u32 = 8;
 const GPU_MIN_MULTIPLIES: u64 = 24_000_000;
-const GPU_TIMEOUT: Duration = Duration::from_secs(2);
+/// A GPU job that cannot finish inside the interactive detection budget has
+/// already lost to the CPU fallback. Never let a contended game GPU stall
+/// Watch for seconds.
+const GPU_TIMEOUT: Duration = Duration::from_millis(75);
 
 const SHADER: &str = r#"
 struct Params {
@@ -357,7 +360,9 @@ pub fn available() -> bool {
 
 fn with_context<T>(operation: impl FnOnce(&mut Context) -> T) -> Option<T> {
     warm_up();
-    let mut guard = backend().state.lock().ok()?;
+    // Another detection already owns the device. Falling back to Rayon now is
+    // faster and keeps unrelated Watch/Loop work from queueing behind it.
+    let mut guard = backend().state.try_lock().ok()?;
 
     let result = match &mut *guard {
         State::Ready(context) if !context.failed.load(Ordering::Acquire) => {

@@ -200,17 +200,46 @@ impl ReliableInput {
     }
 
     pub fn key_at(&self, x: i32, y: i32, key: &str) -> Result<ReliableTarget, String> {
+        self.key_at_with_prior(x, y, key, None)
+    }
+
+    pub fn key_at_with_prior(
+        &self,
+        x: i32,
+        y: i32,
+        key: &str,
+        prior: Option<&ReliableTarget>,
+    ) -> Result<ReliableTarget, String> {
         let _transaction = self.lock_transaction()?;
         let target = self.resolve_target(x, y)?;
-        self.prepare_pointer(&target, x, y)?;
+        let warm_eligible = prior.is_some_and(|prior| {
+            prior.id() == target.id() && self.platform.is_foreground(&target.window)
+        });
+        if !warm_eligible || self.prepare_pointer_warm_once(&target, x, y).is_err() {
+            self.prepare_pointer(&target, x, y)?;
+        }
         self.press_key(&target, key)?;
         Ok(target)
     }
 
     pub fn nudge_at(&self, x: i32, y: i32) -> Result<ReliableTarget, String> {
+        self.nudge_at_with_prior(x, y, None)
+    }
+
+    pub fn nudge_at_with_prior(
+        &self,
+        x: i32,
+        y: i32,
+        prior: Option<&ReliableTarget>,
+    ) -> Result<ReliableTarget, String> {
         let _transaction = self.lock_transaction()?;
         let target = self.resolve_target(x, y)?;
-        self.prepare_pointer(&target, x, y)?;
+        let warm_eligible = prior.is_some_and(|prior| {
+            prior.id() == target.id() && self.platform.is_foreground(&target.window)
+        });
+        if !warm_eligible || self.prepare_pointer_warm_once(&target, x, y).is_err() {
+            self.prepare_pointer(&target, x, y)?;
+        }
         self.platform
             .nudge()
             .map_err(|error| phase("mouse nudge", &target, error))?;
@@ -290,7 +319,9 @@ impl ReliableInput {
 
     /// The steady-state pointer preparation for repeated Vision clicks. It
     /// retains the raw-input wake-up wiggle and final safety checks, while
-    /// omitting only the already-established focus and hover settle delays.
+    /// omitting only the already-established focus delay. The hover settle is
+    /// deliberately retained: Roblox may paint the cursor immediately but does
+    /// not update its hovered control until a later game frame.
     fn prepare_pointer_warm_once(
         &self,
         target: &ReliableTarget,
@@ -304,6 +335,7 @@ impl ReliableInput {
         self.platform
             .move_relative_no_coalesce(-POINTER_ARM_DELTA, 0)?;
         self.platform.sync_cursor_to(x, y)?;
+        self.platform.sleep(HOVER_SETTLE);
         if !self.platform.is_foreground(&target.window) {
             return Err("target lost foreground while positioning the cursor".to_string());
         }
@@ -614,6 +646,7 @@ mod tests {
                 "sleep:16",
                 "relative:-2,0",
                 "sync:121,241",
+                "sleep:50",
                 "down:121,241",
                 "sleep:80",
                 "up:121,241",
@@ -625,7 +658,7 @@ mod tests {
             .filter_map(|entry| entry.strip_prefix("sleep:"))
             .map(|millis| millis.parse::<u128>().unwrap())
             .sum();
-        assert_eq!(deliberate_sleep_ms, 96);
+        assert_eq!(deliberate_sleep_ms, 146);
     }
 
     #[test]

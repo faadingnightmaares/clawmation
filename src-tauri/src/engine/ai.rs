@@ -16,8 +16,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::vision_runtime::{execute_serialized, execute_verified, TargetReaction};
 use crate::models::step::Step;
 use crate::util::py_float;
+
+const MAX_STEP_RESULT_ROWS: usize = 512;
 
 /// One detection hit: the `(x, y, confidence)` of a match, which is all the
 /// executor's messages and result fields need (`Detection.{x,y,confidence}`).
@@ -26,6 +29,7 @@ pub struct Match {
     pub x: i64,
     pub y: i64,
     pub confidence: f64,
+    pub observation: Option<super::vision_runtime::FrameStamp>,
 }
 
 /// A hardware action the executor asks its actuator to perform. Collapses the
@@ -48,6 +52,18 @@ pub type Detect = Box<dyn Fn(&Step) -> (Vec<Match>, String) + Send + Sync>;
 
 /// Perform one [`Action`]. Production drives the controller; tests record the call.
 pub type Actuate = Box<dyn Fn(Action) -> Result<(), String> + Send + Sync>;
+pub type Refresh =
+    Box<dyn Fn(&Step, &Match, &AtomicBool) -> Result<Option<Match>, String> + Send + Sync>;
+pub type Verify =
+    Box<dyn Fn(&Step, &Match, &AtomicBool) -> Result<TargetReaction, String> + Send + Sync>;
+
+pub struct ExecutionContext<'a> {
+    pub detect: &'a Detect,
+    pub actuate: &'a Actuate,
+    pub refresh: &'a Refresh,
+    pub verify: &'a Verify,
+    pub running: &'a AtomicBool,
+}
 
 /// Sleep in short injectable slices so a global stop can interrupt a long delay
 /// instead of waiting for the whole delay to finish.
@@ -88,18 +104,41 @@ pub(crate) struct StepResult {
 /// Execute one step through the injected seams (Python's `_execute_step`). The
 /// action steps (`click`/`key`/`type`/`scroll`/`delay`) actuate and report their
 /// intent; `find_click`/`wait_for` detect and act on a hit.
-pub(crate) fn execute_step(
+#[cfg(test)]
+pub(crate) fn execute_step_verified(
     step: &Step,
     detect: &Detect,
     actuate: &Actuate,
+    verify: &Verify,
     running: &AtomicBool,
 ) -> StepResult {
+    let refresh: Refresh = Box::new(|_, target, _| Ok(Some(target.clone())));
+    let context = ExecutionContext {
+        detect,
+        actuate,
+        refresh: &refresh,
+        verify,
+        running,
+    };
+    execute_step_reliable(step, &context)
+}
+
+pub(crate) fn execute_step_reliable(step: &Step, context: &ExecutionContext<'_>) -> StepResult {
+    let ExecutionContext {
+        detect,
+        actuate,
+        refresh,
+        verify,
+        running,
+    } = context;
     let t0 = Instant::now();
     let secs = |t: Instant| t.elapsed().as_secs_f64();
 
     match step.step_type.as_str() {
         "click" => {
-            if let Err(error) = actuate(Action::Click(step.x, step.y)) {
+            if let Err(error) =
+                execute_serialized(running, || actuate(Action::Click(step.x, step.y)))
+            {
                 return failed_action(t0, format!("click failed: {error}"), step.x, step.y);
             }
             StepResult {
@@ -113,7 +152,9 @@ pub(crate) fn execute_step(
             }
         }
         "key" => {
-            if let Err(error) = actuate(Action::KeyPress(step.key.clone())) {
+            if let Err(error) =
+                execute_serialized(running, || actuate(Action::KeyPress(step.key.clone())))
+            {
                 return failed_action(t0, format!("key press failed: {error}"), -1, -1);
             }
             StepResult {
@@ -127,7 +168,9 @@ pub(crate) fn execute_step(
             }
         }
         "type" => {
-            if let Err(error) = actuate(Action::TypeText(step.text.clone())) {
+            if let Err(error) =
+                execute_serialized(running, || actuate(Action::TypeText(step.text.clone())))
+            {
                 return failed_action(t0, format!("typing failed: {error}"), -1, -1);
             }
             StepResult {
@@ -149,7 +192,9 @@ pub(crate) fn execute_step(
             } else {
                 None
             };
-            if let Err(error) = actuate(Action::Scroll(step.scroll_amount, pos)) {
+            if let Err(error) =
+                execute_serialized(running, || actuate(Action::Scroll(step.scroll_amount, pos)))
+            {
                 return failed_action(t0, format!("scroll failed: {error}"), -1, -1);
             }
             StepResult {
@@ -194,24 +239,40 @@ pub(crate) fn execute_step(
                     elapsed: secs(t0),
                 },
                 Some(best) => {
-                    if let Err(error) = actuate(Action::Click(best.x, best.y)) {
+                    let current = std::cell::RefCell::new(best.clone());
+                    if let Err(error) = execute_verified(
+                        running,
+                        || {
+                            let original = current.borrow().clone();
+                            let refreshed =
+                                refresh(step, &original, running)?.ok_or_else(|| {
+                                    "target disappeared before input delivery".to_string()
+                                })?;
+                            let action = Action::Click(refreshed.x, refreshed.y);
+                            *current.borrow_mut() = refreshed;
+                            actuate(action)
+                        },
+                        |running| verify(step, &current.borrow(), running),
+                    ) {
+                        let current = current.borrow();
                         return StepResult {
                             ok: false,
                             message: format!("find_click: action failed ({error})"),
-                            found_x: best.x,
-                            found_y: best.y,
+                            found_x: current.x,
+                            found_y: current.y,
                             matched: matches.len() as i64,
-                            confidence: best.confidence,
+                            confidence: current.confidence,
                             elapsed: secs(t0),
                         };
                     }
+                    let current = current.borrow();
                     StepResult {
                         ok: true,
-                        message: format!("clicked match at ({}, {})", best.x, best.y),
-                        found_x: best.x,
-                        found_y: best.y,
+                        message: format!("clicked match at ({}, {})", current.x, current.y),
+                        found_x: current.x,
+                        found_y: current.y,
                         matched: matches.len() as i64,
-                        confidence: best.confidence,
+                        confidence: current.confidence,
                         elapsed: secs(t0),
                     }
                 }
@@ -227,7 +288,9 @@ pub(crate) fn execute_step(
             while Instant::now() < deadline && running.load(Ordering::Relaxed) {
                 let (matches, _) = detect(step);
                 if let Some(best) = matches.first() {
-                    if let Err(error) = actuate(Action::FocusAt(best.x, best.y)) {
+                    if let Err(error) =
+                        execute_serialized(running, || actuate(Action::FocusAt(best.x, best.y)))
+                    {
                         return StepResult {
                             ok: false,
                             message: format!("appeared, but target focus failed ({error})"),
@@ -313,12 +376,54 @@ pub fn run_with_flag(
     actuate: &Actuate,
     running: &AtomicBool,
 ) -> Value {
+    let verify: Verify = Box::new(|_, _, _| Ok(TargetReaction::Changed));
+    run_with_flag_verified(
+        steps,
+        loop_enabled,
+        loop_count,
+        detect,
+        actuate,
+        &verify,
+        running,
+    )
+}
+
+pub fn run_with_flag_verified(
+    steps: &[Step],
+    loop_enabled: bool,
+    loop_count: i64,
+    detect: &Detect,
+    actuate: &Actuate,
+    verify: &Verify,
+    running: &AtomicBool,
+) -> Value {
+    let refresh: Refresh = Box::new(|_, target, _| Ok(Some(target.clone())));
+    let context = ExecutionContext {
+        detect,
+        actuate,
+        refresh: &refresh,
+        verify,
+        running,
+    };
+    run_with_flag_reliable(steps, loop_enabled, loop_count, &context)
+}
+
+pub fn run_with_flag_reliable(
+    steps: &[Step],
+    loop_enabled: bool,
+    loop_count: i64,
+    context: &ExecutionContext<'_>,
+) -> Value {
+    let running = context.running;
     let mut iterations: i64 = 0;
     let max_iter = if loop_enabled { loop_count } else { 1 };
     let mut results: Vec<Value> = Vec::new();
+    let mut steps_run = 0_i64;
+    let mut steps_passed = 0_i64;
+    let mut all_ok = true;
     let mut halted = false;
 
-    while running.load(Ordering::SeqCst) && !halted && iterations < max_iter {
+    while running.load(Ordering::SeqCst) && !halted && (max_iter == 0 || iterations < max_iter) {
         iterations += 1;
         for (i, step) in steps.iter().enumerate() {
             if !running.load(Ordering::SeqCst) {
@@ -327,13 +432,13 @@ pub fn run_with_flag(
             if !step.enabled {
                 continue;
             }
-            let result = execute_step(step, detect, actuate, &running);
+            let result = execute_step_reliable(step, context);
             let label = if step.label.is_empty() {
                 step.step_type.clone()
             } else {
                 step.label.clone()
             };
-            results.push(json!({
+            let row = json!({
                 "index": i,
                 "label": label,
                 "ok": result.ok,
@@ -343,7 +448,17 @@ pub fn run_with_flag(
                 "matched": result.matched,
                 "confidence": result.confidence,
                 "elapsed": result.elapsed,
-            }));
+            });
+            steps_run += 1;
+            if result.ok {
+                steps_passed += 1;
+            } else {
+                all_ok = false;
+            }
+            if results.len() == MAX_STEP_RESULT_ROWS {
+                results.remove(0);
+            }
+            results.push(row);
             if !result.ok && step.step_type == "find_click" {
                 // A failed find_click stops the run (target missing).
                 halted = true;
@@ -353,23 +468,19 @@ pub fn run_with_flag(
     }
 
     let cancelled = !running.load(Ordering::SeqCst);
-    let passed = results
-        .iter()
-        .filter(|r| r["ok"].as_bool().unwrap_or(false))
-        .count() as i64;
     let ok = if cancelled {
         false
     } else if results.is_empty() {
         true
     } else {
-        results.iter().all(|r| r["ok"].as_bool().unwrap_or(false))
+        all_ok
     };
     json!({
         "ok": ok,
         "cancelled": cancelled,
         "iterations": iterations,
-        "steps_run": results.len(),
-        "steps_passed": passed,
+        "steps_run": steps_run,
+        "steps_passed": steps_passed,
         "results": results,
     })
 }
@@ -380,7 +491,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use super::{run, run_with_flag, Action, Actuate, Detect, Match};
+    use super::{
+        execute_step_reliable, execute_step_verified, run, run_with_flag, Action, Actuate, Detect,
+        ExecutionContext, Match, Refresh, Verify, MAX_STEP_RESULT_ROWS,
+    };
+    use crate::engine::vision_runtime::{execute_serialized, TargetReaction};
     use crate::models::step::Step;
 
     /// An actuator that records every action it is handed.
@@ -443,6 +558,98 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_direct_loop_inputs_never_reach_the_actuator() {
+        let direct_steps = [
+            Step {
+                step_type: "click".into(),
+                x: 10,
+                y: 20,
+                ..Default::default()
+            },
+            Step {
+                step_type: "key".into(),
+                key: "a".into(),
+                ..Default::default()
+            },
+            Step {
+                step_type: "type".into(),
+                text: "hello".into(),
+                ..Default::default()
+            },
+            Step {
+                step_type: "scroll".into(),
+                scroll_amount: 2,
+                ..Default::default()
+            },
+        ];
+        let (actuate, log) = recording_actuate();
+        let detect = detect_returning(Vec::new(), "");
+        let verify: Verify = Box::new(|_, _, _| Ok(TargetReaction::Changed));
+        let running = AtomicBool::new(false);
+
+        for step in direct_steps {
+            let result = execute_step_verified(&step, &detect, &actuate, &verify, &running);
+            assert!(!result.ok);
+            assert!(result.message.contains("cancelled"));
+        }
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_loop_input_cannot_split_another_vision_action() {
+        let (holder_entered_tx, holder_entered_rx) = std::sync::mpsc::channel();
+        let (release_holder_tx, release_holder_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let running = AtomicBool::new(true);
+            execute_serialized(&running, || {
+                holder_entered_tx.send(()).unwrap();
+                release_holder_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        holder_entered_rx.recv().unwrap();
+
+        let (worker_started_tx, worker_started_rx) = std::sync::mpsc::channel();
+        let (action_tx, action_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let step = Step {
+                step_type: "click".into(),
+                x: 10,
+                y: 20,
+                ..Default::default()
+            };
+            let detect = detect_returning(Vec::new(), "");
+            let actuate: Actuate = Box::new(move |action| {
+                action_tx.send(action).unwrap();
+                Ok(())
+            });
+            let verify: Verify = Box::new(|_, _, _| Ok(TargetReaction::Changed));
+            let running = AtomicBool::new(true);
+            worker_started_tx.send(()).unwrap();
+            execute_step_verified(&step, &detect, &actuate, &verify, &running)
+        });
+        worker_started_rx.recv().unwrap();
+
+        let action_while_locked = action_rx.recv_timeout(Duration::from_millis(100)).ok();
+        release_holder_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let result = worker.join().unwrap();
+        let action_after_release = if action_while_locked.is_none() {
+            action_rx.recv_timeout(Duration::from_millis(100)).ok()
+        } else {
+            None
+        };
+
+        assert!(
+            action_while_locked.is_none(),
+            "direct Loop input bypassed the shared action session"
+        );
+        assert_eq!(action_after_release, Some(Action::Click(10, 20)));
+        assert!(result.ok);
+    }
+
+    #[test]
     fn find_click_clicks_the_best_match() {
         let steps = vec![step("find_click")];
         let (actuate, log) = recording_actuate();
@@ -452,11 +659,13 @@ mod tests {
                     x: 50,
                     y: 60,
                     confidence: 0.9,
+                    observation: None,
                 },
                 Match {
                     x: 1,
                     y: 2,
                     confidence: 0.5,
+                    observation: None,
                 },
             ],
             "2 color match(es)",
@@ -470,6 +679,108 @@ mod tests {
         assert_eq!(r["found_y"], 60);
         assert_eq!(r["matched"], 2);
         assert_eq!(r["message"], "clicked match at (50, 60)");
+    }
+
+    #[test]
+    fn find_click_retries_when_the_target_did_not_react() {
+        let step = step("find_click");
+        let (actuate, log) = recording_actuate();
+        let detect = detect_returning(
+            vec![Match {
+                x: 50,
+                y: 60,
+                confidence: 0.9,
+                observation: None,
+            }],
+            "found",
+        );
+        let pass = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let verify_pass = pass.clone();
+        let verify: Verify = Box::new(move |_, _, _| {
+            Ok(if verify_pass.fetch_add(1, Ordering::SeqCst) == 0 {
+                TargetReaction::StillVisible
+            } else {
+                TargetReaction::Changed
+            })
+        });
+        let running = AtomicBool::new(true);
+
+        let result = execute_step_verified(&step, &detect, &actuate, &verify, &running);
+
+        assert!(result.ok);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![Action::Click(50, 60), Action::Click(50, 60)]
+        );
+    }
+
+    #[test]
+    fn find_click_revalidates_and_uses_the_targets_current_position() {
+        let step = step("find_click");
+        let (actuate, log) = recording_actuate();
+        let detect = detect_returning(
+            vec![Match {
+                x: 50,
+                y: 60,
+                confidence: 0.9,
+                observation: None,
+            }],
+            "found",
+        );
+        let refresh: Refresh = Box::new(|_, _, _| {
+            Ok(Some(Match {
+                x: 75,
+                y: 90,
+                confidence: 0.95,
+                observation: None,
+            }))
+        });
+        let verify: Verify = Box::new(|_, _, _| Ok(TargetReaction::Changed));
+        let running = AtomicBool::new(true);
+
+        let context = ExecutionContext {
+            detect: &detect,
+            actuate: &actuate,
+            refresh: &refresh,
+            verify: &verify,
+            running: &running,
+        };
+        let result = execute_step_reliable(&step, &context);
+
+        assert!(result.ok);
+        assert_eq!(*log.lock().unwrap(), vec![Action::Click(75, 90)]);
+        assert_eq!((result.found_x, result.found_y), (75, 90));
+    }
+
+    #[test]
+    fn find_click_never_presses_when_revalidation_loses_the_target() {
+        let step = step("find_click");
+        let (actuate, log) = recording_actuate();
+        let detect = detect_returning(
+            vec![Match {
+                x: 50,
+                y: 60,
+                confidence: 0.9,
+                observation: None,
+            }],
+            "found",
+        );
+        let refresh: Refresh = Box::new(|_, _, _| Ok(None));
+        let verify: Verify = Box::new(|_, _, _| Ok(TargetReaction::Changed));
+        let running = AtomicBool::new(true);
+
+        let context = ExecutionContext {
+            detect: &detect,
+            actuate: &actuate,
+            refresh: &refresh,
+            verify: &verify,
+            running: &running,
+        };
+        let result = execute_step_reliable(&step, &context);
+
+        assert!(!result.ok);
+        assert!(log.lock().unwrap().is_empty());
+        assert!(result.message.contains("disappeared before input"));
     }
 
     #[test]
@@ -527,6 +838,7 @@ mod tests {
                 x: 7,
                 y: 8,
                 confidence: 0.8,
+                observation: None,
             }],
             "1 color match(es)",
         );
@@ -639,6 +951,36 @@ mod tests {
     }
 
     #[test]
+    fn zero_repeat_runs_forever_until_cancelled_without_unbounded_results() {
+        let steps = vec![Step {
+            step_type: "click".into(),
+            x: 1,
+            y: 1,
+            ..Default::default()
+        }];
+        let running = Arc::new(AtomicBool::new(true));
+        let stop = running.clone();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let actions = count.clone();
+        let actuate: Actuate = Box::new(move |_| {
+            if actions.fetch_add(1, Ordering::SeqCst) + 1 == 1_000 {
+                stop.store(false, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let detect = detect_returning(vec![], "");
+
+        let summary = run_with_flag(&steps, true, 0, &detect, &actuate, running.as_ref());
+
+        assert_eq!(summary["cancelled"], true);
+        assert_eq!(summary["steps_run"], 1_000);
+        assert_eq!(
+            summary["results"].as_array().unwrap().len(),
+            MAX_STEP_RESULT_ROWS
+        );
+    }
+
+    #[test]
     fn rejected_find_click_action_fails_instead_of_claiming_a_click() {
         let steps = vec![step("find_click")];
         let detect = detect_returning(
@@ -646,6 +988,7 @@ mod tests {
                 x: 50,
                 y: 60,
                 confidence: 0.9,
+                observation: None,
             }],
             "one match",
         );

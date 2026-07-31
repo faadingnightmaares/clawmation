@@ -9,7 +9,9 @@ use crate::engine::ai::{self, Actuate, Detect};
 use crate::models::node_graph::{GraphEdge, GraphNode, NodeGraph};
 use crate::models::step::Step;
 
-const MAX_TRANSITIONS: usize = 10_000;
+const MAX_RESULT_ROWS: usize = 512;
+const ZERO_PROGRESS_YIELD_EVERY: usize = 256;
+const MAX_ZERO_PROGRESS_TRANSITIONS: usize = 4_096;
 
 pub type RunSubMacro<'a> = dyn Fn(&str, &[Step], i64) -> Result<String, String> + Send + Sync + 'a;
 pub type RunChain<'a> = dyn Fn(&str) -> Result<String, String> + Send + Sync + 'a;
@@ -40,6 +42,34 @@ fn result_row(node: &GraphNode, ok: bool, message: impl Into<String>) -> Value {
     })
 }
 
+fn record_result(
+    results: &mut Vec<Value>,
+    nodes_run: &mut usize,
+    nodes_passed: &mut usize,
+    row: Value,
+) {
+    *nodes_run += 1;
+    if row["ok"].as_bool().unwrap_or(false) {
+        *nodes_passed += 1;
+    }
+    if results.len() == MAX_RESULT_ROWS {
+        results.remove(0);
+    }
+    results.push(row);
+}
+
+fn node_makes_progress(node: &GraphNode) -> bool {
+    match node.node_type.as_str() {
+        "action" | "vision" => {
+            let step = node.config.get("step").unwrap_or(&Value::Null);
+            step.get("type").and_then(Value::as_str) != Some("delay")
+                || step.get("delay").and_then(Value::as_f64).unwrap_or(0.0) > 0.0
+        }
+        "sub_macro" | "chain" | "stop" => true,
+        _ => false,
+    }
+}
+
 pub fn run(
     graph: &NodeGraph,
     detect: &Detect,
@@ -48,6 +78,45 @@ pub fn run(
     run_chain: &RunChain<'_>,
     running: &AtomicBool,
 ) -> Value {
+    let verify: ai::Verify = Box::new(|_, _, _| Ok(super::vision_runtime::TargetReaction::Changed));
+    let refresh: ai::Refresh = Box::new(|_, target, _| Ok(Some(target.clone())));
+    let context = ai::ExecutionContext {
+        detect,
+        actuate,
+        refresh: &refresh,
+        verify: &verify,
+        running,
+    };
+    run_reliable(graph, &context, run_sub_macro, run_chain)
+}
+
+pub fn run_verified(
+    graph: &NodeGraph,
+    detect: &Detect,
+    actuate: &Actuate,
+    verify: &ai::Verify,
+    run_sub_macro: &RunSubMacro<'_>,
+    run_chain: &RunChain<'_>,
+    running: &AtomicBool,
+) -> Value {
+    let refresh: ai::Refresh = Box::new(|_, target, _| Ok(Some(target.clone())));
+    let context = ai::ExecutionContext {
+        detect,
+        actuate,
+        refresh: &refresh,
+        verify,
+        running,
+    };
+    run_reliable(graph, &context, run_sub_macro, run_chain)
+}
+
+pub fn run_reliable(
+    graph: &NodeGraph,
+    context: &ai::ExecutionContext<'_>,
+    run_sub_macro: &RunSubMacro<'_>,
+    run_chain: &RunChain<'_>,
+) -> Value {
+    let running = context.running;
     let report = graph.validate();
     if !report.ok {
         return json!({ "ok": false, "error": report.errors.join("; "), "results": [] });
@@ -61,26 +130,35 @@ pub fn run(
     let mut current = graph.entry.as_str();
     let mut transitions = 0_usize;
     let mut results = Vec::new();
+    let mut nodes_run = 0_usize;
+    let mut nodes_passed = 0_usize;
+    let mut zero_progress = 0_usize;
     let mut last_ok = true;
     let mut loop_counts: HashMap<&str, i64> = HashMap::new();
     let mut active_loops: Vec<&str> = Vec::new();
 
     while running.load(Ordering::Relaxed) {
         transitions += 1;
-        if transitions > MAX_TRANSITIONS {
-            return json!({
-                "ok": false,
-                "error": "Graph exceeded the 10000 transition safety limit",
-                "transitions": transitions - 1,
-                "results": results,
-            });
-        }
 
         let Some(node) = nodes.get(current).copied() else {
             return json!({ "ok": false, "error": format!("Missing node '{current}'"), "results": results });
         };
 
         if !node.enabled {
+            zero_progress += 1;
+            if zero_progress.is_multiple_of(ZERO_PROGRESS_YIELD_EVERY) {
+                std::thread::yield_now();
+            }
+            if zero_progress >= MAX_ZERO_PROGRESS_TRANSITIONS {
+                return json!({
+                    "ok": false,
+                    "error": "Loop has a zero-progress cycle; add a wait, detection, or action",
+                    "transitions": transitions,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
+                    "results": results,
+                });
+            }
             let Some(target) = next(&graph.edges, &node.id, "next") else {
                 break;
             };
@@ -103,19 +181,24 @@ pub fn run(
                         })
                     }
                 };
-                let result = ai::execute_step(&step, detect, actuate, running);
+                let result = ai::execute_step_reliable(&step, context);
                 last_ok = result.ok;
-                results.push(json!({
-                    "node_id": node.id,
-                    "label": if node.label.is_empty() { &step.step_type } else { &node.label },
-                    "ok": result.ok,
-                    "message": result.message,
-                    "found_x": result.found_x,
-                    "found_y": result.found_y,
-                    "matched": result.matched,
-                    "confidence": result.confidence,
-                    "elapsed": result.elapsed,
-                }));
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    json!({
+                        "node_id": node.id,
+                        "label": if node.label.is_empty() { &step.step_type } else { &node.label },
+                        "ok": result.ok,
+                        "message": result.message,
+                        "found_x": result.found_x,
+                        "found_y": result.found_y,
+                        "matched": result.matched,
+                        "confidence": result.confidence,
+                        "elapsed": result.elapsed,
+                    }),
+                );
                 if node.node_type == "vision" {
                     if result.ok {
                         "found"
@@ -144,11 +227,12 @@ pub fn run(
                     "last_failed" => !last_ok,
                     _ => last_ok,
                 };
-                results.push(result_row(
-                    node,
-                    true,
-                    format!("condition {condition} = {passes}"),
-                ));
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    result_row(node, true, format!("condition {condition} = {passes}")),
+                );
                 if passes {
                     "true"
                 } else {
@@ -167,14 +251,24 @@ pub fn run(
                     if active_loops.last().copied() != Some(node.id.as_str()) {
                         active_loops.push(node.id.as_str());
                     }
-                    results.push(result_row(node, true, format!("iteration {}", *count)));
+                    record_result(
+                        &mut results,
+                        &mut nodes_run,
+                        &mut nodes_passed,
+                        result_row(node, true, format!("iteration {}", *count)),
+                    );
                     "body"
                 } else {
                     loop_counts.remove(node.id.as_str());
                     if active_loops.last().copied() == Some(node.id.as_str()) {
                         active_loops.pop();
                     }
-                    results.push(result_row(node, true, "loop complete"));
+                    record_result(
+                        &mut results,
+                        &mut nodes_run,
+                        &mut nodes_passed,
+                        result_row(node, true, "loop complete"),
+                    );
                     "done"
                 }
             }
@@ -198,12 +292,22 @@ pub fn run(
                 match run_sub_macro(name, &embedded_steps, repeat) {
                     Ok(message) => {
                         last_ok = true;
-                        results.push(result_row(node, true, message));
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, true, message),
+                        );
                         "success"
                     }
                     Err(message) => {
                         last_ok = false;
-                        results.push(result_row(node, false, message));
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, false, message),
+                        );
                         match failure_mode(graph, node) {
                             "continue" => "success",
                             "recovery" => "error",
@@ -221,12 +325,22 @@ pub fn run(
                 match run_chain(chain_id) {
                     Ok(message) => {
                         last_ok = true;
-                        results.push(result_row(node, true, message));
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, true, message),
+                        );
                         "success"
                     }
                     Err(message) => {
                         last_ok = false;
-                        results.push(result_row(node, false, message));
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, false, message),
+                        );
                         match failure_mode(graph, node) {
                             "continue" => "success",
                             "recovery" => "error",
@@ -236,7 +350,12 @@ pub fn run(
                 }
             }
             "note" => {
-                results.push(result_row(node, true, "note"));
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    result_row(node, true, "note"),
+                );
                 "next"
             }
             "stop" => {
@@ -245,20 +364,17 @@ pub fn run(
                     .get("success")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                results.push(result_row(
-                    node,
-                    success,
-                    if success { "finished" } else { "stopped" },
-                ));
-                let passed = results
-                    .iter()
-                    .filter(|result| result["ok"] == json!(true))
-                    .count();
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    result_row(node, success, if success { "finished" } else { "stopped" }),
+                );
                 return json!({
                     "ok": success,
                     "transitions": transitions,
-                    "nodes_run": results.len(),
-                    "nodes_passed": passed,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
                     "results": results,
                 });
             }
@@ -271,29 +387,45 @@ pub fn run(
             }
         };
 
+        if node_makes_progress(node) {
+            zero_progress = 0;
+        } else {
+            zero_progress += 1;
+            if zero_progress.is_multiple_of(ZERO_PROGRESS_YIELD_EVERY) {
+                std::thread::yield_now();
+            }
+            if zero_progress >= MAX_ZERO_PROGRESS_TRANSITIONS {
+                return json!({
+                    "ok": false,
+                    "error": "Loop has a zero-progress cycle; add a wait, detection, or action",
+                    "transitions": transitions,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
+                    "results": results,
+                });
+            }
+        }
+
         if !running.load(Ordering::SeqCst) {
             return json!({
                 "ok": false,
                 "cancelled": true,
                 "error": "Stopped",
                 "transitions": transitions,
-                "nodes_run": results.len(),
+                "nodes_run": nodes_run,
+                "nodes_passed": nodes_passed,
                 "results": results,
             });
         }
 
         if output == "__stop_failure" {
-            let passed = results
-                .iter()
-                .filter(|result| result["ok"] == json!(true))
-                .count();
             return json!({
                 "ok": false,
                 "error": format!("Node '{}' failed and stopped the Loop", node.id),
                 "failed_node": node.id,
                 "transitions": transitions,
-                "nodes_run": results.len(),
-                "nodes_passed": passed,
+                "nodes_run": nodes_run,
+                "nodes_passed": nodes_passed,
                 "results": results,
             });
         }
@@ -308,16 +440,12 @@ pub fn run(
             }
             None => {
                 let failed = matches!(output, "error" | "missing");
-                let passed = results
-                    .iter()
-                    .filter(|result| result["ok"] == json!(true))
-                    .count();
                 return json!({
                     "ok": !failed,
                     "error": if failed { format!("Node '{}' has no '{}' path", node.id, output) } else { String::new() },
                     "transitions": transitions,
-                    "nodes_run": results.len(),
-                    "nodes_passed": passed,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
                     "results": results,
                 });
             }
@@ -329,7 +457,8 @@ pub fn run(
         "cancelled": true,
         "error": "Stopped",
         "transitions": transitions,
-        "nodes_run": results.len(),
+        "nodes_run": nodes_run,
+        "nodes_passed": nodes_passed,
         "results": results,
     })
 }
@@ -371,6 +500,7 @@ mod tests {
                         x: 7,
                         y: 8,
                         confidence: 0.9,
+                        observation: None,
                     }],
                     "found".into(),
                 )
@@ -655,7 +785,7 @@ mod tests {
         let actuate: Actuate = Box::new(move |action| {
             let mut recorded = sink.lock().unwrap();
             recorded.push(action);
-            if recorded.len() == 3 {
+            if recorded.len() == 10_005 {
                 stop_flag.store(false, Ordering::SeqCst);
             }
             Ok(())
@@ -672,7 +802,39 @@ mod tests {
         );
 
         assert_eq!(summary["cancelled"], true);
-        assert_eq!(actions.lock().unwrap().len(), 3);
+        assert_eq!(actions.lock().unwrap().len(), 10_005);
+        assert!(summary["nodes_run"].as_u64().unwrap() > 10_000);
+        assert!(summary["results"].as_array().unwrap().len() <= MAX_RESULT_ROWS);
+    }
+
+    #[test]
+    fn zero_progress_forever_cycle_is_rejected_without_hanging() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":0})),
+            ],
+            edges: vec![edge("start", "next", "loop"), edge("loop", "body", "loop")],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], false);
+        assert!(summary["error"]
+            .as_str()
+            .unwrap()
+            .contains("zero-progress cycle"));
     }
 
     #[test]

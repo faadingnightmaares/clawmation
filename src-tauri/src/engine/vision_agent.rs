@@ -36,6 +36,7 @@ use crate::models::guard::Guard;
 
 use super::guards::{plan_action, stroke_points, Plan};
 use super::sleep_interruptible;
+use super::vision_runtime::{execute_serialized, execute_verified, TargetReaction};
 
 /// The share of one core the watcher may spend while nothing is on screen.
 /// A pass costing `t` is followed by `t * (1/IDLE_DUTY - 1)` of quiet.
@@ -62,6 +63,12 @@ const EMPTY_IDLE: Duration = Duration::from_millis(200);
 /// no fires and it is the difference between a busy core and a pinned one.
 const BURST_FLOOR: Duration = Duration::from_millis(16);
 
+/// Keep a target that recently existed on the frame-paced path while a game
+/// animation temporarily hides it. Egg-opening and reward animations commonly
+/// last several seconds; charging the cold-search duty backoff during that gap
+/// is what made the returning button feel delayed.
+const FAST_REACQUIRE_WINDOW: Duration = Duration::from_secs(15);
+
 /// Dwell between the moves of a drag sweep, so a game registers it as a
 /// continuous drag rather than a teleport. Matches [`super::guards`].
 const STROKE_STEP: Duration = Duration::from_millis(8);
@@ -85,6 +92,14 @@ pub enum VisionAction {
 pub type Detect = Box<dyn Fn(&[Guard]) -> HashMap<String, Vec<Detection>> + Send + Sync>;
 /// `act(action)`: perform one release-safe trigger action.
 pub type Act = Box<dyn Fn(VisionAction) -> Result<(), String> + Send + Sync>;
+/// Revalidate the same target immediately before input. `None` means it left
+/// the screen; the engine must not press stale coordinates.
+pub type Refresh =
+    Box<dyn Fn(&Guard, &Detection, &AtomicBool) -> Result<Option<Detection>, String> + Send + Sync>;
+/// Verify that a later screen observation no longer contains the exact target
+/// that caused an autonomous click or key press.
+pub type Verify =
+    Box<dyn Fn(&Guard, &Detection, &AtomicBool) -> Result<TargetReaction, String> + Send + Sync>;
 /// `on_event(kind, message)`: feed a line to the Vision panel (`kind` is one of
 /// `"start"`, `"act"`, `"stop"`).
 pub type OnEvent = Box<dyn Fn(&str, &str) + Send + Sync>;
@@ -99,11 +114,14 @@ pub type MacroRunner = Box<dyn Fn(&str, i64) -> Result<(), String> + Send + Sync
 struct TriggerRuntime {
     visible: bool,
     cooldown_until: Option<Instant>,
+    last_seen: Option<Instant>,
 }
 
 struct Inner {
     detect: Detect,
     act: Act,
+    refresh: Refresh,
+    verify: Verify,
     on_event: OnEvent,
     run_macro: MacroRunner,
     triggers: Mutex<Vec<Guard>>,
@@ -125,10 +143,46 @@ pub struct VisionAgent {
 
 impl VisionAgent {
     pub fn new(detect: Detect, act: Act, on_event: OnEvent, run_macro: MacroRunner) -> Self {
+        Self::new_verified(
+            detect,
+            act,
+            Box::new(|_, _, _| Ok(TargetReaction::Changed)),
+            on_event,
+            run_macro,
+        )
+    }
+
+    pub fn new_verified(
+        detect: Detect,
+        act: Act,
+        verify: Verify,
+        on_event: OnEvent,
+        run_macro: MacroRunner,
+    ) -> Self {
+        Self::new_reliable(
+            detect,
+            act,
+            Box::new(|_, detection, _| Ok(Some(detection.clone()))),
+            verify,
+            on_event,
+            run_macro,
+        )
+    }
+
+    pub fn new_reliable(
+        detect: Detect,
+        act: Act,
+        refresh: Refresh,
+        verify: Verify,
+        on_event: OnEvent,
+        run_macro: MacroRunner,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 detect,
                 act,
+                refresh,
+                verify,
                 on_event,
                 run_macro,
                 triggers: Mutex::new(Vec::new()),
@@ -247,12 +301,43 @@ impl Inner {
             return soonest.map_or(MIN_IDLE, |at| at.saturating_duration_since(now));
         }
 
-        let started = Instant::now();
-        let detections = (self.detect)(&ready);
-        let idle = idle_after(started.elapsed());
-
         let mut next = Vec::with_capacity(ready.len());
-        for trigger in &ready {
+        let (slow, fast): (Vec<Guard>, Vec<Guard>) = ready
+            .into_iter()
+            .partition(|trigger| matches!(trigger.method.as_str(), "ocr" | "text"));
+        // Act on pixel/template work before starting platform OCR. An expensive
+        // text recognizer can no longer hold a ready click behind it.
+        for group in [&fast, &slow] {
+            if group.is_empty() || !self.running.load(Ordering::SeqCst) {
+                continue;
+            }
+            let started = Instant::now();
+            let detections = (self.detect)(group);
+            let idle = idle_after(started.elapsed());
+            self.process_ready(group, &detections, idle, &mut next);
+        }
+
+        // Whoever comes up first sets the wait, including the triggers that
+        // were not due this pass and so were never looked at.
+        let settled = Instant::now();
+        let mut due = self.due.lock().unwrap();
+        for (id, gap) in next {
+            due.insert(id, settled + gap);
+        }
+        due.values()
+            .map(|&at| at.saturating_duration_since(settled))
+            .min()
+            .unwrap_or(MIN_IDLE)
+    }
+
+    fn process_ready(
+        &self,
+        ready: &[Guard],
+        detections: &HashMap<String, Vec<Detection>>,
+        idle: Duration,
+        next: &mut Vec<(String, Duration)>,
+    ) {
+        for trigger in ready {
             // Don't begin a new action after stop() was requested.
             if !self.running.load(Ordering::SeqCst) {
                 break;
@@ -268,10 +353,11 @@ impl Inner {
                         let state = runtime.entry(trigger.id.clone()).or_default();
                         let appeared = !state.visible;
                         state.visible = true;
+                        state.last_seen = Some(Instant::now());
                         appeared
                             || state
                                 .cooldown_until
-                                .map_or(true, |until| Instant::now() >= until)
+                                .is_none_or(|until| Instant::now() >= until)
                     };
                     let acted = should_act && self.act_on(trigger, best);
                     if should_act {
@@ -300,26 +386,23 @@ impl Inner {
                     ));
                 }
                 None => {
-                    if let Some(state) = self.runtime.lock().unwrap().get_mut(&trigger.id) {
-                        state.visible = false;
-                        state.cooldown_until = None;
-                    }
-                    next.push((trigger.id.clone(), idle));
+                    let fast_reacquire =
+                        if let Some(state) = self.runtime.lock().unwrap().get_mut(&trigger.id) {
+                            state.visible = false;
+                            state.cooldown_until = None;
+                            state
+                                .last_seen
+                                .is_some_and(|seen| seen.elapsed() <= FAST_REACQUIRE_WINDOW)
+                        } else {
+                            false
+                        };
+                    next.push((
+                        trigger.id.clone(),
+                        if fast_reacquire { BURST_FLOOR } else { idle },
+                    ));
                 }
             }
         }
-
-        // Whoever comes up first sets the wait, including the triggers that
-        // were not due this pass and so were never looked at.
-        let settled = Instant::now();
-        let mut due = self.due.lock().unwrap();
-        for (id, gap) in next {
-            due.insert(id, settled + gap);
-        }
-        due.values()
-            .map(|&at| at.saturating_duration_since(settled))
-            .min()
-            .unwrap_or(MIN_IDLE)
     }
 
     /// Perform the trigger's action, then run its macro sequence (Python's
@@ -345,38 +428,81 @@ impl Inner {
                 );
                 return false;
             }
-            self.dispatch(VisionAction::KeyPressAt(best.x, best.y, key.to_string()))
-                .map(|_| format!("'{}' -> pressed {key}", trigger.name))
+            let current = std::cell::RefCell::new(best.clone());
+            execute_verified(
+                &self.running,
+                || {
+                    let refreshed =
+                        self.refresh_target(trigger, &current.borrow(), &self.running)?;
+                    let action =
+                        VisionAction::KeyPressAt(refreshed.x, refreshed.y, key.to_string());
+                    *current.borrow_mut() = refreshed;
+                    self.dispatch(action)
+                },
+                |running| (self.verify)(trigger, &current.borrow(), running),
+            )
+            .map(|_| format!("'{}' -> pressed {key}", trigger.name))
         } else if trigger.action == "nudge" {
             // Same target a click would press (a marked point or offset applied
             // to the match), but parked-and-wiggled instead of pressed: the game
             // sees activity at the object, not a click on it.
-            let (x, y) = nudge_point(trigger, best);
-            self.dispatch(VisionAction::Nudge(x, y))
-                .map(|_| format!("'{}' -> nudged the mouse at ({x}, {y})", trigger.name))
+            let point = std::cell::Cell::new(nudge_point(trigger, best));
+            execute_serialized(&self.running, || {
+                let refreshed = self.refresh_target(trigger, best, &self.running)?;
+                let (x, y) = nudge_point(trigger, &refreshed);
+                point.set((x, y));
+                self.dispatch(VisionAction::Nudge(x, y))
+            })
+            .map(|_| {
+                let (x, y) = point.get();
+                format!("'{}' -> nudged the mouse at ({x}, {y})", trigger.name)
+            })
         } else {
             match plan_action(trigger, best) {
-                Plan::Click(x, y) => {
+                Plan::Click(initial_x, initial_y) => {
                     // Use the controller's Watch click path. It lands the cursor
                     // once, lets the target UI see the hover position, holds the
                     // press across game frames so a frame-polled UI cannot miss
                     // it, and retries a failed release; splitting those phases
                     // here had left Watch behind every newer input caller in the
                     // app.
-                    self.dispatch(VisionAction::Click(x, y))
-                        .map(|_| format!("'{}' -> clicked ({x}, {y})", trigger.name))
+                    let current = std::cell::RefCell::new(best.clone());
+                    let point = std::cell::Cell::new((initial_x, initial_y));
+                    execute_verified(
+                        &self.running,
+                        || {
+                            let refreshed =
+                                self.refresh_target(trigger, &current.borrow(), &self.running)?;
+                            let Plan::Click(x, y) = plan_action(trigger, &refreshed) else {
+                                return Err("target action changed from click to drag".to_string());
+                            };
+                            point.set((x, y));
+                            *current.borrow_mut() = refreshed;
+                            self.dispatch(VisionAction::Click(x, y))
+                        },
+                        |running| (self.verify)(trigger, &current.borrow(), running),
+                    )
+                    .map(|_| {
+                        let (x, y) = point.get();
+                        format!("'{}' -> clicked ({x}, {y})", trigger.name)
+                    })
                 }
-                Plan::Drag { tlx, tly, strokes } => {
+                Plan::Drag { .. } => execute_serialized(&self.running, || {
+                    let refreshed = self.refresh_target(trigger, best, &self.running)?;
+                    let Plan::Drag { tlx, tly, strokes } = plan_action(trigger, &refreshed) else {
+                        return Err("target action changed from drag to click".to_string());
+                    };
                     let focus = strokes
                         .first()
                         .and_then(|stroke| stroke_points(stroke, tlx, tly).first().copied())
                         .unwrap_or((tlx, tly));
                     self.dispatch(VisionAction::FocusAt(focus.0, focus.1))
                         .and_then(|_| self.sweep(tlx, tly, &strokes))
-                        .map(|_| {
-                            format!("'{}' -> dragged {} stroke(s)", trigger.name, strokes.len())
-                        })
-                }
+                        .map(|_| strokes.len())
+                })
+                .map(|stroke_count| {
+                    format!("'{}' -> dragged {stroke_count} stroke(s)", trigger.name)
+                }),
             }
         };
 
@@ -429,6 +555,16 @@ impl Inner {
             }
         }
         true
+    }
+
+    fn refresh_target(
+        &self,
+        trigger: &Guard,
+        current: &Detection,
+        running: &AtomicBool,
+    ) -> Result<Detection, String> {
+        (self.refresh)(trigger, current, running)?
+            .ok_or_else(|| "target disappeared before input delivery".to_string())
     }
 
     /// Drag along each stroke: press at the start, sweep pixel by pixel, release.
@@ -509,6 +645,9 @@ mod tests {
             h: 0,
             confidence: 1.0,
             roi_offset: [0, 0],
+            scale_x: 1.0,
+            scale_y: 1.0,
+            observation: None,
         }
     }
 
@@ -574,6 +713,61 @@ mod tests {
             *events.lock().unwrap(),
             vec![("act".into(), "'Watcher' -> clicked (7, 9)".into())]
         );
+    }
+
+    #[test]
+    fn click_trigger_retries_when_a_later_frame_still_has_the_target() {
+        let actions: ActionLog = Arc::new(Mutex::new(Vec::new()));
+        let action_log = actions.clone();
+        let verification_pass = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pass = verification_pass.clone();
+        let agent = VisionAgent::new_verified(
+            Box::new(|_| HashMap::from([("t".to_string(), vec![detection(7, 9)])])),
+            Box::new(move |action| {
+                action_log.lock().unwrap().push(action);
+                Ok(())
+            }),
+            Box::new(move |_, _, _| {
+                Ok(if pass.fetch_add(1, Ordering::SeqCst) == 0 {
+                    TargetReaction::StillVisible
+                } else {
+                    TargetReaction::Changed
+                })
+            }),
+            Box::new(|_, _| {}),
+            Box::new(|_, _| Ok(())),
+        );
+        agent.test_prime(vec![base_trigger("t")]);
+
+        agent.test_tick();
+
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![VisionAction::Click(7, 9), VisionAction::Click(7, 9)]
+        );
+        assert_eq!(agent.fired_count(), 1);
+    }
+
+    #[test]
+    fn click_trigger_revalidates_and_clicks_the_targets_current_position() {
+        let actions: ActionLog = Arc::new(Mutex::new(Vec::new()));
+        let action_log = actions.clone();
+        let agent = VisionAgent::new_reliable(
+            Box::new(|_| HashMap::from([("t".to_string(), vec![detection(7, 9)])])),
+            Box::new(move |action| {
+                action_log.lock().unwrap().push(action);
+                Ok(())
+            }),
+            Box::new(|_, _, _| Ok(Some(detection(70, 90)))),
+            Box::new(|_, _, _| Ok(TargetReaction::Changed)),
+            Box::new(|_, _| {}),
+            Box::new(|_, _| Ok(())),
+        );
+        agent.test_prime(vec![base_trigger("t")]);
+
+        agent.test_tick();
+
+        assert_eq!(*actions.lock().unwrap(), vec![VisionAction::Click(70, 90)]);
     }
 
     /// A match with real extent, so the top-left the surgical offsets are
@@ -779,8 +973,12 @@ mod tests {
 
         agent.test_tick(); // present: click
         thread::sleep(MIN_IDLE + Duration::from_millis(10));
-        agent.test_tick(); // absent: rearm
-        thread::sleep(MIN_IDLE + Duration::from_millis(10));
+        let reacquire_wait = agent.test_tick(); // absent: rearm
+        assert_eq!(
+            reacquire_wait, BURST_FLOOR,
+            "a recently seen target must stay on the fast frame-paced path"
+        );
+        thread::sleep(reacquire_wait + Duration::from_millis(10));
         agent.test_tick(); // present again: click again
 
         assert_eq!(pass.load(Ordering::SeqCst), 3);
@@ -807,6 +1005,46 @@ mod tests {
         let wait = agent.test_tick();
         assert!(actions.lock().unwrap().is_empty());
         assert!(wait >= MIN_IDLE, "asked to wait {wait:?}");
+    }
+
+    #[test]
+    fn slow_ocr_never_delays_a_ready_pixel_action() {
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let detect_order = order.clone();
+        let action_order = order.clone();
+        let agent = VisionAgent::new(
+            Box::new(move |guards| {
+                let kind = if guards[0].method == "ocr" {
+                    "slow"
+                } else {
+                    "fast"
+                };
+                detect_order.lock().unwrap().push(format!("detect:{kind}"));
+                if kind == "fast" {
+                    HashMap::from([("fast".to_string(), vec![detection(5, 6)])])
+                } else {
+                    HashMap::new()
+                }
+            }),
+            Box::new(move |_| {
+                action_order.lock().unwrap().push("act:fast".to_string());
+                Ok(())
+            }),
+            Box::new(|_, _| {}),
+            Box::new(|_, _| Ok(())),
+        );
+        let mut fast = base_trigger("fast");
+        fast.method = "template".into();
+        let mut slow = base_trigger("slow");
+        slow.method = "ocr".into();
+        agent.test_prime(vec![slow, fast]);
+
+        agent.test_tick();
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["detect:fast", "act:fast", "detect:slow"]
+        );
     }
 
     #[test]

@@ -388,6 +388,9 @@ pub fn match_lines(lines: &[Vec<Word>], needle: &str, origin: (i64, i64)) -> Vec
             // when characters had to be forgiven.
             confidence: 1.0 - wrong as f64 / target.chars().count().max(1) as f64,
             roi_offset: [ox, oy],
+            scale_x: 1.0,
+            scale_y: 1.0,
+            observation: None,
         });
     }
     out

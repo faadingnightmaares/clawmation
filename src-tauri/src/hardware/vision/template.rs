@@ -525,6 +525,9 @@ impl Matcher {
                     h: full_th,
                     confidence: f64::from(score),
                     roi_offset: [ox, oy],
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    observation: None,
                 };
                 nominate(&mut shortlist, candidate.clone());
                 scale_candidates.push(candidate);
@@ -731,6 +734,9 @@ fn confirm_at_size(
                 h: th,
                 confidence: f64::from(score),
                 roi_offset: [ox, oy],
+                scale_x: 1.0,
+                scale_y: 1.0,
+                observation: None,
             };
             refine_near_native(
                 proc, base, mask_base, &cand, ox, oy, label, threshold, factor,
@@ -813,6 +819,9 @@ fn refine(
         h: th,
         confidence: f64::from(max_val),
         roi_offset: [ox, oy],
+        scale_x: 1.0,
+        scale_y: 1.0,
+        observation: None,
     })
 }
 
@@ -908,6 +917,9 @@ fn match_corr(
                 h: th,
                 confidence: f64::from(v),
                 roi_offset: [ox, oy],
+                scale_x: 1.0,
+                scale_y: 1.0,
+                observation: None,
             })
             .collect(),
     )
@@ -1050,6 +1062,9 @@ mod tests {
             h: 20,
             confidence: c,
             roi_offset: [0, 0],
+            scale_x: 1.0,
+            scale_y: 1.0,
+            observation: None,
         };
         // Three positions off the same peak, plus a genuinely separate copy.
         let kept = suppress_overlaps(vec![
