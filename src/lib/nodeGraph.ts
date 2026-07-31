@@ -1,54 +1,78 @@
 import type { Edge, Node } from "@xyflow/react";
 
 import type { Chain, GraphEdge, GraphNode, GraphNodeType, NodeGraph, Step } from "@/api";
+import { imageCandidates } from "@/lib/visionImages";
 
 export interface MacroNodeData extends Record<string, unknown> {
   graphNode: GraphNode;
   invalid?: boolean;
+  outputs?: { id: string; label: string }[];
+  focused?: boolean;
 }
 
 export type MacroFlowNode = Node<MacroNodeData, "macro">;
 
 export const OUTPUTS: Record<GraphNodeType, { id: string; label: string }[]> = {
-  start: [{ id: "next", label: "Next" }],
+  start: [{ id: "next", label: "Continue" }],
   action: [
-    { id: "next", label: "If works" },
-    { id: "error", label: "If fails" },
+    { id: "next", label: "Continue" },
+    { id: "error", label: "On failure" },
   ],
   vision: [
     { id: "found", label: "Found" },
     { id: "missing", label: "Not found" },
   ],
   branch: [
-    { id: "true", label: "If works" },
-    { id: "false", label: "If fails" },
+    { id: "true", label: "Matches" },
+    { id: "false", label: "Otherwise" },
   ],
   loop: [
-    { id: "body", label: "Loop" },
-    { id: "done", label: "Done" },
+    { id: "body", label: "Do" },
+    { id: "done", label: "Then" },
   ],
   sub_macro: [
-    { id: "success", label: "If works" },
-    { id: "error", label: "If fails" },
+    { id: "success", label: "Continue" },
+    { id: "error", label: "On failure" },
   ],
   chain: [
-    { id: "success", label: "If works" },
-    { id: "error", label: "If fails" },
+    { id: "success", label: "Continue" },
+    { id: "error", label: "On failure" },
   ],
   note: [],
   stop: [],
 };
 
+export type FailureMode = "stop" | "continue" | "recovery";
+
+export function effectiveFailureMode(
+  node: GraphNode,
+  edges: GraphEdge[],
+): FailureMode {
+  const configured = node.config.failure_mode;
+  if (configured === "stop" || configured === "continue" || configured === "recovery") {
+    return configured;
+  }
+  return edges.some((edge) => edge.from === node.id && edge.output === "error")
+    ? "recovery"
+    : "stop";
+}
+
+export function visibleNodeOutputs(
+  node: GraphNode,
+  edges: GraphEdge[],
+): { id: string; label: string }[] {
+  const outputs = OUTPUTS[node.type];
+  if (!["action", "sub_macro", "chain"].includes(node.type)) return outputs;
+  return effectiveFailureMode(node, edges) === "recovery"
+    ? outputs
+    : outputs.filter((output) => output.id !== "error");
+}
+
 export const REQUIRED_OUTPUTS: Partial<Record<GraphNodeType, string[]>> = {
   start: ["next"],
   branch: ["true", "false"],
-  loop: ["body", "done"],
+  loop: ["body"],
 };
-
-export function shouldLabelOutput(type: GraphNodeType, output: string): boolean {
-  if (output === "next") return false;
-  return !(["sub_macro", "chain"].includes(type) && output === "success");
-}
 
 const blankStep = (type: string): Step => ({
   id: crypto.randomUUID().slice(0, 8),
@@ -65,6 +89,7 @@ const blankStep = (type: string): Step => ({
   hsv_low: [0, 0, 0],
   hsv_high: [179, 255, 255],
   template: "",
+  templates: [],
   region: [0, 0, 100, 100],
   min_area: 40,
   timeout: 10,
@@ -159,6 +184,7 @@ export function embedMacroInNode(
     hsv_low: [...step.hsv_low],
     hsv_high: [...step.hsv_high],
     region: [...step.region],
+    templates: [...(step.templates ?? [])],
   }));
   const repeat = Number(node.config.repeat ?? 1);
   return {
@@ -236,7 +262,10 @@ export function validateGraphClient(
     }
     if (node.type === "vision") {
       const step = node.config.step as Step | undefined;
-      if (step?.detect_mode === "template" && !step.template?.trim()) {
+      if (
+        step?.detect_mode === "template" &&
+        imageCandidates(step.template, step.templates).length === 0
+      ) {
         warnings.push(`Vision “${node.label || node.id}” is waiting for an image.`);
       }
     }
@@ -257,7 +286,6 @@ export function validateGraphClient(
 }
 
 export function graphToFlow(graph: NodeGraph): { nodes: MacroFlowNode[]; edges: Edge[] } {
-  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
   return {
     nodes: graph.nodes.map((node) => ({
       id: node.id,
@@ -266,21 +294,14 @@ export function graphToFlow(graph: NodeGraph): { nodes: MacroFlowNode[]; edges: 
       data: { graphNode: node },
     })),
     edges: graph.edges.map((edge) => {
-      const source = nodesById.get(edge.from);
-      const outputLabel = source
-        ? OUTPUTS[source.type].find((output) => output.id === edge.output)?.label
-        : undefined;
       return {
         id: edge.id,
         source: edge.from,
         sourceHandle: edge.output,
         target: edge.to,
         targetHandle: "in",
-        type: "bezier",
-        label:
-          source && shouldLabelOutput(source.type, edge.output)
-            ? outputLabel || edge.output
-            : undefined,
+        type: "pro",
+        data: { waypoints: edge.waypoints ?? [] },
         labelStyle: {
           fill: "var(--muted-foreground)",
           fontSize: 10,
@@ -308,6 +329,11 @@ export function flowToGraph(
     from: edge.source,
     output: edge.sourceHandle || "next",
     to: edge.target,
+    ...(
+      Array.isArray(edge.data?.waypoints) && edge.data.waypoints.length > 0
+        ? { waypoints: edge.data.waypoints as GraphEdge["waypoints"] }
+        : {}
+    ),
   }));
   return {
     version: 1,

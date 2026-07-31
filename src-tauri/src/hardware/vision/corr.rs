@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
+use super::gpu_corr;
 use super::image::Gray;
 
 /// The pool every correlation runs on.
@@ -52,6 +53,10 @@ pub struct Searched {
     /// unmasked window sum costs four lookups.
     sum: Vec<i64>,
     sum2: Vec<i64>,
+    /// Created only for correlation jobs large enough to amortise dispatch and
+    /// readback. `None` permanently records that this machine has no usable
+    /// adapter, leaving the existing CPU path untouched.
+    gpu: OnceLock<Option<gpu_corr::Search>>,
 }
 
 /// One `matchTemplate` result plane. `f32` deliberately: OpenCV's is `CV_32F`,
@@ -146,6 +151,7 @@ impl Searched {
             sum2: integral(&px2, w, h),
             px,
             px2,
+            gpu: OnceLock::new(),
         }
     }
 
@@ -185,7 +191,7 @@ impl Searched {
         let t_norm = t_var.sqrt();
         let t_mean = t_sum / area;
 
-        let raw = correlate(&self.px, self.w, self.h, &ker, tw, th);
+        let raw = self.correlate(&ker, tw, th);
         let mut data = vec![0f32; ow * oh];
         for y in 0..oh {
             for x in 0..ow {
@@ -231,11 +237,7 @@ impl Searched {
         let t_norm = t_var.sqrt();
         let t_mean = tm_sum / m_count;
 
-        let raw = correlate(&self.px, self.w, self.h, &mt, tw, th);
-        // The mask replaces the integral images: window sums have to be taken
-        // over the selected pixels only, which is a correlation of its own.
-        let wnd_sum = correlate(&self.px, self.w, self.h, &m, tw, th);
-        let wnd_sum2 = correlate(&self.px2, self.w, self.h, &m, tw, th);
+        let (raw, wnd_sum, wnd_sum2) = self.correlate_masked(&mt, &m, tw, th);
 
         let mut data = vec![0f32; ow * oh];
         for i in 0..ow * oh {
@@ -246,6 +248,56 @@ impl Searched {
             data[i] = normalise(num, diff2, wnd2, t_norm);
         }
         Some(Scores { w: ow, h: oh, data })
+    }
+
+    fn correlate(&self, ker: &[i32], kw: usize, kh: usize) -> Vec<i64> {
+        if gpu_corr::worth_accelerating(self.w, self.h, kw, kh) {
+            let search = self
+                .gpu
+                .get_or_init(|| gpu_corr::prepare(&self.px, &self.px2, self.w, self.h));
+            if let Some(raw) = search
+                .as_ref()
+                .and_then(|search| gpu_corr::correlate(search, ker, kw, kh))
+            {
+                return raw;
+            }
+        }
+
+        correlate_cpu(&self.px, self.w, self.h, ker, kw, kh)
+    }
+
+    fn correlate_masked(
+        &self,
+        template_masked: &[i32],
+        mask: &[i32],
+        kw: usize,
+        kh: usize,
+    ) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+        if gpu_corr::worth_accelerating(self.w, self.h, kw, kh) {
+            let search = self
+                .gpu
+                .get_or_init(|| gpu_corr::prepare(&self.px, &self.px2, self.w, self.h));
+            if let Some(raw) = search.as_ref().and_then(|search| {
+                gpu_corr::correlate_masked(search, template_masked, mask, kw, kh)
+            }) {
+                return raw;
+            }
+        }
+
+        (
+            correlate_cpu(&self.px, self.w, self.h, template_masked, kw, kh),
+            correlate_cpu(&self.px, self.w, self.h, mask, kw, kh),
+            correlate_cpu(&self.px2, self.w, self.h, mask, kw, kh),
+        )
+    }
+
+    #[cfg(test)]
+    fn correlate_gpu(&self, ker: &[i32], kw: usize, kh: usize) -> Option<Vec<i64>> {
+        let search = self
+            .gpu
+            .get_or_init(|| gpu_corr::prepare(&self.px, &self.px2, self.w, self.h))
+            .as_ref()?;
+        gpu_corr::correlate(search, ker, kw, kh)
     }
 }
 
@@ -279,7 +331,7 @@ fn normalise(num: f64, diff2: f64, wnd2: f64, t_norm: f64) -> f32 {
 /// Row products are accumulated in `i32`, which is exact as long as no single
 /// product exceeds `255²`, true for every plane this module feeds it: pixels
 /// against template bytes, and squared pixels against a 0/1 mask.
-fn correlate(img: &[i32], iw: usize, ih: usize, ker: &[i32], kw: usize, kh: usize) -> Vec<i64> {
+fn correlate_cpu(img: &[i32], iw: usize, ih: usize, ker: &[i32], kw: usize, kh: usize) -> Vec<i64> {
     debug_assert!(kw <= iw && kh <= ih);
     let (ow, oh) = (iw - kw + 1, ih - kh + 1);
     let mut out = vec![0i64; ow * oh];
@@ -467,5 +519,89 @@ mod tests {
                 "box {x},{y} {bw}x{bh}"
             );
         }
+    }
+
+    #[test]
+    fn gpu_correlation_is_bit_exact_when_an_adapter_is_available() {
+        if !gpu_corr::available() {
+            return;
+        }
+
+        let w = 96;
+        let h = 80;
+        let pixels: Vec<u8> = (0..w * h)
+            .map(|i| ((i * 37 + (i / w) * 19) % 256) as u8)
+            .collect();
+        let searched = Searched::new(&gray(w, h, &pixels));
+        let kw = 17;
+        let kh = 13;
+        let kernel: Vec<i32> = (0..kw * kh)
+            .map(|i| ((i * 23 + (i / kw) * 11) % 256) as i32)
+            .collect();
+
+        let expected_pixels = correlate_cpu(&searched.px, w, h, &kernel, kw, kh);
+        let actual_pixels = searched
+            .correlate_gpu(&kernel, kw, kh)
+            .expect("a discovered GPU must execute the exact correlation shader");
+        assert_eq!(actual_pixels, expected_pixels);
+
+        let binary_kernel: Vec<i32> = kernel
+            .iter()
+            .map(|value| i32::from(value % 3 == 0))
+            .collect();
+        let template_masked: Vec<i32> = kernel
+            .iter()
+            .zip(&binary_kernel)
+            .map(|(&value, &keep)| value * keep)
+            .collect();
+        let gpu_search = searched
+            .gpu
+            .get()
+            .and_then(Option::as_ref)
+            .expect("the GPU search was prepared above");
+        let (actual_raw, actual_sums, actual_square_sums) =
+            gpu_corr::correlate_masked(gpu_search, &template_masked, &binary_kernel, kw, kh)
+                .expect("a discovered GPU must execute fused masked correlation");
+        assert_eq!(
+            actual_raw,
+            correlate_cpu(&searched.px, w, h, &template_masked, kw, kh)
+        );
+        assert_eq!(
+            actual_sums,
+            correlate_cpu(&searched.px, w, h, &binary_kernel, kw, kh)
+        );
+        assert_eq!(
+            actual_square_sums,
+            correlate_cpu(&searched.px2, w, h, &binary_kernel, kw, kh)
+        );
+    }
+
+    #[test]
+    fn unavailable_gpu_keeps_the_existing_cpu_matcher_working() {
+        let w = 400;
+        let h = 300;
+        let mut seed = 0x6d2b_79f5u32;
+        let pixels: Vec<u8> = (0..w * h)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let image = gray(w, h, &pixels);
+        let template = image
+            .crop(173, 121, 20, 20)
+            .expect("the test template is inside the image");
+        let searched = Searched::new(&image);
+        assert!(
+            searched.gpu.set(None).is_ok(),
+            "the test fixes this search to the no-adapter state"
+        );
+
+        let scores = searched
+            .ccoeff_normed(&template, None)
+            .expect("CPU fallback produces a correlation plane");
+        let (x, y, score) = scores.best().expect("the extracted patch is found");
+        assert_eq!((x, y), (173, 121));
+        assert_eq!(score, 1.0);
     }
 }

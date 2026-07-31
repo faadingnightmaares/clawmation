@@ -9,7 +9,9 @@ use crate::engine::ai::{self, Actuate, Detect};
 use crate::models::node_graph::{GraphEdge, GraphNode, NodeGraph};
 use crate::models::step::Step;
 
-const MAX_TRANSITIONS: usize = 10_000;
+const MAX_RESULT_ROWS: usize = 512;
+const ZERO_PROGRESS_YIELD_EVERY: usize = 256;
+const MAX_ZERO_PROGRESS_TRANSITIONS: usize = 4_096;
 
 pub type RunSubMacro<'a> = dyn Fn(&str, &[Step], i64) -> Result<String, String> + Send + Sync + 'a;
 pub type RunChain<'a> = dyn Fn(&str) -> Result<String, String> + Send + Sync + 'a;
@@ -21,6 +23,16 @@ fn next<'a>(edges: &'a [GraphEdge], node: &str, output: &str) -> Option<&'a str>
         .map(|edge| edge.to.as_str())
 }
 
+fn failure_mode(graph: &NodeGraph, node: &GraphNode) -> &'static str {
+    match node.config.get("failure_mode").and_then(Value::as_str) {
+        Some("continue") => "continue",
+        Some("recovery") => "recovery",
+        Some("stop") => "stop",
+        _ if next(&graph.edges, &node.id, "error").is_some() => "recovery",
+        _ => "stop",
+    }
+}
+
 fn result_row(node: &GraphNode, ok: bool, message: impl Into<String>) -> Value {
     json!({
         "node_id": node.id,
@@ -28,6 +40,34 @@ fn result_row(node: &GraphNode, ok: bool, message: impl Into<String>) -> Value {
         "ok": ok,
         "message": message.into(),
     })
+}
+
+fn record_result(
+    results: &mut Vec<Value>,
+    nodes_run: &mut usize,
+    nodes_passed: &mut usize,
+    row: Value,
+) {
+    *nodes_run += 1;
+    if row["ok"].as_bool().unwrap_or(false) {
+        *nodes_passed += 1;
+    }
+    if results.len() == MAX_RESULT_ROWS {
+        results.remove(0);
+    }
+    results.push(row);
+}
+
+fn node_makes_progress(node: &GraphNode) -> bool {
+    match node.node_type.as_str() {
+        "action" | "vision" => {
+            let step = node.config.get("step").unwrap_or(&Value::Null);
+            step.get("type").and_then(Value::as_str) != Some("delay")
+                || step.get("delay").and_then(Value::as_f64).unwrap_or(0.0) > 0.0
+        }
+        "sub_macro" | "chain" | "stop" => true,
+        _ => false,
+    }
 }
 
 pub fn run(
@@ -38,6 +78,45 @@ pub fn run(
     run_chain: &RunChain<'_>,
     running: &AtomicBool,
 ) -> Value {
+    let verify: ai::Verify = Box::new(|_, _, _| Ok(super::vision_runtime::TargetReaction::Changed));
+    let refresh: ai::Refresh = Box::new(|_, target, _| Ok(Some(target.clone())));
+    let context = ai::ExecutionContext {
+        detect,
+        actuate,
+        refresh: &refresh,
+        verify: &verify,
+        running,
+    };
+    run_reliable(graph, &context, run_sub_macro, run_chain)
+}
+
+pub fn run_verified(
+    graph: &NodeGraph,
+    detect: &Detect,
+    actuate: &Actuate,
+    verify: &ai::Verify,
+    run_sub_macro: &RunSubMacro<'_>,
+    run_chain: &RunChain<'_>,
+    running: &AtomicBool,
+) -> Value {
+    let refresh: ai::Refresh = Box::new(|_, target, _| Ok(Some(target.clone())));
+    let context = ai::ExecutionContext {
+        detect,
+        actuate,
+        refresh: &refresh,
+        verify,
+        running,
+    };
+    run_reliable(graph, &context, run_sub_macro, run_chain)
+}
+
+pub fn run_reliable(
+    graph: &NodeGraph,
+    context: &ai::ExecutionContext<'_>,
+    run_sub_macro: &RunSubMacro<'_>,
+    run_chain: &RunChain<'_>,
+) -> Value {
+    let running = context.running;
     let report = graph.validate();
     if !report.ok {
         return json!({ "ok": false, "error": report.errors.join("; "), "results": [] });
@@ -51,25 +130,35 @@ pub fn run(
     let mut current = graph.entry.as_str();
     let mut transitions = 0_usize;
     let mut results = Vec::new();
+    let mut nodes_run = 0_usize;
+    let mut nodes_passed = 0_usize;
+    let mut zero_progress = 0_usize;
     let mut last_ok = true;
     let mut loop_counts: HashMap<&str, i64> = HashMap::new();
+    let mut active_loops: Vec<&str> = Vec::new();
 
     while running.load(Ordering::Relaxed) {
         transitions += 1;
-        if transitions > MAX_TRANSITIONS {
-            return json!({
-                "ok": false,
-                "error": "Graph exceeded the 10000 transition safety limit",
-                "transitions": transitions - 1,
-                "results": results,
-            });
-        }
 
         let Some(node) = nodes.get(current).copied() else {
             return json!({ "ok": false, "error": format!("Missing node '{current}'"), "results": results });
         };
 
         if !node.enabled {
+            zero_progress += 1;
+            if zero_progress.is_multiple_of(ZERO_PROGRESS_YIELD_EVERY) {
+                std::thread::yield_now();
+            }
+            if zero_progress >= MAX_ZERO_PROGRESS_TRANSITIONS {
+                return json!({
+                    "ok": false,
+                    "error": "Loop has a zero-progress cycle; add a wait, detection, or action",
+                    "transitions": transitions,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
+                    "results": results,
+                });
+            }
             let Some(target) = next(&graph.edges, &node.id, "next") else {
                 break;
             };
@@ -92,19 +181,24 @@ pub fn run(
                         })
                     }
                 };
-                let result = ai::execute_step(&step, detect, actuate, running);
+                let result = ai::execute_step_reliable(&step, context);
                 last_ok = result.ok;
-                results.push(json!({
-                    "node_id": node.id,
-                    "label": if node.label.is_empty() { &step.step_type } else { &node.label },
-                    "ok": result.ok,
-                    "message": result.message,
-                    "found_x": result.found_x,
-                    "found_y": result.found_y,
-                    "matched": result.matched,
-                    "confidence": result.confidence,
-                    "elapsed": result.elapsed,
-                }));
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    json!({
+                        "node_id": node.id,
+                        "label": if node.label.is_empty() { &step.step_type } else { &node.label },
+                        "ok": result.ok,
+                        "message": result.message,
+                        "found_x": result.found_x,
+                        "found_y": result.found_y,
+                        "matched": result.matched,
+                        "confidence": result.confidence,
+                        "elapsed": result.elapsed,
+                    }),
+                );
                 if node.node_type == "vision" {
                     if result.ok {
                         "found"
@@ -114,7 +208,11 @@ pub fn run(
                 } else if result.ok {
                     "next"
                 } else {
-                    "error"
+                    match failure_mode(graph, node) {
+                        "continue" => "next",
+                        "recovery" => "error",
+                        _ => "__stop_failure",
+                    }
                 }
             }
             "branch" => {
@@ -129,11 +227,12 @@ pub fn run(
                     "last_failed" => !last_ok,
                     _ => last_ok,
                 };
-                results.push(result_row(
-                    node,
-                    true,
-                    format!("condition {condition} = {passes}"),
-                ));
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    result_row(node, true, format!("condition {condition} = {passes}")),
+                );
                 if passes {
                     "true"
                 } else {
@@ -149,11 +248,27 @@ pub fn run(
                 let count = loop_counts.entry(&node.id).or_insert(0);
                 if limit == 0 || *count < limit {
                     *count += 1;
-                    results.push(result_row(node, true, format!("iteration {}", *count)));
+                    if active_loops.last().copied() != Some(node.id.as_str()) {
+                        active_loops.push(node.id.as_str());
+                    }
+                    record_result(
+                        &mut results,
+                        &mut nodes_run,
+                        &mut nodes_passed,
+                        result_row(node, true, format!("iteration {}", *count)),
+                    );
                     "body"
                 } else {
                     loop_counts.remove(node.id.as_str());
-                    results.push(result_row(node, true, "loop complete"));
+                    if active_loops.last().copied() == Some(node.id.as_str()) {
+                        active_loops.pop();
+                    }
+                    record_result(
+                        &mut results,
+                        &mut nodes_run,
+                        &mut nodes_passed,
+                        result_row(node, true, "loop complete"),
+                    );
                     "done"
                 }
             }
@@ -177,13 +292,27 @@ pub fn run(
                 match run_sub_macro(name, &embedded_steps, repeat) {
                     Ok(message) => {
                         last_ok = true;
-                        results.push(result_row(node, true, message));
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, true, message),
+                        );
                         "success"
                     }
                     Err(message) => {
                         last_ok = false;
-                        results.push(result_row(node, false, message));
-                        "error"
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, false, message),
+                        );
+                        match failure_mode(graph, node) {
+                            "continue" => "success",
+                            "recovery" => "error",
+                            _ => "__stop_failure",
+                        }
                     }
                 }
             }
@@ -196,18 +325,37 @@ pub fn run(
                 match run_chain(chain_id) {
                     Ok(message) => {
                         last_ok = true;
-                        results.push(result_row(node, true, message));
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, true, message),
+                        );
                         "success"
                     }
                     Err(message) => {
                         last_ok = false;
-                        results.push(result_row(node, false, message));
-                        "error"
+                        record_result(
+                            &mut results,
+                            &mut nodes_run,
+                            &mut nodes_passed,
+                            result_row(node, false, message),
+                        );
+                        match failure_mode(graph, node) {
+                            "continue" => "success",
+                            "recovery" => "error",
+                            _ => "__stop_failure",
+                        }
                     }
                 }
             }
             "note" => {
-                results.push(result_row(node, true, "note"));
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    result_row(node, true, "note"),
+                );
                 "next"
             }
             "stop" => {
@@ -216,20 +364,17 @@ pub fn run(
                     .get("success")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                results.push(result_row(
-                    node,
-                    success,
-                    if success { "finished" } else { "stopped" },
-                ));
-                let passed = results
-                    .iter()
-                    .filter(|result| result["ok"] == json!(true))
-                    .count();
+                record_result(
+                    &mut results,
+                    &mut nodes_run,
+                    &mut nodes_passed,
+                    result_row(node, success, if success { "finished" } else { "stopped" }),
+                );
                 return json!({
                     "ok": success,
                     "transitions": transitions,
-                    "nodes_run": results.len(),
-                    "nodes_passed": passed,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
                     "results": results,
                 });
             }
@@ -242,31 +387,65 @@ pub fn run(
             }
         };
 
+        if node_makes_progress(node) {
+            zero_progress = 0;
+        } else {
+            zero_progress += 1;
+            if zero_progress.is_multiple_of(ZERO_PROGRESS_YIELD_EVERY) {
+                std::thread::yield_now();
+            }
+            if zero_progress >= MAX_ZERO_PROGRESS_TRANSITIONS {
+                return json!({
+                    "ok": false,
+                    "error": "Loop has a zero-progress cycle; add a wait, detection, or action",
+                    "transitions": transitions,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
+                    "results": results,
+                });
+            }
+        }
+
         if !running.load(Ordering::SeqCst) {
             return json!({
                 "ok": false,
                 "cancelled": true,
                 "error": "Stopped",
                 "transitions": transitions,
-                "nodes_run": results.len(),
+                "nodes_run": nodes_run,
+                "nodes_passed": nodes_passed,
+                "results": results,
+            });
+        }
+
+        if output == "__stop_failure" {
+            return json!({
+                "ok": false,
+                "error": format!("Node '{}' failed and stopped the Loop", node.id),
+                "failed_node": node.id,
+                "transitions": transitions,
+                "nodes_run": nodes_run,
+                "nodes_passed": nodes_passed,
                 "results": results,
             });
         }
 
         match next(&graph.edges, &node.id, output) {
             Some(target) => current = target,
+            None if active_loops.last().is_some() => {
+                current = active_loops
+                    .last()
+                    .copied()
+                    .expect("active Loop checked above");
+            }
             None => {
                 let failed = matches!(output, "error" | "missing");
-                let passed = results
-                    .iter()
-                    .filter(|result| result["ok"] == json!(true))
-                    .count();
                 return json!({
                     "ok": !failed,
                     "error": if failed { format!("Node '{}' has no '{}' path", node.id, output) } else { String::new() },
                     "transitions": transitions,
-                    "nodes_run": results.len(),
-                    "nodes_passed": passed,
+                    "nodes_run": nodes_run,
+                    "nodes_passed": nodes_passed,
                     "results": results,
                 });
             }
@@ -278,7 +457,8 @@ pub fn run(
         "cancelled": true,
         "error": "Stopped",
         "transitions": transitions,
-        "nodes_run": results.len(),
+        "nodes_run": nodes_run,
+        "nodes_passed": nodes_passed,
         "results": results,
     })
 }
@@ -308,6 +488,7 @@ mod tests {
             from: from.into(),
             output: output.into(),
             to: to.into(),
+            ..Default::default()
         }
     }
 
@@ -319,6 +500,7 @@ mod tests {
                         x: 7,
                         y: 8,
                         confidence: 0.9,
+                        observation: None,
                     }],
                     "found".into(),
                 )
@@ -328,7 +510,10 @@ mod tests {
         });
         let actions = Arc::new(Mutex::new(Vec::new()));
         let sink = actions.clone();
-        let actuate: Actuate = Box::new(move |action| sink.lock().unwrap().push(action));
+        let actuate: Actuate = Box::new(move |action| {
+            sink.lock().unwrap().push(action);
+            Ok(())
+        });
         (detect, actuate, actions)
     }
 
@@ -366,6 +551,119 @@ mod tests {
     }
 
     #[test]
+    fn failed_action_stops_without_a_recovery_path_by_default() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "click",
+                    "action",
+                    json!({"step":{"type":"click","x":4,"y":5}}),
+                ),
+                node("stop", "stop", json!({"success":true})),
+            ],
+            edges: vec![
+                edge("start", "next", "click"),
+                edge("click", "next", "stop"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(false);
+        let actuate: Actuate = Box::new(|_| Err("input rejected".into()));
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["nodes_run"], 1);
+        assert!(summary["error"].as_str().unwrap().contains("stopped"));
+    }
+
+    #[test]
+    fn failed_action_can_continue_on_its_primary_path() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "click",
+                    "action",
+                    json!({
+                        "failure_mode":"continue",
+                        "step":{"type":"click","x":4,"y":5}
+                    }),
+                ),
+                node("stop", "stop", json!({"success":true})),
+            ],
+            edges: vec![
+                edge("start", "next", "click"),
+                edge("click", "next", "stop"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(false);
+        let actuate: Actuate = Box::new(|_| Err("input rejected".into()));
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["results"][0]["ok"], false);
+        assert_eq!(summary["results"][1]["node_id"], "stop");
+    }
+
+    #[test]
+    fn an_existing_error_edge_keeps_legacy_recovery_behavior() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node(
+                    "click",
+                    "action",
+                    json!({"step":{"type":"click","x":4,"y":5}}),
+                ),
+                node("recovered", "stop", json!({"success":true})),
+            ],
+            edges: vec![
+                edge("start", "next", "click"),
+                edge("click", "error", "recovered"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(false);
+        let actuate: Actuate = Box::new(|_| Err("input rejected".into()));
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["results"][1]["node_id"], "recovered");
+    }
+
+    #[test]
     fn missing_vision_uses_missing_branch() {
         let graph = NodeGraph {
             entry: "start".into(),
@@ -393,6 +691,43 @@ mod tests {
             &running,
         );
         assert_eq!(summary["ok"], false);
+        assert_eq!(
+            summary["results"].as_array().unwrap().last().unwrap()["node_id"],
+            "bad"
+        );
+    }
+
+    #[test]
+    fn rejected_vision_action_uses_missing_branch_instead_of_claiming_success() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("vision", "vision", json!({"step":{"type":"find_click"}})),
+                node("good", "stop", json!({"success":true})),
+                node("bad", "stop", json!({"success":false})),
+            ],
+            edges: vec![
+                edge("start", "next", "vision"),
+                edge("vision", "found", "good"),
+                edge("vision", "missing", "bad"),
+            ],
+            ..Default::default()
+        };
+        let (detect, _, _) = seams(true);
+        let actuate: Actuate = Box::new(|_| Err("Windows rejected input".into()));
+        let running = AtomicBool::new(true);
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["results"][0]["ok"], false);
         assert_eq!(
             summary["results"].as_array().unwrap().last().unwrap()["node_id"],
             "bad"
@@ -429,6 +764,147 @@ mod tests {
         );
         assert_eq!(summary["ok"], true);
         assert_eq!(actions.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn forever_loop_without_a_return_edge_keeps_running_until_cancelled() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":0})),
+                node("key", "action", json!({"step":{"type":"key","key":"x"}})),
+            ],
+            edges: vec![edge("start", "next", "loop"), edge("loop", "body", "key")],
+            ..Default::default()
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let stop_flag = running.clone();
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let sink = actions.clone();
+        let actuate: Actuate = Box::new(move |action| {
+            let mut recorded = sink.lock().unwrap();
+            recorded.push(action);
+            if recorded.len() == 10_005 {
+                stop_flag.store(false, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let detect: Detect = Box::new(|_| (vec![], "unused".into()));
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            running.as_ref(),
+        );
+
+        assert_eq!(summary["cancelled"], true);
+        assert_eq!(actions.lock().unwrap().len(), 10_005);
+        assert!(summary["nodes_run"].as_u64().unwrap() > 10_000);
+        assert!(summary["results"].as_array().unwrap().len() <= MAX_RESULT_ROWS);
+    }
+
+    #[test]
+    fn zero_progress_forever_cycle_is_rejected_without_hanging() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":0})),
+            ],
+            edges: vec![edge("start", "next", "loop"), edge("loop", "body", "loop")],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], false);
+        assert!(summary["error"]
+            .as_str()
+            .unwrap()
+            .contains("zero-progress cycle"));
+    }
+
+    #[test]
+    fn repeat_retries_a_missing_vision_result_without_a_return_edge() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":3})),
+                node(
+                    "vision",
+                    "vision",
+                    json!({"step":{"type":"wait_for","timeout":0.0}}),
+                ),
+            ],
+            edges: vec![
+                edge("start", "next", "loop"),
+                edge("loop", "body", "vision"),
+            ],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(
+            summary["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|result| result["node_id"] == "vision")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn loop_without_done_edge_finishes_successfully_after_its_count() {
+        let graph = NodeGraph {
+            entry: "start".into(),
+            nodes: vec![
+                node("start", "start", json!({})),
+                node("loop", "loop", json!({"count":3})),
+            ],
+            edges: vec![edge("start", "next", "loop"), edge("loop", "body", "loop")],
+            ..Default::default()
+        };
+        let (detect, actuate, _) = seams(false);
+        let running = AtomicBool::new(true);
+
+        let summary = run(
+            &graph,
+            &detect,
+            &actuate,
+            &|_, _, _| Ok("done".into()),
+            &|_| Ok("done".into()),
+            &running,
+        );
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["nodes_run"], 4);
     }
 
     #[test]

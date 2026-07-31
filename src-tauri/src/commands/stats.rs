@@ -5,9 +5,14 @@
 //! the macro-file count, the chain count, the guard total across all macros
 //! ([`crate::commands::guards::count_all_guards`]), and the schedule count.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use serde_json::{json, Value};
 use tauri::State;
 
+use crate::engine::stats::PlayStats;
+use crate::models::stats::HistoryEntry;
 use crate::paths;
 use crate::state::AppState;
 
@@ -41,16 +46,59 @@ pub fn get_stats_summary(state: State<AppState>) -> Value {
 
 #[tauri::command(async)]
 pub fn get_run_history(state: State<AppState>, limit: Option<usize>) -> Value {
-    json!(state.core.play_stats.history(limit.unwrap_or(30)))
+    json!(run_history_in(
+        &state.core.play_stats,
+        &paths::macros_dir(),
+        limit.unwrap_or(30),
+    ))
 }
 
 /// `len(list(MACROS_DIR.glob("*.json")))`: number of macro files on disk.
 fn count_macro_files() -> usize {
-    match std::fs::read_dir(paths::macros_dir()) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
-            .count(),
-        Err(_) => 0,
+    macro_names_in(&paths::macros_dir()).len()
+}
+
+fn macro_names_in(macros_dir: &Path) -> HashSet<String> {
+    std::fs::read_dir(macros_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("json"))
+                .then(|| path.file_stem()?.to_str().map(str::to_string))
+                .flatten()
+        })
+        .collect()
+}
+
+fn run_history_in(stats: &PlayStats, macros_dir: &Path, limit: usize) -> Vec<HistoryEntry> {
+    let existing = macro_names_in(macros_dir);
+    stats
+        .history(usize::MAX)
+        .into_iter()
+        .filter(|entry| existing.contains(&entry.name))
+        .take(limit)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::stats::PlayStats;
+    use crate::test_support::temp_dir;
+
+    #[test]
+    fn run_history_excludes_deleted_macro_files_before_applying_limit() {
+        let macros = temp_dir("visible_run_history");
+        let stats = PlayStats::new(macros.join("stats.json"));
+        stats.record("kept");
+        stats.record("deleted");
+        std::fs::write(macros.join("kept.json"), "{}").expect("macro fixture");
+
+        let history = run_history_in(&stats, &macros, 1);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].name, "kept");
     }
 }

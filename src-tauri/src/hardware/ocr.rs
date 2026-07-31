@@ -78,7 +78,11 @@ impl From<windows::core::Error> for OcrError {
 fn engine() -> Result<&'static Mutex<WinOcrEngine>, OcrError> {
     static ENGINE: OnceLock<Option<Mutex<WinOcrEngine>>> = OnceLock::new();
     ENGINE
-        .get_or_init(|| WinOcrEngine::TryCreateFromUserProfileLanguages().ok().map(Mutex::new))
+        .get_or_init(|| {
+            WinOcrEngine::TryCreateFromUserProfileLanguages()
+                .ok()
+                .map(Mutex::new)
+        })
         .as_ref()
         .ok_or(OcrError::Unavailable)
 }
@@ -172,8 +176,12 @@ pub fn read_lines(frame: &Frame) -> Result<Vec<Vec<Word>>, OcrError> {
 
     let bgra = bgr_to_bgra(bgr);
     let buffer = CryptographicBuffer::CreateFromByteArray(&bgra)?;
-    let bitmap =
-        SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, w as i32, h as i32)?;
+    let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
+        &buffer,
+        BitmapPixelFormat::Bgra8,
+        w as i32,
+        h as i32,
+    )?;
 
     let result = {
         let engine = engine()?.lock().unwrap();
@@ -205,7 +213,10 @@ pub fn read_lines(frame: &Frame) -> Result<Vec<Vec<Word>>, OcrError> {
 /// runs of whitespace collapsed to one space, ends trimmed. Without this a guard
 /// for "play again" misses a line the engine read as "Play  Again".
 fn normalize(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// How many character errors a needle of `len` characters may absorb.
@@ -279,7 +290,12 @@ fn find_fuzzy(hay: &str, needle: &str) -> Option<(usize, usize, usize)> {
 
 /// Which words of a line are covered by the match at `[start, end)` in the
 /// line's normalized text, given each word's start offset in that text.
-fn covered<'a>(words: &'a [Word], offsets: &[(usize, usize)], start: usize, end: usize) -> Vec<&'a Word> {
+fn covered<'a>(
+    words: &'a [Word],
+    offsets: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> Vec<&'a Word> {
     words
         .iter()
         .zip(offsets)
@@ -305,7 +321,11 @@ fn union(words: &[&Word]) -> (f64, f64, f64, f64) {
 /// phrase spanning several words still matches, and tolerates a few misread
 /// characters (see [`find_fuzzy`]). An empty `needle` returns every line,
 /// mirroring `ocr_find`'s `if target and`.
-pub fn find_text(frame: &Frame, needle: &str, origin: (i64, i64)) -> Result<Vec<Detection>, OcrError> {
+pub fn find_text(
+    frame: &Frame,
+    needle: &str,
+    origin: (i64, i64),
+) -> Result<Vec<Detection>, OcrError> {
     Ok(match_lines(&read_lines(frame)?, needle, origin))
 }
 
@@ -354,7 +374,11 @@ pub fn match_lines(lines: &[Vec<Word>], needle: &str, origin: (i64, i64)) -> Vec
 
         let (x, y, w, h) = union(&hits);
         out.push(Detection {
-            label: hits.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+            label: hits
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
             x: ox + (x + w / 2.0).round() as i64,
             y: oy + (y + h / 2.0).round() as i64,
             w: (w.round() as i64).max(1),
@@ -364,6 +388,9 @@ pub fn match_lines(lines: &[Vec<Word>], needle: &str, origin: (i64, i64)) -> Vec
             // when characters had to be forgiven.
             confidence: 1.0 - wrong as f64 / target.chars().count().max(1) as f64,
             roi_offset: [ox, oy],
+            scale_x: 1.0,
+            scale_y: 1.0,
+            observation: None,
         });
     }
     out
@@ -385,7 +412,11 @@ mod tests {
     use super::*;
 
     fn frame(width: u32, height: u32) -> Frame {
-        Frame { bgr: vec![0u8; (width * height * 3) as usize], width, height }
+        Frame {
+            bgr: vec![0u8; (width * height * 3) as usize],
+            width,
+            height,
+        }
     }
 
     #[test]
@@ -437,9 +468,27 @@ mod tests {
     #[test]
     fn covered_picks_only_overlapping_words() {
         let words = vec![
-            Word { text: "play".into(), x: 0.0, y: 0.0, w: 10.0, h: 4.0 },
-            Word { text: "again".into(), x: 12.0, y: 0.0, w: 12.0, h: 4.0 },
-            Word { text: "now".into(), x: 26.0, y: 0.0, w: 8.0, h: 4.0 },
+            Word {
+                text: "play".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 4.0,
+            },
+            Word {
+                text: "again".into(),
+                x: 12.0,
+                y: 0.0,
+                w: 12.0,
+                h: 4.0,
+            },
+            Word {
+                text: "now".into(),
+                x: 26.0,
+                y: 0.0,
+                w: 8.0,
+                h: 4.0,
+            },
         ];
         // "play again now": offsets of each word in the joined text.
         let offsets = vec![(0, 4), (5, 10), (11, 14)];
@@ -451,7 +500,10 @@ mod tests {
 
     #[test]
     fn fuzzy_match_prefers_the_exact_hit() {
-        assert_eq!(find_fuzzy("press play again now", "play again"), Some((6, 16, 0)));
+        assert_eq!(
+            find_fuzzy("press play again now", "play again"),
+            Some((6, 16, 0))
+        );
         assert_eq!(find_fuzzy("reconnect", "reconnect"), Some((0, 9, 0)));
     }
 
@@ -486,8 +538,20 @@ mod tests {
 
     #[test]
     fn union_spans_all_words() {
-        let a = Word { text: "a".into(), x: 4.0, y: 2.0, w: 6.0, h: 4.0 };
-        let b = Word { text: "b".into(), x: 12.0, y: 3.0, w: 5.0, h: 6.0 };
+        let a = Word {
+            text: "a".into(),
+            x: 4.0,
+            y: 2.0,
+            w: 6.0,
+            h: 4.0,
+        };
+        let b = Word {
+            text: "b".into(),
+            x: 12.0,
+            y: 3.0,
+            w: 5.0,
+            h: 6.0,
+        };
         assert_eq!(union(&[&a, &b]), (4.0, 2.0, 13.0, 7.0));
     }
 
@@ -512,8 +576,16 @@ mod tests {
         let mut cap = ScreenCapture::new("dxcam", None);
         let frame = cap.grab().expect("screen grab failed");
         let words = read_words(&frame).expect("OCR failed");
-        println!("read {} words from {}x{}", words.len(), frame.width, frame.height);
-        println!("sample: {:?}", words.iter().take(25).map(|w| &w.text).collect::<Vec<_>>());
+        println!(
+            "read {} words from {}x{}",
+            words.len(),
+            frame.width,
+            frame.height
+        );
+        println!(
+            "sample: {:?}",
+            words.iter().take(25).map(|w| &w.text).collect::<Vec<_>>()
+        );
         assert!(!words.is_empty(), "OCR read nothing off a full desktop");
     }
 }

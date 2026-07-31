@@ -37,6 +37,9 @@ use crate::models::macro_def::Macro;
 use crate::paths;
 use crate::state::AppState;
 
+const CLAWMATION_FILTER: &str = "Clawmation (.clawmation)";
+const CLAWBUNDLE_FILTER: &str = "Clawbundle (.clawbundle)";
+
 /// `name[:-5] if name.endswith(".json") else name`: the stem Python keys files by.
 fn strip_json(name: &str) -> &str {
     name.strip_suffix(".json").unwrap_or(name)
@@ -51,10 +54,20 @@ fn picked(result: Option<FilePath>) -> Option<PathBuf> {
 /// Import files delivered by the OS file association. Unknown command-line
 /// arguments are ignored, and relative paths are resolved against the launching
 /// process's working directory.
+pub(crate) enum AssociatedImportKind {
+    Macro,
+    Loop,
+}
+
+pub(crate) struct AssociatedImport {
+    pub name: String,
+    pub kind: AssociatedImportKind,
+}
+
 pub(crate) fn import_associated_arguments(
     arguments: &[String],
     cwd: Option<&Path>,
-) -> Vec<(PathBuf, Result<String, String>)> {
+) -> Vec<(PathBuf, Result<AssociatedImport, String>)> {
     arguments
         .iter()
         .filter_map(|argument| {
@@ -72,21 +85,48 @@ pub(crate) fn import_associated_arguments(
                 cwd.unwrap_or_else(|| Path::new(".")).join(path)
             };
             let result = match extension.as_str() {
-                "clawmation" => archive::read_macro(&path, &paths::macros_dir()),
-                "clawbundle" => archive::read_bundle(
+                "clawmation" => {
+                    archive::read_macro(&path, &paths::macros_dir()).map(|name| AssociatedImport {
+                        name,
+                        kind: AssociatedImportKind::Macro,
+                    })
+                }
+                "clawbundle" => match archive::read_loop(
                     &path,
-                    &paths::macros_dir(),
+                    &paths::macros_dir().join("nodes"),
                     &paths::templates_dir(),
-                    &paths::guards_dir(),
-                )
-                .and_then(|name| {
-                    name.ok_or_else(|| {
+                ) {
+                    Ok(name) => Ok(AssociatedImport {
+                        name,
+                        kind: AssociatedImportKind::Loop,
+                    }),
+                    Err(loop_error) => archive::read_bundle(
+                        &path,
+                        &paths::macros_dir(),
+                        &paths::templates_dir(),
+                        &paths::guards_dir(),
+                    )
+                    .and_then(|name| {
+                        name.ok_or_else(|| {
+                            Box::<dyn std::error::Error>::from(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "bundle has no macro",
+                            ))
+                        })
+                    })
+                    .map(|name| AssociatedImport {
+                        name,
+                        kind: AssociatedImportKind::Macro,
+                    })
+                    .map_err(|bundle_error| {
                         Box::<dyn std::error::Error>::from(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            "bundle has no macro",
+                            format!(
+                                "not a valid Loop ({loop_error}) or macro bundle ({bundle_error})"
+                            ),
                         ))
-                    })
-                }),
+                    }),
+                },
                 _ => unreachable!(),
             }
             .map_err(|error| error.to_string());
@@ -179,7 +219,7 @@ pub fn export_macro(app: AppHandle, state: State<AppState>, name: String) -> Val
             .file()
             .set_title("Export macro")
             .set_file_name(format!("{stem}.clawmation"))
-            .add_filter("Clawmation macro", &["clawmation"])
+            .add_filter(CLAWMATION_FILTER, &["clawmation"])
             .add_filter("All files", &["*"])
             .blocking_save_file(),
     ) else {
@@ -200,7 +240,7 @@ pub fn import_macro(app: AppHandle, state: State<AppState>) -> Value {
         app.dialog()
             .file()
             .set_title("Import macro")
-            .add_filter("Clawmation macro", &["clawmation"])
+            .add_filter(CLAWMATION_FILTER, &["clawmation"])
             .add_filter("Legacy JSON macro", &["json"])
             .add_filter("All files", &["*"])
             .blocking_pick_file(),
@@ -277,7 +317,7 @@ pub fn export_bundle(app: AppHandle, state: State<AppState>, name: String) -> Va
             .file()
             .set_title("Export bundle")
             .set_file_name(format!("{stem}.clawbundle"))
-            .add_filter("Clawmation bundle", &["clawbundle"])
+            .add_filter(CLAWBUNDLE_FILTER, &["clawbundle"])
             .add_filter("All files", &["*"])
             .blocking_save_file(),
     ) else {
@@ -302,7 +342,7 @@ pub fn import_bundle(app: AppHandle, state: State<AppState>) -> Value {
         app.dialog()
             .file()
             .set_title("Import bundle")
-            .add_filter("Clawmation bundle", &["clawbundle"])
+            .add_filter(CLAWBUNDLE_FILTER, &["clawbundle"])
             .add_filter("All files", &["*"])
             .blocking_pick_file(),
     ) else {
@@ -322,6 +362,66 @@ pub fn import_bundle(app: AppHandle, state: State<AppState>) -> Value {
         }
         Ok(None) => json!({ "ok": false, "error": "Not a valid bundle (no macro.json)" }),
         Err(e) => json!({ "ok": false, "error": format!("Not a valid bundle: {e}") }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn export_loop(app: AppHandle, state: State<AppState>, loop_name: String) -> Value {
+    let loop_name = loop_name.trim();
+    let source = paths::macros_dir()
+        .join("nodes")
+        .join(format!("{loop_name}.json"));
+    if !source.exists() {
+        return json!({ "ok": false, "error": "Loop not found" });
+    }
+    let Some(destination) = picked(
+        app.dialog()
+            .file()
+            .set_title("Export Loop")
+            .set_file_name(format!("{loop_name}.clawbundle"))
+            .add_filter(CLAWBUNDLE_FILTER, &["clawbundle"])
+            .add_filter("All files", &["*"])
+            .blocking_save_file(),
+    ) else {
+        return json!({ "ok": false, "error": "cancelled" });
+    };
+    match archive::write_loop(&source, &destination) {
+        Ok(()) => {
+            state.emit(
+                "ok",
+                format!("Exported Loop '{loop_name}' → {}", destination.display()),
+            );
+            json!({ "ok": true, "path": destination.to_string_lossy() })
+        }
+        Err(error) => json!({ "ok": false, "error": error.to_string() }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn import_loop(app: AppHandle, state: State<AppState>) -> Value {
+    let Some(source) = picked(
+        app.dialog()
+            .file()
+            .set_title("Import Loop")
+            .add_filter(CLAWBUNDLE_FILTER, &["clawbundle"])
+            .add_filter("All files", &["*"])
+            .blocking_pick_file(),
+    ) else {
+        return json!({ "ok": false, "error": "cancelled" });
+    };
+    match archive::read_loop(
+        &source,
+        &paths::macros_dir().join("nodes"),
+        &paths::templates_dir(),
+    ) {
+        Ok(name) => {
+            state.emit("ok", format!("Imported Loop '{name}'"));
+            json!({ "ok": true, "name": name })
+        }
+        Err(error) => json!({
+            "ok": false,
+            "error": format!("Not a valid Loop: {error}"),
+        }),
     }
 }
 
@@ -351,16 +451,17 @@ fn write_bundle(
         zip.write_all(&std::fs::read(guards_path)?)?;
         let mut templates_added: HashSet<String> = HashSet::new();
         for g in GuardFile::load(guards_path).guards {
-            if g.template_path.is_empty() {
-                continue;
-            }
-            let tp = Path::new(&g.template_path);
-            let Some(tpl_name) = tp.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if tp.exists() && templates_added.insert(tpl_name.to_string()) {
-                zip.start_file(format!("templates/{tpl_name}"), opts)?;
-                zip.write_all(&std::fs::read(tp)?)?;
+            for configured in
+                crate::models::vision_images::candidate_paths(&g.template_path, &g.template_paths)
+            {
+                let tp = Path::new(configured);
+                let Some(tpl_name) = tp.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if tp.exists() && templates_added.insert(tpl_name.to_string()) {
+                    zip.start_file(format!("templates/{tpl_name}"), opts)?;
+                    zip.write_all(&std::fs::read(tp)?)?;
+                }
             }
         }
     }
@@ -436,15 +537,34 @@ fn read_bundle(
         let mut gdata: Value = serde_json::from_str(&buf)?;
         if let Some(guards) = gdata.get_mut("guards").and_then(Value::as_array_mut) {
             for g in guards.iter_mut() {
-                let bn = g
+                let primary = g
                     .get("template_path")
                     .and_then(Value::as_str)
-                    .filter(|tp| !tp.is_empty())
-                    .and_then(|tp| Path::new(tp).file_name().and_then(|s| s.to_str()))
-                    .map(str::to_string);
-                if let Some(installed) = bn.as_deref().and_then(|bn| tpl_remap.get(bn)) {
-                    g["template_path"] = json!(installed);
-                }
+                    .unwrap_or_default();
+                let alternatives = g
+                    .get("template_paths")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let installed =
+                    crate::models::vision_images::candidate_paths(primary, &alternatives)
+                        .into_iter()
+                        .filter_map(|path| {
+                            Path::new(path)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .and_then(|basename| tpl_remap.get(basename))
+                                .cloned()
+                        })
+                        .collect::<Vec<_>>();
+                g["template_path"] = json!(installed.first().cloned().unwrap_or_default());
+                g["template_paths"] = json!(installed.into_iter().skip(1).collect::<Vec<_>>());
             }
         }
         std::fs::create_dir_all(guards_dir)?;
@@ -459,6 +579,12 @@ fn read_bundle(
 mod tests {
     use super::*;
     use crate::test_support::temp_dir;
+
+    #[test]
+    fn native_filters_name_the_exact_clawmation_formats() {
+        assert_eq!(CLAWMATION_FILTER, "Clawmation (.clawmation)");
+        assert_eq!(CLAWBUNDLE_FILTER, "Clawbundle (.clawbundle)");
+    }
 
     /// A bundle written with a macro + a guard that references a template must
     /// round-trip: importing into a fresh data root installs all three, and the

@@ -57,8 +57,9 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetDC,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -71,6 +72,16 @@ pub struct Frame {
     pub bgr: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+/// One capture sample plus whether the backend copied a newly presented
+/// desktop frame. DXGI legitimately reuses its last frame when the desktop is
+/// static; exposing that fact lets Vision distinguish a new render from a
+/// later observation of unchanged pixels.
+#[derive(Clone)]
+pub struct CaptureSample {
+    pub frame: Frame,
+    pub fresh: bool,
 }
 
 impl Frame {
@@ -97,7 +108,11 @@ impl Frame {
             let start = (y0 + row) as usize * src_stride + x0 as usize * 3;
             bgr.extend_from_slice(&self.bgr[start..start + dst_stride]);
         }
-        Some(Frame { bgr, width: cw as u32, height: ch as u32 })
+        Some(Frame {
+            bgr,
+            width: cw as u32,
+            height: ch as u32,
+        })
     }
 }
 
@@ -119,7 +134,9 @@ impl FpsWindow {
     const CAP: usize = 60;
 
     fn new() -> Self {
-        Self { samples: VecDeque::new() }
+        Self {
+            samples: VecDeque::new(),
+        }
     }
 
     fn record(&mut self, dt: f64) {
@@ -255,11 +272,14 @@ impl DxgiCapture {
         }
     }
 
-    fn grab(&mut self, region: Region) -> Option<Frame> {
+    fn grab(&mut self, region: Region) -> Option<CaptureSample> {
         if self.duplication.is_none() {
             self.duplication = unsafe { self.output.DuplicateOutput(&self.device).ok() };
             if self.duplication.is_none() {
-                return self.last_frame.clone();
+                return self.last_frame.clone().map(|frame| CaptureSample {
+                    frame,
+                    fresh: false,
+                });
             }
         }
         // Clone the COM handle (a cheap AddRef) so `self` stays free to mutate.
@@ -271,11 +291,13 @@ impl DxgiCapture {
         // and keep the last good frame; dxcam's capture loop does the same. Wait
         // up to a second for that first real frame; once one is cached, never
         // block: a static screen falls straight through to the reused frame.
-        let deadline =
-            Instant::now() + Duration::from_millis(if self.last_frame.is_none() { 1000 } else { 0 });
+        let deadline = Instant::now()
+            + Duration::from_millis(if self.last_frame.is_none() { 1000 } else { 0 });
 
         loop {
-            let timeout = deadline.saturating_duration_since(Instant::now()).as_millis() as u32;
+            let timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32;
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
             match unsafe { dup.AcquireNextFrame(timeout, &mut info, &mut resource) } {
@@ -290,10 +312,16 @@ impl DxgiCapture {
                     }
                     if let Some(f) = frame {
                         self.last_frame = Some(f.clone());
-                        return Some(f);
+                        return Some(CaptureSample {
+                            frame: f,
+                            fresh: true,
+                        });
                     }
                     if self.last_frame.is_some() || Instant::now() >= deadline {
-                        return self.last_frame.clone();
+                        return self.last_frame.clone().map(|frame| CaptureSample {
+                            frame,
+                            fresh: false,
+                        });
                     }
                 }
                 Err(e) => {
@@ -302,12 +330,18 @@ impl DxgiCapture {
                         // Duplication invalidated (fullscreen/mode switch): drop
                         // it so the next grab rebuilds; reuse the cache meanwhile.
                         self.duplication = None;
-                        return self.last_frame.clone();
+                        return self.last_frame.clone().map(|frame| CaptureSample {
+                            frame,
+                            fresh: false,
+                        });
                     }
                     // WAIT_TIMEOUT (static screen) or a transient error: reuse the
                     // cache, else keep waiting for the first frame until deadline.
                     if self.last_frame.is_some() || Instant::now() >= deadline {
-                        return self.last_frame.clone();
+                        return self.last_frame.clone().map(|frame| CaptureSample {
+                            frame,
+                            fresh: false,
+                        });
                     }
                 }
             }
@@ -316,7 +350,11 @@ impl DxgiCapture {
 
     /// Copy the acquired desktop texture into a BGR `Frame`. Caller releases the
     /// duplication frame; this only touches our own staging copy.
-    unsafe fn copy_frame(&mut self, resource: Option<IDXGIResource>, region: Region) -> Option<Frame> {
+    unsafe fn copy_frame(
+        &mut self,
+        resource: Option<IDXGIResource>,
+        region: Region,
+    ) -> Option<Frame> {
         let texture: ID3D11Texture2D = resource?.cast().ok()?;
         let mut tdesc = D3D11_TEXTURE2D_DESC::default();
         texture.GetDesc(&mut tdesc);
@@ -328,14 +366,19 @@ impl DxgiCapture {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: tdesc.Format,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_STAGING,
                 BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: 0,
             };
             let mut st: Option<ID3D11Texture2D> = None;
-            self.device.CreateTexture2D(&sdesc, None, Some(&mut st)).ok()?;
+            self.device
+                .CreateTexture2D(&sdesc, None, Some(&mut st))
+                .ok()?;
             self.staging = st;
             self.staging_dims = (tdesc.Width, tdesc.Height);
         }
@@ -343,7 +386,9 @@ impl DxgiCapture {
 
         self.context.CopyResource(&staging, &texture);
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+        self.context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .ok()?;
 
         let src = std::slice::from_raw_parts(
             mapped.pData as *const u8,
@@ -362,7 +407,11 @@ impl DxgiCapture {
         );
         self.context.Unmap(&staging, 0);
 
-        Some(Frame { bgr, width: w.max(0) as u32, height: h.max(0) as u32 })
+        Some(Frame {
+            bgr,
+            width: w.max(0) as u32,
+            height: h.max(0) as u32,
+        })
     }
 }
 
@@ -382,7 +431,8 @@ fn grab_gdi(region: Region) -> Option<Frame> {
     // detections well off their configured bounds (issue #5). Held for the
     // whole grab so the metrics and the blit agree.
     let _aware = crate::hardware::dpi::PerMonitorAware::new();
-    let (screen_w, screen_h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    let (screen_w, screen_h) =
+        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     let (left, top, w, h) = region_rect(region, screen_w, screen_h);
     if w <= 0 || h <= 0 {
         return None;
@@ -430,8 +480,21 @@ fn grab_gdi(region: Region) -> Option<Frame> {
         if blt.is_err() || lines == 0 {
             return None;
         }
-        let bgr = bgra_to_bgr_crop(&buf, (w * 4) as usize, w as usize, h as usize, 0, 0, w as usize, h as usize);
-        Some(Frame { bgr, width: w as u32, height: h as u32 })
+        let bgr = bgra_to_bgr_crop(
+            &buf,
+            (w * 4) as usize,
+            w as usize,
+            h as usize,
+            0,
+            0,
+            w as usize,
+            h as usize,
+        );
+        Some(Frame {
+            bgr,
+            width: w as u32,
+            height: h as u32,
+        })
     }
 }
 
@@ -470,21 +533,40 @@ impl ScreenCapture {
     }
 
     fn with(backend: Backend, name: &'static str, region: Region) -> Self {
-        Self { backend, name, region, fps: FpsWindow::new() }
+        Self {
+            backend,
+            name,
+            region,
+            fps: FpsWindow::new(),
+        }
     }
 
-    /// Grab the current screen (or the configured region) as BGR. Returns `None`
-    /// only on a hard failure with no frame ever cached; a static screen returns
-    /// the last frame. Records an FPS sample on every call, like `_track_fps`.
-    pub fn grab(&mut self) -> Option<Frame> {
+    /// Grab the current screen together with backend freshness metadata.
+    pub fn grab_sample(&mut self) -> Option<CaptureSample> {
         let t0 = Instant::now();
-        let frame = match &mut self.backend {
+        let sample = match &mut self.backend {
             Backend::Dxgi(d) => d.grab(self.region),
-            Backend::Gdi => grab_gdi(self.region),
+            Backend::Gdi => grab_gdi(self.region).map(|frame| CaptureSample { frame, fresh: true }),
             Backend::Closed => None,
         };
         self.fps.record(t0.elapsed().as_secs_f64());
-        frame
+        sample
+    }
+
+    /// Require newly sampled pixels. DXGI may legally return its cache forever
+    /// on an unchanged desktop, so semantic post-action verification falls back
+    /// to one GDI read when it needs proof from a later screen sample.
+    pub fn grab_fresh_sample(&mut self) -> Option<CaptureSample> {
+        let sample = self.grab_sample();
+        if sample.as_ref().is_some_and(|sample| sample.fresh) {
+            return sample;
+        }
+        grab_gdi(self.region).map(|frame| CaptureSample { frame, fresh: true })
+    }
+
+    /// Compatibility read for callers that only need pixels.
+    pub fn grab(&mut self) -> Option<Frame> {
+        self.grab_sample().map(|sample| sample.frame)
     }
 
     /// Rolling-average read throughput (see the module note on the FPS metric).
@@ -515,7 +597,7 @@ mod tests {
         w.record(0.5); // 2 fps
         w.record(0.25); // 4 fps
         assert!((w.fps() - 3.0).abs() < 1e-9); // mean(2, 4)
-        // Non-positive dt is ignored (Python's `if dt > 0`).
+                                               // Non-positive dt is ignored (Python's `if dt > 0`).
         w.record(0.0);
         w.record(-1.0);
         assert_eq!(w.samples.len(), 2);
@@ -532,9 +614,15 @@ mod tests {
         // None → the whole screen.
         assert_eq!(region_rect(None, 2560, 1440), (0, 0, 2560, 1440));
         // (x1,y1,x2,y2) → (left, top, width, height).
-        assert_eq!(region_rect(Some((100, 50, 400, 250)), 2560, 1440), (100, 50, 300, 200));
+        assert_eq!(
+            region_rect(Some((100, 50, 400, 250)), 2560, 1440),
+            (100, 50, 300, 200)
+        );
         // Inverted / degenerate region floors the extent at 0.
-        assert_eq!(region_rect(Some((400, 250, 100, 50)), 2560, 1440), (400, 250, 0, 0));
+        assert_eq!(
+            region_rect(Some((400, 250, 100, 50)), 2560, 1440),
+            (400, 250, 0, 0)
+        );
     }
 
     #[test]
@@ -596,7 +684,10 @@ mod tests {
         assert_eq!(frame.height, sh as u32, "frame height");
         assert_eq!(frame.bgr.len(), (sw * sh * 3) as usize, "buffer length");
         // A real desktop is never uniformly black.
-        assert!(frame.bgr.iter().any(|&b| b != 0), "frame was entirely black");
+        assert!(
+            frame.bgr.iter().any(|&b| b != 0),
+            "frame was entirely black"
+        );
         // fps records a sample per grab.
         assert!(cap.fps() > 0.0, "fps should be populated after a grab");
     }

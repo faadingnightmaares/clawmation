@@ -15,6 +15,7 @@ pub mod picker;
 pub mod player;
 pub mod preview;
 pub mod recorder;
+pub mod reliable_input;
 pub mod shield;
 pub mod snap;
 pub mod vision;
@@ -50,6 +51,9 @@ mod tests {
     #[test]
     fn screen_size_reports_the_primary_display() {
         let (w, h) = screen_size();
-        assert!(w > 0 && h > 0, "primary monitor reports a size, got {w}x{h}");
+        assert!(
+            w > 0 && h > 0,
+            "primary monitor reports a size, got {w}x{h}"
+        );
     }
 }

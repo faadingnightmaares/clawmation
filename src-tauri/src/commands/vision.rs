@@ -16,9 +16,13 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::core::Core;
-use crate::engine::vision_agent::{Act, Detect, MacroRunner, OnEvent, VisionAction, VisionAgent};
+use crate::engine::vision_agent::{
+    Act, Detect, MacroRunner, OnEvent, Refresh, Verify, VisionAction, VisionAgent,
+};
+use crate::hardware::reliable_input::ReliableTarget;
 use crate::models::guard::Guard;
 use crate::models::macro_def::Macro;
+use crate::models::vision_images::candidate_limit_error;
 use crate::paths;
 use crate::state::AppState;
 
@@ -36,6 +40,13 @@ pub fn vision_save(state: State<AppState>, triggers: Option<Vec<Value>>) -> Valu
             return json!({ "ok": false, "error": e.to_string() });
         }
     };
+    if let Some(error) = objs
+        .iter()
+        .find_map(|guard| candidate_limit_error(&guard.template_path, &guard.template_paths))
+    {
+        state.emit("err", format!("Vision save failed: {error}"));
+        return json!({ "ok": false, "error": error });
+    }
     let count = objs.len();
     let path = paths::guards_dir().join("_vision.json");
     let bytes = serde_json::to_vec_pretty(&json!({ "triggers": objs }))
@@ -89,17 +100,111 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
     };
     let act: Act = {
         let core = core.clone();
+        let target: Arc<Mutex<Option<ReliableTarget>>> = Arc::new(Mutex::new(None));
         Box::new(move |action: VisionAction| match action {
-            VisionAction::KeyDown(key) => core.controller.key_down(&key),
-            VisionAction::KeyUp(key) => core.controller.key_up(&key),
-            VisionAction::Nudge(x, y) => {
-                core.controller.move_to(x as i32, y as i32);
-                core.controller.nudge();
+            VisionAction::FocusAt(x, y) => {
+                crate::hardware::window::focus_window_at_point(x as i32, y as i32)
             }
-            VisionAction::MoveTo(x, y) => core.controller.move_to(x as i32, y as i32),
-            VisionAction::MouseDown(button) => core.controller.mouse_down(None, &button),
-            VisionAction::MouseUp(button) => core.controller.mouse_up(None, &button),
-            VisionAction::Pause(duration) => std::thread::sleep(duration),
+            VisionAction::Click(x, y) => {
+                let previous = target
+                    .lock()
+                    .map_err(|_| "Watch target context is poisoned".to_string())?
+                    .clone();
+                match core
+                    .reliable_input
+                    .click_at_with_prior(x as i32, y as i32, previous.as_ref())
+                {
+                    Ok(established) => {
+                        *target
+                            .lock()
+                            .map_err(|_| "Watch target context is poisoned".to_string())? =
+                            Some(established);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if let Ok(mut target) = target.lock() {
+                            *target = None;
+                        }
+                        Err(error)
+                    }
+                }
+            }
+            VisionAction::KeyPressAt(x, y, key) => {
+                let previous = target
+                    .lock()
+                    .map_err(|_| "Watch target context is poisoned".to_string())?
+                    .clone();
+                match core.reliable_input.key_at_with_prior(
+                    x as i32,
+                    y as i32,
+                    &key,
+                    previous.as_ref(),
+                ) {
+                    Ok(established) => {
+                        *target
+                            .lock()
+                            .map_err(|_| "Watch target context is poisoned".to_string())? =
+                            Some(established);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if let Ok(mut target) = target.lock() {
+                            *target = None;
+                        }
+                        Err(error)
+                    }
+                }
+            }
+            VisionAction::Nudge(x, y) => {
+                let previous = target
+                    .lock()
+                    .map_err(|_| "Watch target context is poisoned".to_string())?
+                    .clone();
+                match core
+                    .reliable_input
+                    .nudge_at_with_prior(x as i32, y as i32, previous.as_ref())
+                {
+                    Ok(established) => {
+                        *target
+                            .lock()
+                            .map_err(|_| "Watch target context is poisoned".to_string())? =
+                            Some(established);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if let Ok(mut target) = target.lock() {
+                            *target = None;
+                        }
+                        Err(error)
+                    }
+                }
+            }
+            VisionAction::MoveTo(x, y) => core
+                .controller
+                .try_move_to(x as i32, y as i32)
+                .map_err(|error| error.to_string()),
+            VisionAction::MouseDown(button) => core
+                .controller
+                .try_mouse_down(None, &button)
+                .map_err(|error| error.to_string()),
+            VisionAction::MouseUp(button) => core
+                .controller
+                .try_mouse_up(None, &button)
+                .map_err(|error| error.to_string()),
+        })
+    };
+    let verify: Verify = {
+        let core = core.clone();
+        Box::new(move |trigger, detection, running| {
+            core.vision
+                .verify_guard_reaction(trigger, detection, running)
+        })
+    };
+    let refresh: Refresh = {
+        let core = core.clone();
+        Box::new(move |trigger, detection, running| {
+            core.vision
+                .refresh_guard_target(trigger, detection, running)
         })
     };
     let on_event: OnEvent = {
@@ -145,7 +250,7 @@ fn build_agent(core: &Core, log: &Arc<Mutex<Vec<(String, String)>>>) -> VisionAg
             }
         })
     };
-    VisionAgent::new(detect, act, on_event, run_macro)
+    VisionAgent::new_reliable(detect, act, refresh, verify, on_event, run_macro)
 }
 
 #[tauri::command(async)]

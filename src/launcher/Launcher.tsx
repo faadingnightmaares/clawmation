@@ -3,42 +3,44 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Loader2, Search } from "lucide-react";
 
 import {
-  listChains,
   listMacros,
+  nodeGraphList,
+  nodeGraphLoad,
+  nodeGraphRun,
   playMacro,
-  runChain,
   visionLoad,
   visionSave,
   type Guard,
   type MacroListItem,
+  type NodeLoopItem,
 } from "@/api";
 import { describeTrigger, draftFromGuard } from "@/lib/triggers";
 import { cn } from "@/lib/utils";
 
 /**
  * The macro launcher: a Raycast/PowerToys-style palette the play hotkey opens.
- * Lists every macro, every saved workflow chain, AND every Watch trigger — macros
- * first (most-recently-played on top), then chains by name, then watch triggers.
+ * Lists every macro, every saved Loop, AND every Watch trigger — macros first
+ * (most-recently-played on top), then Loops by name, then watch triggers.
  * Each macro row shows how long one run takes and its category, plus cumulative
- * time played and play count; each chain row shows how many macros it runs and
- * its repeat; each watch row shows what it looks for and whether it is on.
+ * time played and play count; each Loop row shows its node count; each watch row
+ * shows what it looks for and whether it is on.
  * Filter by typing, move with ↑/↓, Enter acts on the highlighted item — a macro
- * plays, a chain runs, a watch trigger is switched on/off — Esc, or just clicking
+ * plays, a Loop runs, a watch trigger is switched on/off — Esc, or just clicking
  * back into the game, dismisses: the window hides itself on blur, so this
  * component only handles picking.
  */
 
-/** One selectable row: a macro, a chain, or a watch trigger, normalized for the
+/** One selectable row: a macro, a Loop, or a watch trigger, normalized for the
  *  flat list. */
 type Entry = {
-  kind: "macro" | "chain" | "watch";
+  kind: "macro" | "loop" | "watch";
   /** Stable React key; also the value handed to play/run. */
   id: string;
   name: string;
-  /** Secondary line under the name (run length + category for macros, size for
-   *  chains, what-it-watches-for for watch triggers). */
+  /** Secondary line under the name (run length + category for macros, workflow
+   *  type for Loops, what-it-watches-for for watch triggers). */
   sub: string;
-  /** Right-aligned stats (time · count for macros, repeat for chains, on/off for
+  /** Right-aligned stats (time · count for macros, node count for Loops, on/off for
    *  watch triggers). */
   right: string;
   /** Watch triggers only: the full guard (to flip its `enabled`) and its current
@@ -49,7 +51,7 @@ type Entry = {
 
 export function Launcher() {
   const [macros, setMacros] = useState<MacroListItem[]>([]);
-  const [chains, setChains] = useState<{ id: string; name: string; macroCount: number; repeat: number }[]>([]);
+  const [loops, setLoops] = useState<NodeLoopItem[]>([]);
   const [watches, setWatches] = useState<Guard[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -58,22 +60,13 @@ export function Launcher() {
 
   const load = useCallback(async () => {
     try {
-      const [macroList, chainList, watchList] = await Promise.all([
+      const [macroList, loopList, watchList] = await Promise.all([
         listMacros(),
-        listChains(),
+        nodeGraphList(),
         visionLoad().catch(() => ({ ok: false, triggers: [] as Guard[] })),
       ]);
       setMacros(macroList);
-      setChains(
-        chainList
-          .filter((c): c is typeof c & { id: string; name: string } => Boolean(c.id && c.name))
-          .map((c) => ({
-            id: c.id as string,
-            name: c.name as string,
-            macroCount: c.macro_names?.length ?? 0,
-            repeat: c.repeat ?? 1,
-          })),
-      );
+      setLoops(loopList.filter((loop) => loop.valid_file));
       setWatches(watchList.ok ? (watchList.triggers ?? []) : []);
     } finally {
       setLoading(false);
@@ -82,7 +75,7 @@ export function Launcher() {
 
   // Load on mount, then refresh whenever the window regains focus — the hotkey
   // shows (focuses) the window, so the list is re-read and the query cleared on
-  // every summon. What you see is always the current macro/chain/watch set.
+  // every summon. What you see is always the current macro/Loop/watch set.
   useEffect(() => {
     void load();
     const win = getCurrentWindow();
@@ -101,7 +94,7 @@ export function Launcher() {
 
   // Case-insensitive substring filter. Macros first, most-recently-played on top
   // (never-played, `last_played` 0, fall to the bottom of the macro block), then
-  // chains alphabetically, then watch triggers alphabetically — one flat list so
+  // Loops alphabetically, then watch triggers alphabetically — one flat list so
   // the arrow keys flow straight through.
   const entries = useMemo<Entry[]>(() => {
     const q = query.trim().toLowerCase();
@@ -116,15 +109,15 @@ export function Launcher() {
         sub: [m.category, fmtDuration(m.duration)].filter(Boolean).join(" · "),
         right: `${fmtPlayed(m.played)} · ×${m.play_count}`,
       }));
-    const chainEntries: Entry[] = chains
-      .filter((c) => match(c.name))
+    const loopEntries: Entry[] = loops
+      .filter((loop) => match(loop.name))
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map((c) => ({
-        kind: "chain",
-        id: c.id,
-        name: c.name,
-        sub: `${c.macroCount} macro${c.macroCount === 1 ? "" : "s"}`,
-        right: c.repeat > 1 ? `×${c.repeat}` : "chain",
+      .map((loop) => ({
+        kind: "loop",
+        id: loop.name,
+        name: loop.name,
+        sub: "Visual workflow",
+        right: `${loop.nodes} node${loop.nodes === 1 ? "" : "s"}`,
       }));
     const watchEntries: Entry[] = watches
       .filter((g) => match(String(g.name) || "Untitled watch"))
@@ -141,8 +134,8 @@ export function Launcher() {
           enabled,
         };
       });
-    return [...macroEntries, ...chainEntries, ...watchEntries];
-  }, [macros, chains, watches, query]);
+    return [...macroEntries, ...loopEntries, ...watchEntries];
+  }, [macros, loops, watches, query]);
 
   // A filter change can leave the selection past the end; snap it back to the top.
   useEffect(() => {
@@ -151,7 +144,7 @@ export function Launcher() {
 
   // Flip a watch trigger's `enabled` and persist the whole set (the backend, like
   // the Watch view, stores the file as the unit of truth). Unlike a played macro
-  // or a run chain, this does NOT dismiss the palette — switching triggers on/off
+  // or a run Loop, this does NOT dismiss the palette — switching triggers on/off
   // is a settings-style action you do several of in a row, so the list stays open
   // and updates in place.
   const toggleWatch = useCallback(async (guard: Guard) => {
@@ -170,7 +163,10 @@ export function Launcher() {
       if (entry.kind === "macro") {
         await playMacro(entry.id);
       } else {
-        await runChain(entry.id);
+        const loaded = await nodeGraphLoad(entry.id);
+        if (!loaded.ok || !loaded.graph) return;
+        const result = await nodeGraphRun(loaded.graph);
+        if (!result.ok) return;
       }
       await getCurrentWindow().hide();
     },
@@ -205,7 +201,7 @@ export function Launcher() {
     document.getElementById(`launcher-row-${selected}`)?.scrollIntoView({ block: "nearest" });
   }, [selected]);
 
-  const isEmpty = macros.length === 0 && chains.length === 0 && watches.length === 0;
+  const isEmpty = macros.length === 0 && loops.length === 0 && watches.length === 0;
 
   return (
     <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground">
@@ -221,13 +217,13 @@ export function Launcher() {
           autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search macros, chains and watch…"
+          placeholder="Search macros, loops and watch…"
           spellCheck={false}
           className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
         />
       </div>
 
-      {/* Macro + chain + watch list. */}
+      {/* Macro + Loop + watch list. */}
       <div className="flex-1 overflow-y-auto py-1">
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
@@ -236,7 +232,7 @@ export function Launcher() {
           </div>
         ) : entries.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-            {isEmpty ? "No macros, chains or watch triggers yet." : "Nothing matches that search."}
+            {isEmpty ? "No macros, Loops or watch triggers yet." : "Nothing matches that search."}
           </div>
         ) : (
           entries.map((entry, i) => (
@@ -251,13 +247,13 @@ export function Launcher() {
                 i === selected ? "bg-muted" : "hover:bg-muted/50",
               )}
             >
-              {/* Type badge: a macro plays outright, a chain runs its macros in
+              {/* Type badge: a macro plays outright, a Loop runs its graph in
                   sequence, a watch trigger toggles on/off. Kept tiny so the name
                   still reads first. */}
               <span
                 className={cn(
                   "w-12 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wide",
-                  entry.kind === "chain"
+                  entry.kind === "loop"
                     ? "bg-accent text-accent-foreground"
                     : entry.kind === "watch"
                       ? "bg-primary/15 text-primary"

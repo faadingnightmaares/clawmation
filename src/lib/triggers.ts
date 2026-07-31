@@ -13,6 +13,7 @@
 // helpers below. triggers.test.ts round-trips the converters to guarantee it.
 
 import { type Guard } from "@/api";
+import { imageCandidates, splitImageCandidates } from "@/lib/visionImages";
 
 export type LookKind = "image" | "color" | "text";
 
@@ -34,6 +35,7 @@ export interface TriggerDraft {
   hsv_low: number[];
   hsv_high: number[];
   template_path: string;
+  template_paths: string[];
   ocr_text: string;
   threshold: number;
   region: number[];
@@ -60,6 +62,7 @@ const PERSISTED_KEYS = [
   "hsv_low",
   "hsv_high",
   "template_path",
+  "template_paths",
   "ocr_text",
   "threshold",
   "region",
@@ -211,7 +214,9 @@ export function isTriggerReady(d: TriggerDraft): boolean {
   if (look === "color") {
     return Array.isArray(d.hsv_low) && d.hsv_low.length === 3 && !isUnpickedColor(d.hsv_low, d.hsv_high);
   }
-  if (look === "image") return !!d.template_path;
+  if (look === "image") {
+    return imageCandidates(d.template_path, d.template_paths).length > 0;
+  }
   return d.ocr_text.trim().length > 0;
 }
 
@@ -237,6 +242,7 @@ export function newTriggerDraft(name = ""): TriggerDraft {
     hsv_low: [0, 0, 0],
     hsv_high: [179, 255, 255],
     template_path: "",
+    template_paths: [],
     ocr_text: "",
     threshold: 0.8,
     region: [0, 0, 100, 100],
@@ -284,6 +290,7 @@ export function draftFromGuard(g: Guard): TriggerDraft {
     hsv_low: arr<number[]>(g.hsv_low, [0, 0, 0]),
     hsv_high: arr<number[]>(g.hsv_high, [179, 255, 255]),
     template_path: str(g.template_path, ""),
+    template_paths: arr<string[]>(g.template_paths, []),
     ocr_text: str(g.ocr_text, ""),
     threshold: num(g.threshold, 0.8),
     region: arr<number[]>(g.region, [0, 0, 100, 100]),
@@ -304,6 +311,9 @@ export function draftFromGuard(g: Guard): TriggerDraft {
  *  click geometry, matching the old Test payload, so a Test never repositions a
  *  saved click line. */
 export function guardFromDraft(d: TriggerDraft, opts?: { forTest?: boolean }): Guard {
+  const candidates = splitImageCandidates(
+    imageCandidates(d.template_path, d.template_paths),
+  );
   const out: Guard = {
     ...d._extra,
     id: d.id,
@@ -313,7 +323,8 @@ export function guardFromDraft(d: TriggerDraft, opts?: { forTest?: boolean }): G
     key: d.key.trim(),
     hsv_low: d.hsv_low,
     hsv_high: d.hsv_high,
-    template_path: d.template_path || "",
+    template_path: candidates.primary,
+    template_paths: candidates.alternatives,
     ocr_text: d.ocr_text || "",
     threshold: d.threshold,
     region: d.region,

@@ -28,8 +28,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SetCursorPos, SystemParametersInfoW, SM_CXSCREEN,
@@ -536,6 +537,31 @@ impl InputController {
         set_cursor_pos(x, y)
     }
 
+    /// Read the physical cursor position with the same retry/error contract as
+    /// the write side. Autonomous actions use this to prove they actually
+    /// landed on the detected pixel before pressing.
+    pub fn try_cursor_position(&self) -> InputResult<(i32, i32)> {
+        let _aware = PerMonitorAware::new();
+        let mut last_error = 0;
+        for attempt in 1..=SEND_ATTEMPTS {
+            let mut point = POINT { x: 0, y: 0 };
+            if unsafe { GetCursorPos(&mut point) } != 0 {
+                return Ok((point.x, point.y));
+            }
+            last_error = unsafe { GetLastError() };
+            if attempt < SEND_ATTEMPTS {
+                std::thread::yield_now();
+            }
+        }
+        Err(InputError {
+            operation: "GetCursorPos",
+            requested: 1,
+            accepted: 0,
+            attempts: SEND_ATTEMPTS,
+            os_error: last_error,
+        })
+    }
+
     /// Move the cursor by a relative delta.
     ///
     /// This is the only way to drive camera rotation in games like Roblox: they
@@ -563,6 +589,26 @@ impl InputController {
         )
     }
 
+    /// Emit a relative motion packet that Windows must not merge with a
+    /// neighboring packet. Autonomous clicks use this after absolute placement
+    /// so Raw Input consumers such as Roblox observe a real movement transition
+    /// before the button edge.
+    pub(crate) fn try_move_relative_no_coalesce(&self, dx: i32, dy: i32) -> InputResult {
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        let (dx, dy) = crate::hardware::dpi::relative_counts(dx, dy);
+        send(
+            &[mouse_input(
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+                dx,
+                dy,
+                0,
+            )],
+            "non-coalesced relative mouse move",
+        )
+    }
+
     /// Reconcile the visible cursor with a recorded physical target without
     /// injecting another relative event. Relative `SendInput` is still sent
     /// first so Raw Input consumers receive the recorded movement; this call
@@ -581,9 +627,13 @@ impl InputController {
     /// them so a game polling the cursor position once per frame still catches
     /// the displaced position rather than only the cancellation.
     pub fn nudge(&self) {
-        self.move_relative(1, 0);
+        let _ = self.try_nudge();
+    }
+
+    pub fn try_nudge(&self) -> InputResult {
+        self.try_move_relative(1, 0)?;
         std::thread::sleep(Duration::from_millis(16));
-        self.move_relative(-1, 0);
+        self.try_move_relative(-1, 0)
     }
 
     /// Human-like cursor move to `(x, y)` along a cubic Bézier curve.

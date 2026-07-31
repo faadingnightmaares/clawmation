@@ -279,7 +279,8 @@ mod tests {
         sched.start();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if !fired_chains.lock().unwrap().is_empty() && !fired_macros.lock().unwrap().is_empty() {
+            if !fired_chains.lock().unwrap().is_empty() && !fired_macros.lock().unwrap().is_empty()
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(100));

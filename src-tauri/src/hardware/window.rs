@@ -6,19 +6,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, RECT};
+use windows_sys::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
 use windows_sys::Win32::System::Threading::{
-    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+    AttachThreadInput, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
+    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
+    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
 };
 
 const FOCUS_ATTEMPTS: usize = 4;
 const FOCUS_RETRY_DELAY: Duration = Duration::from_millis(45);
 const FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(180);
+const WATCH_FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const INPUT_RELEASE_ATTEMPTS: usize = 3;
 const INPUT_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(20);
 const JUMP_HOLD: Duration = Duration::from_millis(140);
@@ -29,6 +35,7 @@ const CAMERA_TRAVEL_SETTLE: Duration = Duration::from_millis(60);
 const CAMERA_DELTA: i32 = 24;
 
 use crate::engine::anti_afk::{AntiAfkAction, AntiAfkPlatform};
+use crate::hardware::dpi::PerMonitorAware;
 use crate::hardware::input::InputController;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -137,6 +144,138 @@ pub fn foreground_window_id() -> Option<String> {
     Some(selectable_window_id(hwnd, pid))
 }
 
+struct WindowAtPoint {
+    x: i32,
+    y: i32,
+    own_pid: u32,
+    hwnd: HWND,
+    pid: u32,
+}
+
+fn point_in_rect(x: i32, y: i32, rect: RECT) -> bool {
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+unsafe extern "system" fn collect_window_at_point(hwnd: HWND, data: LPARAM) -> BOOL {
+    let search = &mut *(data as *mut WindowAtPoint);
+    if !search.hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+        return 1;
+    }
+
+    let owner = GetWindow(hwnd, GW_OWNER);
+    let title = window_title(hwnd);
+    let mut pid = 0;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if is_selectable(true, !owner.is_null(), &title, pid, search.own_pid)
+        && GetWindowRect(hwnd, &mut rect) != 0
+        && point_in_rect(search.x, search.y, rect)
+    {
+        search.hwnd = hwnd;
+        search.pid = pid;
+        return 0;
+    }
+    1
+}
+
+/// Focus the external top-level window beneath a physical screen point.
+///
+/// Watch runs while Clawmation may still be foreground. Mouse movement alone
+/// can paint Roblox's hover state, while its first press is consumed by window
+/// activation and keyboard/raw-mouse input still goes to Clawmation. Enumerating
+/// top to bottom and skipping this process also reaches the game beneath our
+/// capture-excluded windows.
+pub fn focus_window_at_point(x: i32, y: i32) -> Result<(), String> {
+    let _aware = PerMonitorAware::new();
+    let mut search = WindowAtPoint {
+        x,
+        y,
+        own_pid: unsafe { GetCurrentProcessId() },
+        hwnd: null_mut(),
+        pid: 0,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_window_at_point),
+            &mut search as *mut WindowAtPoint as LPARAM,
+        );
+    }
+    if search.hwnd.is_null() {
+        // A desktop point has no app to activate. Keep the action useful by
+        // sending it to the current foreground window instead of dropping it.
+        return Ok(());
+    }
+    // UIPI drops input injected by a lower-privilege process into a
+    // higher-privilege window, while SetCursorPos still moves the shared
+    // cursor — so the target paints hover but every press vanishes, the exact
+    // "hovers, never clicks" failure. Fail loudly instead of pretending.
+    if input_blocked_by_integrity(search.pid) {
+        let title = unsafe { window_title(search.hwnd) };
+        let who = match title.trim() {
+            "" => format!("process {}", search.pid),
+            trimmed => format!("{trimmed:?}"),
+        };
+        return Err(format!(
+            "{who} runs at a higher Windows privilege level than Clawmation, so Windows silently drops the simulated click. Restart Clawmation as administrator to send input to it."
+        ));
+    }
+    if unsafe { GetForegroundWindow() == search.hwnd } {
+        return Ok(());
+    }
+    focus_window_id(&selectable_window_id(search.hwnd, search.pid))?;
+    std::thread::sleep(WATCH_FOCUS_SETTLE_DELAY);
+    Ok(())
+}
+
+/// Resolve the external top-level window beneath a physical screen point.
+/// Clawmation's own transparent overlays are excluded by process id.
+pub fn window_at_point(x: i32, y: i32) -> Result<Option<SelectableWindow>, String> {
+    let _aware = PerMonitorAware::new();
+    let mut search = WindowAtPoint {
+        x,
+        y,
+        own_pid: unsafe { GetCurrentProcessId() },
+        hwnd: null_mut(),
+        pid: 0,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_window_at_point),
+            &mut search as *mut WindowAtPoint as LPARAM,
+        );
+    }
+    if search.hwnd.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(SelectableWindow {
+        id: selectable_window_id(search.hwnd, search.pid),
+        title: unsafe { window_title(search.hwnd) },
+        pid: search.pid,
+    }))
+}
+
+/// Validate privilege and establish a previously resolved window as foreground.
+pub fn focus_selectable_window(target: &SelectableWindow) -> Result<(), String> {
+    if input_blocked_by_integrity(target.pid) {
+        let who = match target.title.trim() {
+            "" => format!("process {}", target.pid),
+            trimmed => format!("{trimmed:?}"),
+        };
+        return Err(format!(
+            "{who} runs at a higher Windows privilege level than Clawmation, so Windows silently drops simulated input. Restart Clawmation as administrator to send input to it."
+        ));
+    }
+    if foreground_window_id().as_deref() == Some(target.id.as_str()) {
+        return Ok(());
+    }
+    focus_window_id(&target.id)
+}
+
 pub fn focus_window_id(id: &str) -> Result<(), String> {
     let hwnd = id_to_hwnd(id).ok_or_else(|| "invalid window id".to_string())?;
     if !is_window_id(id) {
@@ -175,6 +314,89 @@ pub fn focus_window_id(id: &str) -> Result<(), String> {
         std::thread::sleep(FOCUS_RETRY_DELAY);
     }
     Err("Windows refused to focus the selected window".to_string())
+}
+
+/// The mandatory-integrity RID of a process token: 0x1000 is low, 0x2000
+/// medium (an ordinary desktop app), 0x3000 high (Run as administrator),
+/// 0x4000 system. `None` when the token can't be read; a verdict needs both
+/// levels, so an unreadable token never produces a false "blocked".
+fn process_integrity_rid(pid: u32) -> Option<u32> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut token: HANDLE = null_mut();
+        let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token) != 0;
+        let _ = CloseHandle(process);
+        if !opened {
+            return None;
+        }
+        let rid = token_integrity_rid(token);
+        let _ = CloseHandle(token);
+        rid
+    }
+}
+
+fn current_process_integrity_rid() -> Option<u32> {
+    unsafe {
+        let mut token: HANDLE = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let rid = token_integrity_rid(token);
+        let _ = CloseHandle(token);
+        rid
+    }
+}
+
+unsafe fn token_integrity_rid(token: HANDLE) -> Option<u32> {
+    let mut needed = 0;
+    let _ = GetTokenInformation(token, TokenIntegrityLevel, null_mut(), 0, &mut needed);
+    if needed < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 {
+        return None;
+    }
+    let word = std::mem::size_of::<usize>();
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(word)];
+    if GetTokenInformation(
+        token,
+        TokenIntegrityLevel,
+        buffer.as_mut_ptr() as *mut _,
+        needed,
+        &mut needed,
+    ) == 0
+    {
+        return None;
+    }
+    let label = &*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+    let sid = label.Label.Sid;
+    if sid.is_null() {
+        return None;
+    }
+    let sub_authorities = GetSidSubAuthorityCount(sid);
+    if sub_authorities.is_null() || *sub_authorities == 0 {
+        return None;
+    }
+    let rid = GetSidSubAuthority(sid, *sub_authorities as u32 - 1);
+    if rid.is_null() {
+        None
+    } else {
+        Some(*rid)
+    }
+}
+
+fn integrity_blocks(target: Option<u32>, ours: Option<u32>) -> bool {
+    match (target, ours) {
+        (Some(target), Some(ours)) => target > ours,
+        _ => false,
+    }
+}
+
+fn input_blocked_by_integrity(target_pid: u32) -> bool {
+    integrity_blocks(
+        process_integrity_rid(target_pid),
+        current_process_integrity_rid(),
+    )
 }
 
 pub struct NativeAntiAfkPlatform {
@@ -312,6 +534,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_hit_testing_uses_half_open_window_bounds() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 300,
+            bottom: 400,
+        };
+        assert!(point_in_rect(100, 200, rect));
+        assert!(point_in_rect(299, 399, rect));
+        assert!(!point_in_rect(300, 399, rect));
+        assert!(!point_in_rect(299, 400, rect));
+    }
     use std::sync::{atomic::AtomicUsize, Mutex};
 
     #[derive(Default)]
@@ -416,6 +652,17 @@ mod tests {
         assert!(!is_selectable(true, true, "Dialog", 22, 11));
         assert!(!is_selectable(true, false, "   ", 22, 11));
         assert!(!is_selectable(true, false, "Clawmation", 11, 11));
+    }
+
+    #[test]
+    fn integrity_blocks_input_only_to_higher_privilege_windows() {
+        // High target over a medium process is the UIPI block; equal or lower
+        // targets pass, and an unreadable token never produces a verdict.
+        assert!(integrity_blocks(Some(0x3000), Some(0x2000)));
+        assert!(!integrity_blocks(Some(0x2000), Some(0x2000)));
+        assert!(!integrity_blocks(Some(0x1000), Some(0x2000)));
+        assert!(!integrity_blocks(None, Some(0x2000)));
+        assert!(!integrity_blocks(Some(0x3000), None));
     }
 
     #[test]

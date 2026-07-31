@@ -23,6 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::sleep_interruptible;
+use super::vision_runtime::{execute_serialized, execute_verified, TargetReaction};
 use crate::hardware::vision::Detection;
 use crate::models::guard::Guard;
 
@@ -41,7 +42,7 @@ const STROKE_STEP: Duration = Duration::from_millis(8);
 pub enum Action {
     Pause,
     Resume,
-    KeyPress(String),
+    KeyPressAt(i64, i64, String),
     Click(i64, i64),
     BezierMoveTo(i64, i64),
     MoveTo(i64, i64),
@@ -54,9 +55,14 @@ pub type Detect = Box<dyn Fn(&[Guard]) -> HashMap<String, Vec<Detection>> + Send
 /// `player() -> (is_playing, is_paused)`.
 pub type PlayerState = Box<dyn Fn() -> (bool, bool) + Send + Sync>;
 /// `actuate(action)`: perform one input/player primitive.
-pub type Actuate = Box<dyn Fn(Action) + Send + Sync>;
+pub type Actuate = Box<dyn Fn(Action) -> Result<(), String> + Send + Sync>;
+pub type Refresh =
+    Box<dyn Fn(&Guard, &Detection, &AtomicBool) -> Result<Option<Detection>, String> + Send + Sync>;
+pub type Verify =
+    Box<dyn Fn(&Guard, &Detection, &AtomicBool) -> Result<TargetReaction, String> + Send + Sync>;
 /// `on_fire(guard, x, y)`: UI feedback the instant a guard triggers.
 pub type OnFire = Box<dyn Fn(&Guard, i64, i64) + Send + Sync>;
+pub type OnError = Box<dyn Fn(&Guard, &str) + Send + Sync>;
 
 /// The geometric intent of a firing guard, independent of *how* it executes.
 /// Whether the click humanizes (Bézier-then-click) and whether the action is a
@@ -81,6 +87,19 @@ pub enum Plan {
 pub fn plan_action(guard: &Guard, best: &Detection) -> Plan {
     let tlx = best.x - best.w / 2;
     let tly = best.y - best.h / 2;
+    let scale = |value: i64, factor: f64| {
+        let factor = if factor.is_finite() && factor > 0.0 {
+            factor
+        } else {
+            1.0
+        };
+        (value as f64 * factor).round() as i64
+    };
+    let (scale_x, scale_y) = if guard.method == "template" {
+        (best.scale_x, best.scale_y)
+    } else {
+        (1.0, 1.0)
+    };
     let strokes: Vec<Vec<i64>> = if !guard.click_lines.is_empty() {
         guard.click_lines.clone()
     } else if !guard.click_line.is_empty() {
@@ -93,12 +112,29 @@ pub fn plan_action(guard: &Guard, best: &Detection) -> Plan {
     // back either way. Pressing and releasing without travelling is a click, and
     // saying so costs three fewer input events, an 8ms hold, and a feed line
     // that claims a drag the user never drew.
-    let strokes: Vec<Vec<i64>> =
-        strokes.into_iter().filter(|s| s.len() == 4 && (s[0] != s[2] || s[1] != s[3])).collect();
+    let strokes: Vec<Vec<i64>> = strokes
+        .into_iter()
+        .map(|stroke| {
+            if stroke.len() == 4 {
+                vec![
+                    scale(stroke[0], scale_x),
+                    scale(stroke[1], scale_y),
+                    scale(stroke[2], scale_x),
+                    scale(stroke[3], scale_y),
+                ]
+            } else {
+                stroke
+            }
+        })
+        .filter(|s| s.len() == 4 && (s[0] != s[2] || s[1] != s[3]))
+        .collect();
     if !strokes.is_empty() {
         Plan::Drag { tlx, tly, strokes }
     } else if guard.click_offset.len() == 2 {
-        Plan::Click(tlx + guard.click_offset[0], tly + guard.click_offset[1])
+        Plan::Click(
+            tlx + scale(guard.click_offset[0], scale_x),
+            tly + scale(guard.click_offset[1], scale_y),
+        )
     } else {
         Plan::Click(best.x, best.y)
     }
@@ -162,7 +198,10 @@ struct Inner {
     detect: Detect,
     player: PlayerState,
     actuate: Actuate,
+    refresh: Refresh,
+    verify: Verify,
     on_fire: Option<OnFire>,
+    on_error: Option<OnError>,
     humanize: AtomicBool,
     guards: Mutex<Vec<Guard>>,
     /// guard id → when it last fired, for the cooldown gate.
@@ -182,12 +221,53 @@ impl GuardEngine {
         actuate: Actuate,
         on_fire: Option<OnFire>,
     ) -> Self {
+        Self::new_verified(
+            detect,
+            player,
+            actuate,
+            Box::new(|_, _, _| Ok(TargetReaction::Changed)),
+            None,
+            on_fire,
+        )
+    }
+
+    pub fn new_verified(
+        detect: Detect,
+        player: PlayerState,
+        actuate: Actuate,
+        verify: Verify,
+        on_error: Option<OnError>,
+        on_fire: Option<OnFire>,
+    ) -> Self {
+        Self::new_reliable(
+            detect,
+            player,
+            actuate,
+            Box::new(|_, detection, _| Ok(Some(detection.clone()))),
+            verify,
+            on_error,
+            on_fire,
+        )
+    }
+
+    pub fn new_reliable(
+        detect: Detect,
+        player: PlayerState,
+        actuate: Actuate,
+        refresh: Refresh,
+        verify: Verify,
+        on_error: Option<OnError>,
+        on_fire: Option<OnFire>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 detect,
                 player,
                 actuate,
+                refresh,
+                verify,
                 on_fire,
+                on_error,
                 humanize: AtomicBool::new(false),
                 guards: Mutex::new(Vec::new()),
                 last_fired: Mutex::new(HashMap::new()),
@@ -279,63 +359,136 @@ impl Inner {
             let Some(best) = matched.first() else {
                 continue;
             };
-            let plan = plan_action(guard, best);
-            self.handle(guard, &plan);
-            // Stamp after handling returns (post settle-delay), like Python.
-            self.last_fired
-                .lock()
-                .unwrap()
-                .insert(guard.id.clone(), Instant::now());
+            match self.handle(guard, best) {
+                Ok(()) => {
+                    // Only a delivered action earns a cooldown. Failed input
+                    // stays eligible for the next poll.
+                    self.last_fired
+                        .lock()
+                        .unwrap()
+                        .insert(guard.id.clone(), Instant::now());
+                }
+                Err(error) => {
+                    if let Some(on_error) = &self.on_error {
+                        on_error(guard, &error);
+                    }
+                }
+            }
         }
     }
 
     /// Pause the macro, perform the guard's action, wait its settle delay, then
     /// resume, the self-healing bracket from `_handle`/`_handle_lines`.
-    fn handle(&self, guard: &Guard, plan: &Plan) {
-        if let Some(on_fire) = &self.on_fire {
-            if let Some((fx, fy)) = fire_point(plan) {
-                on_fire(guard, fx, fy);
-            }
-        }
-
+    fn handle(&self, guard: &Guard, detection: &Detection) -> Result<(), String> {
         let (was_playing, _) = (self.player)();
-        (self.actuate)(Action::Pause);
+        (self.actuate)(Action::Pause)?;
+        let completed_plan = std::cell::RefCell::new(None::<Plan>);
 
-        if guard.action == "key" && !guard.key.is_empty() {
-            // A keyed guard presses its key regardless of the geometric plan,
-            // matching Python's key branch inside both handlers.
-            (self.actuate)(Action::KeyPress(guard.key.clone()));
-        } else {
-            match plan {
-                Plan::Click(x, y) => {
-                    if self.humanize.load(Ordering::SeqCst) {
-                        // Travel to the target along a human-like curve, then
-                        // click in place (no teleport).
-                        (self.actuate)(Action::BezierMoveTo(*x, *y));
-                    }
-                    (self.actuate)(Action::Click(*x, *y));
-                }
-                Plan::Drag { tlx, tly, strokes } => self.sweep(*tlx, *tly, strokes),
-            }
-        }
+        // Keep every action error inside this bracket. Returning early after
+        // Pause would strand playback whenever pointer preparation or a drag
+        // primitive failed.
+        let action_result = self.perform_action(guard, detection, &completed_plan);
 
         // Give the game time to react (load screen, reconnect, …).
-        if guard.resume_delay > 0.0 {
+        if action_result.is_ok() {
+            if let Some(on_fire) = &self.on_fire {
+                if let Some(plan) = completed_plan.borrow().as_ref() {
+                    if let Some((fx, fy)) = fire_point(plan) {
+                        on_fire(guard, fx, fy);
+                    }
+                }
+            }
+        }
+        if action_result.is_ok() && guard.resume_delay > 0.0 {
             sleep_interruptible(&self.running, Duration::from_secs_f64(guard.resume_delay));
         }
 
         // Resume only if the macro was and still is playing: if it finished or
         // was stopped during our handle, leave it stopped (Python's guard).
         let (still_playing, _) = (self.player)();
-        if was_playing && still_playing {
-            (self.actuate)(Action::Resume);
+        let resume_result = if was_playing && still_playing {
+            (self.actuate)(Action::Resume)
+        } else {
+            Ok(())
+        };
+        action_result.and(resume_result)
+    }
+
+    fn perform_action(
+        &self,
+        guard: &Guard,
+        detection: &Detection,
+        completed_plan: &std::cell::RefCell<Option<Plan>>,
+    ) -> Result<(), String> {
+        if guard.action == "key" && !guard.key.is_empty() {
+            let current = std::cell::RefCell::new(detection.clone());
+            return execute_verified(
+                &self.running,
+                || {
+                    let refreshed = self.refresh_target(guard, &current.borrow(), &self.running)?;
+                    let plan = plan_action(guard, &refreshed);
+                    let (x, y) = fire_point(&plan)
+                        .ok_or_else(|| "guard key target is malformed".to_string())?;
+                    *current.borrow_mut() = refreshed;
+                    *completed_plan.borrow_mut() = Some(plan);
+                    (self.actuate)(Action::KeyPressAt(x, y, guard.key.clone()))
+                },
+                |running| (self.verify)(guard, &current.borrow(), running),
+            )
+            .map(|_| ());
         }
+
+        match plan_action(guard, detection) {
+            Plan::Click(_, _) => {
+                let humanize = self.humanize.load(Ordering::SeqCst);
+                let current = std::cell::RefCell::new(detection.clone());
+                execute_verified(
+                    &self.running,
+                    || {
+                        let refreshed =
+                            self.refresh_target(guard, &current.borrow(), &self.running)?;
+                        let plan = plan_action(guard, &refreshed);
+                        let Plan::Click(x, y) = plan else {
+                            return Err("guard action changed from click to drag".to_string());
+                        };
+                        if humanize {
+                            (self.actuate)(Action::BezierMoveTo(x, y))?;
+                        }
+                        *current.borrow_mut() = refreshed;
+                        *completed_plan.borrow_mut() = Some(Plan::Click(x, y));
+                        (self.actuate)(Action::Click(x, y))
+                    },
+                    |running| (self.verify)(guard, &current.borrow(), running),
+                )
+                .map(|_| ())
+            }
+            Plan::Drag { .. } => execute_serialized(&self.running, || {
+                let refreshed = self.refresh_target(guard, detection, &self.running)?;
+                let plan = plan_action(guard, &refreshed);
+                let Plan::Drag { tlx, tly, strokes } = &plan else {
+                    return Err("guard action changed from drag to click".to_string());
+                };
+                self.sweep(*tlx, *tly, strokes)?;
+                *completed_plan.borrow_mut() = Some(plan);
+                Ok(())
+            }),
+        }
+    }
+
+    fn refresh_target(
+        &self,
+        guard: &Guard,
+        current: &Detection,
+        running: &AtomicBool,
+    ) -> Result<Detection, String> {
+        (self.refresh)(guard, current, running)?
+            .ok_or_else(|| "target disappeared before input delivery".to_string())
     }
 
     /// Drag along each stroke: press at the start, sweep pixel-by-pixel, release.
     /// The release always runs (even if `stop()` interrupts the sweep), so a
     /// held button is never stranded.
-    fn sweep(&self, tlx: i64, tly: i64, strokes: &[Vec<i64>]) {
+    fn sweep(&self, tlx: i64, tly: i64, strokes: &[Vec<i64>]) -> Result<(), String> {
         for stroke in strokes {
             let pts = stroke_points(stroke, tlx, tly);
             if pts.is_empty() {
@@ -343,19 +496,23 @@ impl Inner {
             }
             let (startx, starty) = pts[0];
             let (endx, endy) = *pts.last().unwrap();
-            (self.actuate)(Action::MoveTo(startx, starty));
-            (self.actuate)(Action::MouseDown("left".to_string()));
-            for &(px, py) in &pts[1..] {
-                if !self.running.load(Ordering::SeqCst) {
-                    break;
+            (self.actuate)(Action::MoveTo(startx, starty))?;
+            (self.actuate)(Action::MouseDown("left".to_string()))?;
+            let trace = (|| -> Result<(), String> {
+                for &(px, py) in &pts[1..] {
+                    if !self.running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    (self.actuate)(Action::MoveTo(px, py))?;
+                    thread::sleep(STROKE_STEP);
                 }
-                (self.actuate)(Action::MoveTo(px, py));
-                thread::sleep(STROKE_STEP);
-            }
-            // Always land on the end and release (Python's `finally`).
-            (self.actuate)(Action::MoveTo(endx, endy));
-            (self.actuate)(Action::MouseUp("left".to_string()));
+                (self.actuate)(Action::MoveTo(endx, endy))
+            })();
+            let release = (self.actuate)(Action::MouseUp("left".to_string()));
+            trace?;
+            release?;
         }
+        Ok(())
     }
 }
 
@@ -386,6 +543,9 @@ mod tests {
             h,
             confidence: 1.0,
             roi_offset: [0, 0],
+            scale_x: 1.0,
+            scale_y: 1.0,
+            observation: None,
         }
     }
 
@@ -406,7 +566,10 @@ mod tests {
                 m
             }),
             Box::new(|| (true, false)),
-            Box::new(move |a: Action| alog.lock().unwrap().push(a)),
+            Box::new(move |a: Action| {
+                alog.lock().unwrap().push(a);
+                Ok(())
+            }),
             Some(Box::new(move |g: &Guard, x, y| {
                 flog.lock().unwrap().push((g.name.clone(), x, y))
             })),
@@ -434,6 +597,37 @@ mod tests {
             vec![Action::Pause, Action::Click(100, 200), Action::Resume]
         );
         assert_eq!(*fires.lock().unwrap(), vec![("G".into(), 100, 200)]);
+    }
+
+    #[test]
+    fn guard_revalidates_and_clicks_the_targets_current_position() {
+        let actions: ActionLog = Arc::new(Mutex::new(Vec::new()));
+        let action_log = actions.clone();
+        let fires: FireLog = Arc::new(Mutex::new(Vec::new()));
+        let fire_log = fires.clone();
+        let engine = GuardEngine::new_reliable(
+            Box::new(|_| HashMap::from([("g".to_string(), vec![detection(100, 200, 20, 10)])])),
+            Box::new(|| (true, false)),
+            Box::new(move |action| {
+                action_log.lock().unwrap().push(action);
+                Ok(())
+            }),
+            Box::new(|_, _, _| Ok(Some(detection(120, 230, 20, 10)))),
+            Box::new(|_, _, _| Ok(TargetReaction::Changed)),
+            None,
+            Some(Box::new(move |guard, x, y| {
+                fire_log.lock().unwrap().push((guard.name.clone(), x, y));
+            })),
+        );
+        engine.test_prime(vec![base_guard("g")]);
+
+        engine.test_tick();
+
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![Action::Pause, Action::Click(120, 230), Action::Resume]
+        );
+        assert_eq!(*fires.lock().unwrap(), vec![("G".into(), 120, 230)]);
     }
 
     #[test]
@@ -465,7 +659,7 @@ mod tests {
             *log.lock().unwrap(),
             vec![
                 Action::Pause,
-                Action::KeyPress("space".into()),
+                Action::KeyPressAt(0, 0, "space".into()),
                 Action::Resume,
             ]
         );
@@ -537,6 +731,74 @@ mod tests {
     }
 
     #[test]
+    fn failed_input_resumes_without_fire_or_cooldown_and_retries_next_tick() {
+        let actions: ActionLog = Arc::new(Mutex::new(Vec::new()));
+        let action_log = actions.clone();
+        let fires: FireLog = Arc::new(Mutex::new(Vec::new()));
+        let fire_log = fires.clone();
+        let engine = GuardEngine::new(
+            Box::new(|_| HashMap::from([("g".to_string(), vec![detection(10, 20, 30, 10)])])),
+            Box::new(|| (true, false)),
+            Box::new(move |action| {
+                action_log.lock().unwrap().push(action.clone());
+                if matches!(action, Action::Click(_, _)) {
+                    Err("input rejected".to_string())
+                } else {
+                    Ok(())
+                }
+            }),
+            Some(Box::new(move |guard, x, y| {
+                fire_log.lock().unwrap().push((guard.name.clone(), x, y));
+            })),
+        );
+        engine.test_prime(vec![base_guard("g")]);
+
+        engine.test_tick();
+        engine.test_tick();
+
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![
+                Action::Pause,
+                Action::Click(10, 20),
+                Action::Resume,
+                Action::Pause,
+                Action::Click(10, 20),
+                Action::Resume,
+            ]
+        );
+        assert!(fires.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_humanized_pointer_move_still_resumes_playback() {
+        let actions: ActionLog = Arc::new(Mutex::new(Vec::new()));
+        let action_log = actions.clone();
+        let engine = GuardEngine::new(
+            Box::new(|_| HashMap::from([("g".to_string(), vec![detection(10, 20, 30, 10)])])),
+            Box::new(|| (true, false)),
+            Box::new(move |action| {
+                action_log.lock().unwrap().push(action.clone());
+                if matches!(action, Action::BezierMoveTo(_, _)) {
+                    Err("pointer move rejected".to_string())
+                } else {
+                    Ok(())
+                }
+            }),
+            None,
+        );
+        engine.set_humanize(true);
+        engine.test_prime(vec![base_guard("g")]);
+
+        engine.test_tick();
+
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![Action::Pause, Action::BezierMoveTo(10, 20), Action::Resume,]
+        );
+    }
+
+    #[test]
     fn idle_or_paused_player_never_acts() {
         // detect would match, but the player gate short-circuits first.
         for state in [(false, false), (true, true)] {
@@ -549,7 +811,10 @@ mod tests {
                     m
                 }),
                 Box::new(move || state),
-                Box::new(move |a: Action| alog.lock().unwrap().push(a)),
+                Box::new(move |a: Action| {
+                    alog.lock().unwrap().push(a);
+                    Ok(())
+                }),
                 None,
             );
             engine.test_prime(vec![base_guard("g")]);
@@ -561,7 +826,7 @@ mod tests {
     #[test]
     fn plan_action_picks_the_right_branch() {
         let best = detection(100, 100, 20, 20); // top-left (90, 90)
-        // Plain → match centre.
+                                                // Plain → match centre.
         assert_eq!(plan_action(&base_guard("g"), &best), Plan::Click(100, 100));
         // Offset → top-left + offset.
         let mut g = base_guard("g");
@@ -582,13 +847,38 @@ mod tests {
     }
 
     #[test]
+    fn template_offsets_and_strokes_follow_the_detected_scale() {
+        let mut best = detection(200, 100, 60, 10); // top-left (170, 95)
+        best.scale_x = 1.5;
+        best.scale_y = 0.5;
+        let mut guard = base_guard("g");
+        guard.method = "template".into();
+        guard.click_offset = vec![10, 10];
+        assert_eq!(plan_action(&guard, &best), Plan::Click(185, 100));
+
+        guard.click_offset.clear();
+        guard.click_lines = vec![vec![2, 4, 10, 12]];
+        assert_eq!(
+            plan_action(&guard, &best),
+            Plan::Drag {
+                tlx: 170,
+                tly: 95,
+                strokes: vec![vec![3, 2, 15, 6]],
+            }
+        );
+    }
+
+    #[test]
     fn stroke_points_walks_pixel_by_pixel_and_skips_malformed() {
         assert_eq!(
             stroke_points(&[0, 0, 0, 2], 0, 0),
             vec![(0, 0), (0, 1), (0, 2)]
         );
         // Offsets add the top-left; a zero-length stroke still yields start+end.
-        assert_eq!(stroke_points(&[1, 1, 1, 1], 10, 20), vec![(11, 21), (11, 21)]);
+        assert_eq!(
+            stroke_points(&[1, 1, 1, 1], 10, 20),
+            vec![(11, 21), (11, 21)]
+        );
         // Not a 4-tuple → no points (Python's `len(ln) != 4` skip).
         assert!(stroke_points(&[1, 2, 3], 0, 0).is_empty());
         assert!(stroke_points(&[], 0, 0).is_empty());

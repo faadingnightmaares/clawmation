@@ -3,7 +3,7 @@ name = "clawmation"
 # The single source of truth for the app's version: `commands/misc.rs` reads it
 # through `CARGO_PKG_VERSION`, `tauri.conf.json` repeats it for the bundler, and
 # the updater compares the manifest's version against it. Bump all three together.
-version = "1.2.1"
+version = "1.2.5"
 description = "Windows macro recorder with visual workflows, screen detection, OCR, and local automation"
 authors = ["faadingnightmaares"]
 license-file = "../LICENSE"
@@ -62,6 +62,12 @@ image = { version = "0.25", default-features = false, features = [
 # sweep is the one genuinely compute-bound thing the app does, and it is
 # embarrassingly parallel over output rows.
 rayon = "1"
+# Optional compute acceleration for large template-correlation sweeps. Vulkan
+# is preferred with DX12 fallback across NVIDIA, AMD, and Intel; the existing
+# Rayon matcher remains the permanent runtime fallback.
+wgpu = { version = "27", default-features = false, features = ["std", "dx12", "vulkan", "wgsl"] }
+pollster = "1"
+bytemuck = "1"
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` makes float parsing correctly-rounded, so every timestamp and
 # duration loads to the exact same f64 the Python app wrote; re-saved macros stay
@@ -95,11 +101,17 @@ tauri-plugin-updater = "2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     # `Win32_UI_HiDpi` gates the `DPI_AWARENESS_CONTEXT_*` constants that
     # `input.rs` uses to make the absolute cursor move Per-Monitor-V2 aware, so
     # the recorded physical pixels aren't stretched by the DPI factor on playback.
     "Win32_UI_HiDpi",
     "Win32_Media",
+    # `Win32_Security` gates the SID accessors `window.rs` uses to read a
+    # window's mandatory-integrity level, so a Watch click aimed at a
+    # higher-privilege window — where Windows silently drops injected input —
+    # fails with a clear "run as administrator" error instead of hovering.
+    "Win32_Security",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",

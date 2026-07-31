@@ -18,6 +18,7 @@ pub mod node_graph;
 pub mod scheduler;
 pub mod stats;
 pub mod vision_agent;
+pub mod vision_runtime;
 
 /// Sleep up to `total`, waking early the moment `running` is cleared.
 ///

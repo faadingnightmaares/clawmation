@@ -9,6 +9,7 @@ const appMetrics = vi.hoisted(() => ({
 }));
 
 vi.mock("@/api", () => ({
+  onAssociatedImport: vi.fn(async () => () => {}),
   onUpdateAvailable: vi.fn(async () => () => {}),
 }));
 

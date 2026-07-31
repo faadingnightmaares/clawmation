@@ -36,7 +36,11 @@ pub fn set_excluded(hwnd: *mut c_void, excluded: bool) -> bool {
     if hwnd.is_null() {
         return false;
     }
-    let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    let affinity = if excluded {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
     unsafe { SetWindowDisplayAffinity(hwnd, affinity) != 0 }
 }
 
@@ -114,18 +118,31 @@ mod tests {
             let _ = tx.send((hwnd as usize, ok, before, after));
         });
 
-        overlay::run(CLASS, "Clawmation shield test", SolidScene, Duration::from_secs(2));
-        let (hwnd, ok, before, after) = rx.recv_timeout(Duration::from_secs(5)).expect("driver ran");
+        overlay::run(
+            CLASS,
+            "Clawmation shield test",
+            SolidScene,
+            Duration::from_secs(2),
+        );
+        let (hwnd, ok, before, after) =
+            rx.recv_timeout(Duration::from_secs(5)).expect("driver ran");
 
         assert!(hwnd != 0, "the overlay window was never found");
-        assert!(ok, "SetWindowDisplayAffinity was refused on this build of Windows");
+        assert!(
+            ok,
+            "SetWindowDisplayAffinity was refused on this build of Windows"
+        );
         for (i, backend) in ["mss", "dxcam"].iter().enumerate() {
             assert_eq!(
                 before[i],
                 Some(MAGENTA),
                 "{backend} did not see the window before it was excluded, so the test proves nothing"
             );
-            assert_ne!(after[i], Some(MAGENTA), "{backend} still captured the excluded window");
+            assert_ne!(
+                after[i],
+                Some(MAGENTA),
+                "{backend} still captured the excluded window"
+            );
         }
     }
 }

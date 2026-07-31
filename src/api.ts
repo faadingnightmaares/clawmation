@@ -392,6 +392,8 @@ export interface Guard {
   method?: string;
   action?: string;
   enabled?: boolean;
+  template_path?: string;
+  template_paths?: string[];
   hsv_low?: number[];
   hsv_high?: number[];
 }
@@ -476,6 +478,10 @@ export interface PickRegionResult {
 
 export function guardPickRegion(): Promise<PickRegionResult> {
   return invoke<PickRegionResult>("guard_pick_region");
+}
+
+export function pickScreenPoint(): Promise<PickScreenPointResult> {
+  return invoke<PickScreenPointResult>("pick_screen_point");
 }
 
 /** A snipped button image: the saved template `path`, a base64 PNG `thumb`, and
@@ -641,6 +647,7 @@ export interface Step {
   hsv_low: number[];
   hsv_high: number[];
   template: string;
+  templates: string[];
   region: number[]; // [x1, y1, x2, y2] percentages
   min_area: number;
   timeout: number; // wait_for
@@ -716,6 +723,7 @@ export interface GraphEdge {
   from: string;
   output: string;
   to: string;
+  waypoints?: GraphPosition[];
 }
 
 export interface NodeGraph {
@@ -724,6 +732,13 @@ export interface NodeGraph {
   entry: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+export interface PickScreenPointResult extends OpResult {
+  x?: number;
+  y?: number;
+  monitor?: string;
+  preview?: string;
 }
 
 export interface NodeGraphValidation {
@@ -1081,4 +1096,28 @@ export function exportBundle(name: string): Promise<ExportResult> {
 /** Import a `.clawbundle`: installs the macro, its guards, and templates. */
 export function importBundle(): Promise<SaveNamedResult> {
   return invoke<SaveNamedResult>("import_bundle");
+}
+
+/** Export one complete Loop and every referenced image as `.clawbundle`. */
+export function exportLoop(loopName: string): Promise<ExportResult> {
+  return invoke<ExportResult>("export_loop", { loopName });
+}
+
+/** Import a portable Loop bundle without overwriting an existing Loop. */
+export function importLoop(): Promise<NodeLoopResult> {
+  return invoke<NodeLoopResult>("import_loop");
+}
+
+export interface AssociatedImportEvent {
+  kind: "loop";
+  name: string;
+}
+
+/** Fires when Windows opens an associated portable file in a running app. */
+export function onAssociatedImport(
+  fn: (event: AssociatedImportEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<AssociatedImportEvent>("associated-import", (event) =>
+    fn(event.payload),
+  );
 }

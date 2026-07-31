@@ -14,7 +14,7 @@ import {
   resumeStopOf,
 } from "./triggers";
 
-// The exact 18-field shape both the old MacrosView and VisionView wrote on save.
+// The canonical shape both Macros and Watch write on save.
 // tsc cannot police these field names (Guard has a string index signature), so
 // this file is the real guard: it proves the converters preserve every field.
 function storedGuard(over: Partial<Guard> = {}): Guard {
@@ -27,6 +27,7 @@ function storedGuard(over: Partial<Guard> = {}): Guard {
     hsv_low: [10, 120, 90],
     hsv_high: [24, 255, 255],
     template_path: "",
+    template_paths: [],
     ocr_text: "",
     threshold: 0.75,
     region: [40, 60, 60, 80],
@@ -43,7 +44,7 @@ function storedGuard(over: Partial<Guard> = {}): Guard {
 
 const PERSISTED = [
   "id", "name", "method", "action", "key", "hsv_low", "hsv_high",
-  "template_path", "ocr_text", "threshold", "region", "min_area",
+  "template_path", "template_paths", "ocr_text", "threshold", "region", "min_area",
   "resume_delay", "cooldown", "enabled", "click_offset", "click_line", "click_lines",
 ].sort();
 
@@ -62,6 +63,22 @@ describe("guard ↔ draft round-trip", () => {
       hsv_high: [179, 255, 255],
     });
     expect(guardFromDraft(draftFromGuard(g))).toEqual(g);
+  });
+
+  it("preserves alternative image states and accepts them without a legacy primary", () => {
+    const g = storedGuard({
+      method: "template",
+      template_path: "normal.png",
+      template_paths: ["hovered.png", "selected.png"],
+    });
+    expect(guardFromDraft(draftFromGuard(g))).toEqual(g);
+    expect(
+      isTriggerReady({
+        ...newTriggerDraft(),
+        method: "template",
+        template_paths: ["hovered.png"],
+      }),
+    ).toBe(true);
   });
 
   it("preserves an OCR (text) guard exactly", () => {

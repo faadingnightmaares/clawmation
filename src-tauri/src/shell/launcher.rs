@@ -10,8 +10,8 @@
 //! a multi-monitor setup it opens centered on the screen under the cursor — the
 //! one the user is actually looking at — not always the primary.
 
-use tauri::{AppHandle, Monitor, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 use tauri::Manager;
+use tauri::{AppHandle, Monitor, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 /// Window label; the `launcher` capability and this module key off it.
 pub const LABEL: &str = "launcher";
@@ -70,8 +70,7 @@ pub fn hide(app: &AppHandle) {
 /// and non-primary origins (a monitor to the left of the primary has negative x)
 /// place it correctly without per-scale conversions.
 fn center(app: &AppHandle, win: &tauri::WebviewWindow) {
-    let Some(monitor) = cursor_monitor(app).or_else(|| app.primary_monitor().ok().flatten())
-    else {
+    let Some(monitor) = cursor_monitor(app).or_else(|| app.primary_monitor().ok().flatten()) else {
         return;
     };
     let scale = monitor.scale_factor();

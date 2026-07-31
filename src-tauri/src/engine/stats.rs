@@ -70,7 +70,13 @@ impl PlayStats {
 
     /// Total plays across every macro.
     pub fn total_plays(&self) -> i64 {
-        self.data.lock().unwrap().stats.values().map(|s| s.count).sum()
+        self.data
+            .lock()
+            .unwrap()
+            .stats
+            .values()
+            .map(|s| s.count)
+            .sum()
     }
 
     /// Every macro's stats keyed by name, the analogue of Python's
@@ -82,7 +88,10 @@ impl PlayStats {
     /// Drop stats for a macro (e.g. when it is deleted).
     pub fn remove(&self, name: &str) {
         let mut data = self.data.lock().unwrap();
-        if data.stats.remove(name).is_some() {
+        let removed_stat = data.stats.remove(name).is_some();
+        let previous_history_len = data.history.len();
+        data.history.retain(|entry| entry.name != name);
+        if removed_stat || data.history.len() != previous_history_len {
             self.persist(&data);
         }
     }
@@ -170,5 +179,9 @@ mod tests {
         ps2.remove("__test___stat_macro");
         assert!(ps2.get("__test___stat_macro").is_none(), "removed");
         assert_eq!(ps2.total_plays(), 0, "total_plays is 0 after remove");
+        assert!(
+            ps2.history(10).is_empty(),
+            "deleting a macro also removes its run history"
+        );
     }
 }

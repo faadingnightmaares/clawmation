@@ -16,6 +16,7 @@ use tauri::{AppHandle, State, Window};
 use crate::commands::window::with_window_out_of_frame;
 use crate::hardware::picker;
 use crate::models::guard::{Guard, GuardFile};
+use crate::models::vision_images::candidate_limit_error;
 use crate::paths;
 use crate::state::AppState;
 
@@ -96,6 +97,13 @@ pub fn guard_save(state: State<AppState>, macro_name: String, guards: Option<Vec
             return json!({ "ok": false, "error": e.to_string() });
         }
     };
+    if let Some(error) = objs
+        .iter()
+        .find_map(|guard| candidate_limit_error(&guard.template_path, &guard.template_paths))
+    {
+        state.emit("err", format!("Guard save failed: {error}"));
+        return json!({ "ok": false, "error": error });
+    }
     let file = GuardFile { guards: objs };
     // `save_guards` uses the macro name verbatim (no `.json` strip).
     let path = paths::guards_dir().join(format!("{macro_name}.json"));
@@ -122,6 +130,9 @@ pub fn guard_test(state: State<AppState>, window: Window, guard: Value) -> Value
         Ok(g) => g,
         Err(e) => return json!({ "ok": false, "error": format!("Bad guard: {e}") }),
     };
+    if let Some(error) = candidate_limit_error(&g.template_path, &g.template_paths) {
+        return json!({ "ok": false, "error": error });
+    }
     let (w, h) = state.core.resolve_screen();
     let backend = state.core.config.lock().unwrap().capture_backend.clone();
     // The editor is on top of whatever the guard watches for; test against the
@@ -153,6 +164,11 @@ pub fn guard_pick_color(window: Window) -> Value {
 #[tauri::command(async)]
 pub fn guard_pick_region(window: Window) -> Value {
     with_window_out_of_frame(&window, picker::pick_region)
+}
+
+#[tauri::command(async)]
+pub fn pick_screen_point(window: Window) -> Value {
+    with_window_out_of_frame(&window, picker::pick_screen_point)
 }
 
 #[tauri::command(async)]

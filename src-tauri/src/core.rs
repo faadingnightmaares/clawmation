@@ -24,14 +24,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::engine::guards::{Action, Actuate, Detect, GuardEngine, OnFire, PlayerState};
+use crate::engine::guards::{
+    Action, Actuate, Detect, GuardEngine, OnError, OnFire, PlayerState, Refresh as GuardRefresh,
+    Verify as GuardVerify,
+};
 use crate::engine::stats::PlayStats;
+use crate::engine::vision_runtime::{
+    observation_is_settled, FrameStamp, TargetBox, TargetReaction, FRESH_FRAME_FALLBACK_AFTER,
+};
 use crate::hardware::capture::{Frame, ScreenCapture};
 use crate::hardware::input::InputController;
 use crate::hardware::ocr;
 use crate::hardware::player::{CheckpointDetect, MacroPlayer, PlaybackOutcome};
 use crate::hardware::preview;
 use crate::hardware::recorder::MacroRecorder;
+use crate::hardware::reliable_input::{ReliableInput, ReliableTarget};
 use crate::hardware::vision::{is_full_region, region_pixels, Detection, Detector, VisionError};
 use crate::logbuf::LogBuffer;
 use crate::models::chain::Chain;
@@ -137,10 +144,51 @@ struct Aged<'a> {
     age_ms: u64,
 }
 
+struct CapturedFrame {
+    frame: Frame,
+    stamp: FrameStamp,
+}
+
+#[derive(Default)]
+struct CaptureClock {
+    sample: u64,
+    generation: u64,
+    latest: Option<FrameStamp>,
+}
+
+impl CaptureClock {
+    fn record(&mut self, fresh: bool, captured_at: Instant) -> FrameStamp {
+        self.sample = self.sample.saturating_add(1);
+        if fresh {
+            self.generation = self.generation.saturating_add(1);
+        }
+        let stamp = FrameStamp {
+            sample: self.sample,
+            generation: self.generation,
+            fresh,
+            captured_at,
+        };
+        self.latest = Some(stamp);
+        stamp
+    }
+
+    fn current(&self) -> FrameStamp {
+        self.latest.unwrap_or(FrameStamp {
+            sample: 0,
+            generation: 0,
+            fresh: false,
+            captured_at: Instant::now(),
+        })
+    }
+}
+
 /// How long a source's last pass keeps contributing boxes. Past this the overlay
 /// would be drawing what a detector saw before it stopped running: a guard
 /// engine that has shut down leaves its last pass behind, and it should go.
 const SIGHTING_TTL_MS: u128 = 1_000;
+const REACTION_POLL: Duration = Duration::from_millis(8);
+const REACTION_TIMEOUT: Duration = Duration::from_millis(180);
+const MAX_ACTION_OBSERVATION_AGE: Duration = Duration::from_millis(150);
 
 /// The vision stack: one screen capture and one [`Detector`], both lazily
 /// created and shared by every consumer, the Rust seat of Python's
@@ -160,6 +208,10 @@ pub struct Vision {
     /// backend for the length of a frame timeout, and a start button that waits
     /// on that reads as a hang.
     ready: AtomicBool,
+    /// Every capture call receives a sequence, while `generation` advances only
+    /// when the backend copied a newly presented desktop frame. Together they
+    /// distinguish fresh renders from a later sample of DXGI's cached pixels.
+    clock: Mutex<CaptureClock>,
     /// The backend the capture actually opened, which may not be the one asked
     /// for (dxcam falls back to GDI).
     resolved: Mutex<Option<String>>,
@@ -188,6 +240,7 @@ impl Vision {
             detector: Mutex::new(Detector::new(0, 0)),
             capture: Mutex::new(None),
             ready: AtomicBool::new(false),
+            clock: Mutex::new(CaptureClock::default()),
             resolved: Mutex::new(None),
             fps: Mutex::new(0.0),
             log,
@@ -233,11 +286,22 @@ impl Vision {
     /// One frame, and the cached FPS refreshed while the capture is in hand.
     /// Opens the capture cold if a caller reached here without `ensure_ready`,
     /// exactly as Python's lazy `_get_capture` did.
-    fn grab(&self) -> Option<Frame> {
-        let (frame, fps, backend) = {
+    fn grab_observed_with_freshness(&self, require_fresh: bool) -> Option<CapturedFrame> {
+        let (sample, stamp, fps, backend) = {
             let mut slot = self.capture.lock().unwrap();
             let cap = slot.get_or_insert_with(|| ScreenCapture::new("dxcam", None));
-            (cap.grab(), round1(cap.fps()), cap.backend().to_string())
+            let sample = if require_fresh {
+                cap.grab_fresh_sample()
+            } else {
+                cap.grab_sample()
+            };
+            let stamp = sample.as_ref().map(|sample| {
+                self.clock
+                    .lock()
+                    .unwrap()
+                    .record(sample.fresh, Instant::now())
+            });
+            (sample, stamp, round1(cap.fps()), cap.backend().to_string())
         };
         self.ready.store(true, Ordering::SeqCst);
         *self.fps.lock().unwrap() = fps;
@@ -245,7 +309,230 @@ impl Vision {
         if resolved.is_none() {
             *resolved = Some(backend);
         }
-        frame
+        let sample = sample?;
+        let stamp = stamp?;
+        Some(CapturedFrame {
+            frame: sample.frame,
+            stamp,
+        })
+    }
+
+    fn grab_observed(&self) -> Option<CapturedFrame> {
+        self.grab_observed_with_freshness(false)
+    }
+
+    fn grab(&self) -> Option<Frame> {
+        self.grab_observed().map(|observed| observed.frame)
+    }
+
+    fn current_stamp(&self) -> FrameStamp {
+        // Wait for an in-flight capture to publish its stamp before deciding
+        // whether a detection is still current. Otherwise an older observation
+        // could win a race against a newer frame that had already been copied.
+        let _capture = self.capture.lock().unwrap();
+        self.clock.lock().unwrap().current()
+    }
+
+    fn observation_is_current(&self, observation: Option<FrameStamp>) -> bool {
+        let Some(observation) = observation else {
+            return false;
+        };
+        let current = self.current_stamp();
+        observation.fresh
+            && observation.sample == current.sample
+            && observation.generation == current.generation
+            && observation.captured_at.elapsed() <= MAX_ACTION_OBSERVATION_AGE
+    }
+
+    /// Revalidate a guard immediately before autonomous input whenever its
+    /// detection was cached, aged out, or superseded by another capture/action.
+    pub fn refresh_guard_target(
+        &self,
+        guard: &Guard,
+        original: &Detection,
+        running: &AtomicBool,
+    ) -> Result<Option<Detection>, String> {
+        if !running.load(Ordering::SeqCst) {
+            return Err("action cancelled before target revalidation".to_string());
+        }
+        if self.observation_is_current(original.observation) {
+            return Ok(Some(original.clone()));
+        }
+
+        let Some(observed) = self.grab_observed_with_freshness(true) else {
+            return Err("could not capture a fresh target revalidation frame".to_string());
+        };
+        if !running.load(Ordering::SeqCst) {
+            return Err("action cancelled during target revalidation".to_string());
+        }
+        let mut hits = if is_text_guard(guard) {
+            self.detect_text_guards(&observed.frame, &[guard])
+                .remove(&guard.id)
+                .unwrap_or_default()
+        } else {
+            self.detector
+                .lock()
+                .map_err(|_| "Vision detector lock is poisoned".to_string())?
+                .detect_guard(&observed.frame, guard)
+                .map_err(|error| error.to_string())?
+        };
+        if !running.load(Ordering::SeqCst) {
+            return Err("action cancelled during target revalidation".to_string());
+        }
+        stamp_detections(&mut hits, observed.stamp);
+        Ok(same_guard_target(original, hits))
+    }
+
+    pub fn refresh_step_target(
+        &self,
+        step: &Step,
+        original: &crate::engine::ai::Match,
+        running: &AtomicBool,
+    ) -> Result<Option<crate::engine::ai::Match>, String> {
+        if !running.load(Ordering::SeqCst) {
+            return Err("action cancelled before target revalidation".to_string());
+        }
+        if self.observation_is_current(original.observation) {
+            return Ok(Some(original.clone()));
+        }
+
+        let Some(observed) = self.grab_observed_with_freshness(true) else {
+            return Err("could not capture a fresh target revalidation frame".to_string());
+        };
+        if !running.load(Ordering::SeqCst) {
+            return Err("action cancelled during target revalidation".to_string());
+        }
+        let (mut hits, _) = self
+            .detector
+            .lock()
+            .map_err(|_| "Vision detector lock is poisoned".to_string())?
+            .ai_detect(&observed.frame, step);
+        if !running.load(Ordering::SeqCst) {
+            return Err("action cancelled during target revalidation".to_string());
+        }
+        stamp_detections(&mut hits, observed.stamp);
+        Ok(same_step_target(original, &hits).map(to_match))
+    }
+
+    /// Observe the same guard after an autonomous action. The first newly
+    /// presented desktop frame wins immediately; a DXGI cached frame becomes a
+    /// valid unchanged observation only after the reaction settle window.
+    pub fn verify_guard_reaction(
+        &self,
+        guard: &Guard,
+        original: &Detection,
+        running: &AtomicBool,
+    ) -> Result<TargetReaction, String> {
+        let baseline = self.current_stamp();
+        let started = Instant::now();
+        let target = TargetBox::new(original.x, original.y, original.w, original.h);
+
+        while running.load(Ordering::SeqCst) && started.elapsed() <= REACTION_TIMEOUT {
+            let require_fresh = started.elapsed() >= FRESH_FRAME_FALLBACK_AFTER;
+            let Some(observed) = self.grab_observed_with_freshness(require_fresh) else {
+                std::thread::sleep(REACTION_POLL);
+                continue;
+            };
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            if !observation_is_settled(baseline, observed.stamp, started.elapsed()) {
+                std::thread::sleep(REACTION_POLL);
+                continue;
+            }
+
+            let hits = if is_text_guard(guard) {
+                self.detect_text_guards(&observed.frame, &[guard])
+                    .remove(&guard.id)
+                    .unwrap_or_default()
+            } else {
+                self.detector
+                    .lock()
+                    .map_err(|_| "Vision detector lock is poisoned".to_string())?
+                    .detect_guard(&observed.frame, guard)
+                    .map_err(|error| error.to_string())?
+            };
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            return Ok(
+                if hits
+                    .iter()
+                    .any(|hit| target.matches(TargetBox::new(hit.x, hit.y, hit.w, hit.h)))
+                {
+                    TargetReaction::StillVisible
+                } else {
+                    TargetReaction::Changed
+                },
+            );
+        }
+
+        Ok(TargetReaction::Unavailable(
+            if running.load(Ordering::SeqCst) {
+                format!(
+                    "no settled screen observation arrived within {} ms",
+                    REACTION_TIMEOUT.max(FRESH_FRAME_FALLBACK_AFTER).as_millis()
+                )
+            } else {
+                "action was cancelled".to_string()
+            },
+        ))
+    }
+
+    pub fn verify_step_reaction(
+        &self,
+        step: &Step,
+        original: &crate::engine::ai::Match,
+        running: &AtomicBool,
+    ) -> Result<TargetReaction, String> {
+        let baseline = self.current_stamp();
+        let started = Instant::now();
+        let target = TargetBox::new(original.x, original.y, 16, 16);
+
+        while running.load(Ordering::SeqCst) && started.elapsed() <= REACTION_TIMEOUT {
+            let require_fresh = started.elapsed() >= FRESH_FRAME_FALLBACK_AFTER;
+            let Some(observed) = self.grab_observed_with_freshness(require_fresh) else {
+                std::thread::sleep(REACTION_POLL);
+                continue;
+            };
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            if !observation_is_settled(baseline, observed.stamp, started.elapsed()) {
+                std::thread::sleep(REACTION_POLL);
+                continue;
+            }
+
+            let (hits, _) = self
+                .detector
+                .lock()
+                .map_err(|_| "Vision detector lock is poisoned".to_string())?
+                .ai_detect(&observed.frame, step);
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            return Ok(
+                if hits
+                    .iter()
+                    .any(|hit| target.matches(TargetBox::new(hit.x, hit.y, hit.w, hit.h)))
+                {
+                    TargetReaction::StillVisible
+                } else {
+                    TargetReaction::Changed
+                },
+            );
+        }
+
+        Ok(TargetReaction::Unavailable(
+            if running.load(Ordering::SeqCst) {
+                format!(
+                    "no fresh screen observation arrived within {} ms",
+                    REACTION_TIMEOUT.as_millis()
+                )
+            } else {
+                "action was cancelled".to_string()
+            },
+        ))
     }
 
     /// One grab, every guard: the guard poll loop's detect callback. Preserves
@@ -272,15 +559,17 @@ impl Vision {
         if text.is_empty() && pixel.is_empty() {
             return map;
         }
-        let Some(frame) = self.grab() else {
+        let Some(observed) = self.grab_observed() else {
             return map;
         };
+        let frame = &observed.frame;
 
         if !pixel.is_empty() {
             let mut detector = self.detector.lock().unwrap();
             for guard in pixel {
-                match detector.detect_guard(&frame, guard) {
-                    Ok(hits) if !hits.is_empty() => {
+                match detector.detect_guard(frame, guard) {
+                    Ok(mut hits) if !hits.is_empty() => {
+                        stamp_detections(&mut hits, observed.stamp);
                         map.insert(guard.id.clone(), hits);
                     }
                     Ok(_) => {}
@@ -289,9 +578,13 @@ impl Vision {
             }
         }
         if !text.is_empty() {
-            map.extend(self.detect_text_guards(&frame, &text));
+            let mut text_hits = self.detect_text_guards(frame, &text);
+            for hits in text_hits.values_mut() {
+                stamp_detections(hits, observed.stamp);
+            }
+            map.extend(text_hits);
         }
-        self.record_sightings(source, &frame, guards, &map);
+        self.record_sightings(source, frame, guards, &map);
         map
     }
 
@@ -507,16 +800,21 @@ impl Vision {
     /// "nothing found"; Python instead crashed the run thread on a `None` frame,
     /// leaking the mode, so this is the cleaner resolution of the same case.
     pub fn ai_detect(&self, step: &Step) -> (Vec<crate::engine::ai::Match>, String) {
-        let Some(frame) = self.grab() else {
+        let Some(observed) = self.grab_observed() else {
             return (Vec::new(), String::new());
         };
-        let (hits, message) = self.detector.lock().unwrap().ai_detect(&frame, step);
+        let (mut hits, message) = self
+            .detector
+            .lock()
+            .unwrap()
+            .ai_detect(&observed.frame, step);
+        stamp_detections(&mut hits, observed.stamp);
         let label = if step.label.is_empty() {
             &step.step_type
         } else {
             &step.label
         };
-        self.record_step(&frame, label, &hits);
+        self.record_step(&observed.frame, label, &hits);
         (hits.iter().map(to_match).collect(), message)
     }
 
@@ -682,12 +980,42 @@ impl Vision {
     }
 }
 
+fn stamp_detections(hits: &mut [Detection], stamp: FrameStamp) {
+    for hit in hits {
+        hit.observation = Some(stamp);
+    }
+}
+
+fn same_guard_target(original: &Detection, hits: Vec<Detection>) -> Option<Detection> {
+    let target = TargetBox::new(original.x, original.y, original.w, original.h);
+    hits.into_iter()
+        .filter(|hit| target.matches(TargetBox::new(hit.x, hit.y, hit.w, hit.h)))
+        .min_by_key(|hit| squared_distance(original.x, original.y, hit.x, hit.y))
+}
+
+fn same_step_target<'a>(
+    original: &crate::engine::ai::Match,
+    hits: &'a [Detection],
+) -> Option<&'a Detection> {
+    let target = TargetBox::new(original.x, original.y, 16, 16);
+    hits.iter()
+        .filter(|hit| target.matches(TargetBox::new(hit.x, hit.y, hit.w, hit.h)))
+        .min_by_key(|hit| squared_distance(original.x, original.y, hit.x, hit.y))
+}
+
+fn squared_distance(ax: i64, ay: i64, bx: i64, by: i64) -> i128 {
+    let dx = ax as i128 - bx as i128;
+    let dy = ay as i128 - by as i128;
+    dx * dx + dy * dy
+}
+
 /// A detection as the AI executor wants it: just the point and how sure we are.
 fn to_match(d: &Detection) -> crate::engine::ai::Match {
     crate::engine::ai::Match {
         x: d.x,
         y: d.y,
         confidence: d.confidence,
+        observation: d.observation,
     }
 }
 
@@ -738,6 +1066,9 @@ pub struct Core {
     /// persistent player is equivalent and lets guards hold a stable handle).
     pub player: Arc<MacroPlayer>,
     pub controller: Arc<InputController>,
+    /// Serialized, focus-verified input path for Watch and Loops. Recorded
+    /// playback deliberately continues to use `controller` directly.
+    pub reliable_input: Arc<ReliableInput>,
     /// `Some` only while recording.
     pub recorder: Arc<Mutex<Option<MacroRecorder>>>,
     pub vision: Arc<Vision>,
@@ -766,6 +1097,7 @@ impl Core {
         let play_stats = Arc::new(PlayStats::new(paths::config_dir().join("stats.json")));
         let player = Arc::new(MacroPlayer::new());
         let controller = Arc::new(InputController::new());
+        let reliable_input = Arc::new(ReliableInput::new(controller.clone()));
         let recorder = Arc::new(Mutex::new(None));
         let vision = Arc::new(Vision::new(log.clone()));
         let notifier = Arc::new(Notifier::new());
@@ -787,7 +1119,11 @@ impl Core {
         let actuate: Actuate = {
             let player = player.clone();
             let controller = controller.clone();
-            Box::new(move |action| execute_action(&player, &controller, action))
+            let reliable_input = reliable_input.clone();
+            let target = Arc::new(Mutex::new(None));
+            Box::new(move |action| {
+                execute_guard_action(&player, &controller, &reliable_input, &target, action)
+            })
         };
         let on_fire: OnFire = {
             let log = log.clone();
@@ -800,10 +1136,36 @@ impl Core {
                 }
             })
         };
-        let guard_engine = Arc::new(GuardEngine::new(
+        let verify: GuardVerify = {
+            let vision = vision.clone();
+            Box::new(move |guard, detection, running| {
+                vision.verify_guard_reaction(guard, detection, running)
+            })
+        };
+        let refresh: GuardRefresh = {
+            let vision = vision.clone();
+            Box::new(move |guard, detection, running| {
+                vision.refresh_guard_target(guard, detection, running)
+            })
+        };
+        let on_error: OnError = {
+            let log = log.clone();
+            Box::new(move |guard, error| {
+                if let Ok(mut log) = log.lock() {
+                    log.push(
+                        "error",
+                        format!("Guard '{}' action failed: {error}", guard.name),
+                    );
+                }
+            })
+        };
+        let guard_engine = Arc::new(GuardEngine::new_reliable(
             detect,
             player_state,
             actuate,
+            refresh,
+            verify,
+            Some(on_error),
             Some(on_fire),
         ));
 
@@ -814,6 +1176,7 @@ impl Core {
             play_stats,
             player,
             controller,
+            reliable_input,
             recorder,
             vision,
             guard_engine,
@@ -1297,18 +1660,34 @@ impl Core {
             };
             let actuate: crate::engine::ai::Actuate = {
                 let controller = core.controller.clone();
-                Box::new(move |action| execute_ai_action(&controller, action))
+                let reliable_input = core.reliable_input.clone();
+                let target = Arc::new(Mutex::new(None));
+                Box::new(move |action| {
+                    execute_ai_action(&reliable_input, &controller, &target, action)
+                })
+            };
+            let verify: crate::engine::ai::Verify = {
+                let vision = core.vision.clone();
+                Box::new(move |step, target, running| {
+                    vision.verify_step_reaction(step, target, running)
+                })
+            };
+            let refresh: crate::engine::ai::Refresh = {
+                let vision = core.vision.clone();
+                Box::new(move |step, target, running| {
+                    vision.refresh_step_target(step, target, running)
+                })
+            };
+            let context = crate::engine::ai::ExecutionContext {
+                detect: &detect,
+                actuate: &actuate,
+                refresh: &refresh,
+                verify: &verify,
+                running: &core.node_running,
             };
 
             core.detections.set("steps", true);
-            let summary = crate::engine::ai::run_with_flag(
-                &step_objs,
-                false,
-                1,
-                &detect,
-                &actuate,
-                &core.node_running,
-            );
+            let summary = crate::engine::ai::run_with_flag_reliable(&step_objs, false, 1, &context);
             core.detections.set("steps", false);
             core.node_running.store(false, Ordering::SeqCst);
             core.set_mode("idle");
@@ -1375,43 +1754,62 @@ impl Core {
             };
             let actuate: crate::engine::ai::Actuate = {
                 let controller = core.controller.clone();
-                Box::new(move |action| execute_ai_action(&controller, action))
+                let reliable_input = core.reliable_input.clone();
+                let target = Arc::new(Mutex::new(None));
+                Box::new(move |action| {
+                    execute_ai_action(&reliable_input, &controller, &target, action)
+                })
             };
-            let run_macro =
-                |name: &str, embedded_steps: &[Step], repeat: i64| -> Result<(), String> {
-                    let loaded_steps;
-                    let steps = if embedded_steps.is_empty() {
-                        let ai_path = paths::macros_dir().join("ai").join(format!("{name}.json"));
-                        loaded_steps = if ai_path.exists() {
-                            crate::models::step::AIMacro::load(&ai_path)
-                                .map_err(|error| error.to_string())?
-                                .steps
-                        } else {
-                            let path = paths::macros_dir().join(format!("{name}.json"));
-                            let recorded = Macro::load(&path).map_err(|error| error.to_string())?;
-                            crate::models::step::macro_to_steps(&recorded)
-                        };
-                        loaded_steps.as_slice()
+            let verify: crate::engine::ai::Verify = {
+                let vision = core.vision.clone();
+                Box::new(move |step, target, running| {
+                    vision.verify_step_reaction(step, target, running)
+                })
+            };
+            let refresh: crate::engine::ai::Refresh = {
+                let vision = core.vision.clone();
+                Box::new(move |step, target, running| {
+                    vision.refresh_step_target(step, target, running)
+                })
+            };
+            let context = crate::engine::ai::ExecutionContext {
+                detect: &detect,
+                actuate: &actuate,
+                refresh: &refresh,
+                verify: &verify,
+                running: &core.node_running,
+            };
+            let run_macro = |name: &str,
+                             embedded_steps: &[Step],
+                             repeat: i64|
+             -> Result<(), String> {
+                let loaded_steps;
+                let steps = if embedded_steps.is_empty() {
+                    let ai_path = paths::macros_dir().join("ai").join(format!("{name}.json"));
+                    loaded_steps = if ai_path.exists() {
+                        crate::models::step::AIMacro::load(&ai_path)
+                            .map_err(|error| error.to_string())?
+                            .steps
                     } else {
-                        embedded_steps
+                        let path = paths::macros_dir().join(format!("{name}.json"));
+                        let recorded = Macro::load(&path).map_err(|error| error.to_string())?;
+                        crate::models::step::macro_to_steps(&recorded)
                     };
-                    let summary = crate::engine::ai::run_with_flag(
-                        steps,
-                        repeat > 1,
-                        repeat,
-                        &detect,
-                        &actuate,
-                        &core.node_running,
-                    );
-                    if summary["ok"].as_bool().unwrap_or(false) {
-                        Ok(())
-                    } else {
-                        Err(summary["error"]
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("Macro '{name}' failed")))
-                    }
+                    loaded_steps.as_slice()
+                } else {
+                    embedded_steps
                 };
+                let summary =
+                    crate::engine::ai::run_with_flag_reliable(steps, repeat != 1, repeat, &context);
+                if summary["ok"].as_bool().unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(summary["error"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Macro '{name}' failed")))
+                }
+            };
             let run_sub_macro =
                 |name: &str, embedded_steps: &[Step], repeat: i64| -> Result<String, String> {
                     run_macro(name, embedded_steps, repeat)?;
@@ -1476,13 +1874,11 @@ impl Core {
             };
 
             core.detections.set("nodes", true);
-            let summary = crate::engine::node_graph::run(
+            let summary = crate::engine::node_graph::run_reliable(
                 &graph,
-                &detect,
-                &actuate,
+                &context,
                 &run_sub_macro,
                 &run_chain,
-                &core.node_running,
             );
             core.detections.set("nodes", false);
             core.node_running.store(false, Ordering::SeqCst);
@@ -1509,16 +1905,86 @@ impl Core {
 
 /// Apply one guard [`Action`] to the shared player/controller. Each arm is a
 /// single atomic hardware call, matching `GuardEngine._execute_action`.
-fn execute_action(player: &MacroPlayer, controller: &InputController, action: Action) {
+fn execute_guard_action(
+    player: &MacroPlayer,
+    controller: &InputController,
+    reliable_input: &ReliableInput,
+    target: &Mutex<Option<ReliableTarget>>,
+    action: Action,
+) -> Result<(), String> {
     match action {
-        Action::Pause => player.pause(),
-        Action::Resume => player.resume(),
-        Action::KeyPress(key) => controller.key_press(&key),
-        Action::Click(x, y) => controller.click(x as i32, y as i32, "left"),
-        Action::BezierMoveTo(x, y) => controller.bezier_move_to(x as i32, y as i32, 0.0),
-        Action::MoveTo(x, y) => controller.move_to(x as i32, y as i32),
-        Action::MouseDown(button) => controller.mouse_down(None, &button),
-        Action::MouseUp(button) => controller.mouse_up(None, &button),
+        Action::Pause => {
+            player.pause();
+            Ok(())
+        }
+        Action::Resume => {
+            player.resume();
+            Ok(())
+        }
+        Action::KeyPressAt(x, y, key) => {
+            let previous = target
+                .lock()
+                .map_err(|_| "Guard target context is poisoned".to_string())?
+                .clone();
+            match reliable_input.key_at_with_prior(
+                screen_coord(x, "x")?,
+                screen_coord(y, "y")?,
+                &key,
+                previous.as_ref(),
+            ) {
+                Ok(established) => {
+                    *target
+                        .lock()
+                        .map_err(|_| "Guard target context is poisoned".to_string())? =
+                        Some(established);
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Ok(mut target) = target.lock() {
+                        *target = None;
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Action::Click(x, y) => {
+            let previous = target
+                .lock()
+                .map_err(|_| "Guard target context is poisoned".to_string())?
+                .clone();
+            match reliable_input.click_at_with_prior(
+                screen_coord(x, "x")?,
+                screen_coord(y, "y")?,
+                previous.as_ref(),
+            ) {
+                Ok(established) => {
+                    *target
+                        .lock()
+                        .map_err(|_| "Guard target context is poisoned".to_string())? =
+                        Some(established);
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Ok(mut target) = target.lock() {
+                        *target = None;
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Action::BezierMoveTo(x, y) => {
+            controller.bezier_move_to(x as i32, y as i32, 0.0);
+            Ok(())
+        }
+        Action::MoveTo(x, y) => controller
+            .try_move_to(x as i32, y as i32)
+            .map_err(|error| error.to_string()),
+        Action::MouseDown(button) => controller
+            .try_mouse_down(None, &button)
+            .map_err(|error| error.to_string()),
+        Action::MouseUp(button) => controller
+            .try_mouse_up(None, &button)
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -1527,20 +1993,134 @@ fn execute_action(player: &MacroPlayer, controller: &InputController, action: Ac
 /// `controller.*` calls. `Sleep` clamps negative/NaN to zero so
 /// `Duration::from_secs_f64` can't panic in the run thread (which would leak the
 /// mode); Python's `time.sleep` raised on a negative delay instead.
-fn execute_ai_action(controller: &InputController, action: crate::engine::ai::Action) {
+fn execute_ai_action(
+    reliable_input: &ReliableInput,
+    controller: &InputController,
+    target: &Mutex<Option<ReliableTarget>>,
+    action: crate::engine::ai::Action,
+) -> Result<(), String> {
     use crate::engine::ai::Action;
     match action {
-        Action::Click(x, y) => controller.click(x as i32, y as i32, "left"),
-        Action::KeyPress(key) => controller.key_press(&key),
-        Action::TypeText(text) => controller.type_text(&text),
+        Action::FocusAt(x, y) => {
+            match reliable_input.establish_at(screen_coord(x, "x")?, screen_coord(y, "y")?) {
+                Ok(established) => {
+                    *target
+                        .lock()
+                        .map_err(|_| "Loop target context is poisoned".to_string())? =
+                        Some(established);
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Ok(mut target) = target.lock() {
+                        *target = None;
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Action::Click(x, y) => {
+            let previous = target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())?
+                .clone();
+            match reliable_input.click_at_with_prior(
+                screen_coord(x, "x")?,
+                screen_coord(y, "y")?,
+                previous.as_ref(),
+            ) {
+                Ok(established) => {
+                    *target
+                        .lock()
+                        .map_err(|_| "Loop target context is poisoned".to_string())? =
+                        Some(established);
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Ok(mut target) = target.lock() {
+                        *target = None;
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Action::KeyPress(key) => {
+            let established = target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| {
+                    "no Vision target has been established for this Loop run".to_string()
+                })?;
+            match reliable_input.key_on(&established, &key) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    if let Ok(mut target) = target.lock() {
+                        *target = None;
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Action::TypeText(text) => {
+            let established = target
+                .lock()
+                .map_err(|_| "Loop target context is poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| {
+                    "no Vision target has been established for this Loop run".to_string()
+                })?;
+            for character in text.chars() {
+                if let Err(error) = reliable_input.key_on(&established, &character.to_string()) {
+                    if let Ok(mut target) = target.lock() {
+                        *target = None;
+                    }
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(())
+        }
         Action::Scroll(amount, pos) => {
-            let pos = pos.map(|(x, y)| (x as i32, y as i32));
-            controller.scroll(amount as i32, pos);
+            let pos = match pos {
+                Some((x, y)) => {
+                    let point = (screen_coord(x, "x")?, screen_coord(y, "y")?);
+                    let established = match reliable_input.establish_at(point.0, point.1) {
+                        Ok(established) => established,
+                        Err(error) => {
+                            if let Ok(mut target) = target.lock() {
+                                *target = None;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    *target
+                        .lock()
+                        .map_err(|_| "Loop target context is poisoned".to_string())? =
+                        Some(established);
+                    Some(point)
+                }
+                None => None,
+            };
+            controller
+                .try_scroll(
+                    amount
+                        .try_into()
+                        .map_err(|_| format!("scroll amount {amount} is outside the i32 range"))?,
+                    pos,
+                )
+                .map_err(|error| error.to_string())
         }
         Action::Sleep(secs) => {
             std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
+            Ok(())
         }
     }
+}
+
+fn screen_coord(value: i64, axis: &str) -> Result<i32, String> {
+    value
+        .try_into()
+        .map_err(|_| format!("{axis} coordinate {value} is outside the Windows screen range"))
 }
 
 fn has_fail_closed_checkpoint(macro_def: &Macro) -> bool {
@@ -1593,7 +2173,7 @@ fn py_int(v: &Value) -> Option<i64> {
 mod tests {
     use super::{
         has_fail_closed_checkpoint, is_full_region, is_text_guard, py_int, region_pixels,
-        resolve_repeat, text_roi, Sighting, Vision, SIGHTING_TTL_MS,
+        resolve_repeat, text_roi, CaptureClock, Sighting, Vision, SIGHTING_TTL_MS,
     };
     use crate::hardware::capture::Frame;
     use crate::logbuf::LogBuffer;
@@ -1602,6 +2182,23 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn capture_clock_advances_generation_only_for_fresh_samples() {
+        let mut clock = CaptureClock::default();
+        let started = Instant::now();
+
+        let first = clock.record(true, started);
+        let cached = clock.record(false, started + Duration::from_millis(1));
+        let second = clock.record(true, started + Duration::from_millis(2));
+
+        assert_eq!((first.sample, cached.sample, second.sample), (1, 2, 3));
+        assert_eq!(
+            (first.generation, cached.generation, second.generation),
+            (1, 1, 2)
+        );
+        assert_eq!(clock.current(), second);
+    }
 
     #[test]
     fn the_overlay_sees_every_live_source_and_no_dead_ones() {

@@ -135,12 +135,19 @@ const CONTRAST: f32 = 0.25;
 /// which is what makes a snapped region and a colour guard agree about what
 /// counts as "the same shade".
 fn dist(a: [i32; 3], b: [i32; 3]) -> i32 {
-    (a[0] - b[0]).abs().max((a[1] - b[1]).abs()).max((a[2] - b[2]).abs())
+    (a[0] - b[0])
+        .abs()
+        .max((a[1] - b[1]).abs())
+        .max((a[2] - b[2]).abs())
 }
 
 fn pixel(frame: &Frame, x: i32, y: i32) -> [i32; 3] {
     let i = (y as usize * frame.width as usize + x as usize) * 3;
-    [i32::from(frame.bgr[i]), i32::from(frame.bgr[i + 1]), i32::from(frame.bgr[i + 2])]
+    [
+        i32::from(frame.bgr[i]),
+        i32::from(frame.bgr[i + 1]),
+        i32::from(frame.bgr[i + 2]),
+    ]
 }
 
 fn area((_, _, w, h): Rect) -> i64 {
@@ -266,7 +273,11 @@ fn border_support(frame: &Frame, (x, y, w, h): Rect) -> f32 {
         total += 1;
         if outside.0 < 0 || outside.1 < 0 || outside.0 >= fw || outside.1 >= fh {
             hits += 1;
-        } else if dist(pixel(frame, inside.0, inside.1), pixel(frame, outside.0, outside.1)) > EDGE {
+        } else if dist(
+            pixel(frame, inside.0, inside.1),
+            pixel(frame, outside.0, outside.1),
+        ) > EDGE
+        {
             hits += 1;
         }
     };
@@ -320,8 +331,9 @@ fn ink_density(frame: &Frame, (x, y, w, h): Rect) -> f32 {
 fn vertical_side(frame: &Frame, c: i32, sy: i32) -> bool {
     let fh = frame.height as i32;
     let (y0, y1) = ((sy - RUN).max(0), (sy + RUN + 1).min(fh));
-    let hits =
-        (y0..y1).filter(|&y| dist(pixel(frame, c - 1, y), pixel(frame, c, y)) > EDGE).count() as i32;
+    let hits = (y0..y1)
+        .filter(|&y| dist(pixel(frame, c - 1, y), pixel(frame, c, y)) > EDGE)
+        .count() as i32;
     hits * 100 >= (y1 - y0) * RUN_HIT
 }
 
@@ -329,8 +341,9 @@ fn vertical_side(frame: &Frame, c: i32, sy: i32) -> bool {
 fn horizontal_side(frame: &Frame, r: i32, sx: i32) -> bool {
     let fw = frame.width as i32;
     let (x0, x1) = ((sx - RUN).max(0), (sx + RUN + 1).min(fw));
-    let hits =
-        (x0..x1).filter(|&x| dist(pixel(frame, x, r - 1), pixel(frame, x, r)) > EDGE).count() as i32;
+    let hits = (x0..x1)
+        .filter(|&x| dist(pixel(frame, x, r - 1), pixel(frame, x, r)) > EDGE)
+        .count() as i32;
     hits * 100 >= (x1 - x0) * RUN_HIT
 }
 
@@ -360,7 +373,10 @@ fn ruled(frame: &Frame, sx: i32, sy: i32) -> Option<Rect> {
         None if wx1 == fw => fw,
         None => return None,
     };
-    let top = match (wy0 + 1..=sy).rev().find(|&r| horizontal_side(frame, r, sx)) {
+    let top = match (wy0 + 1..=sy)
+        .rev()
+        .find(|&r| horizontal_side(frame, r, sx))
+    {
         Some(r) => r,
         None if wy0 == 0 => 0,
         None => return None,
@@ -506,7 +522,12 @@ fn ink_candidates(frame: &Frame, sx: i32, sy: i32) -> Vec<Rect> {
                 || (bx1 == x1 - 1 && x1 < fw)
                 || (by1 == y1 - 1 && y1 < fh);
             // Back off the outline's own pixel on each side.
-            let rect = (bx0 + 1, by0 + 1, (bx1 - bx0 - 1).max(0), (by1 - by0 - 1).max(0));
+            let rect = (
+                bx0 + 1,
+                by0 + 1,
+                (bx1 - bx0 - 1).max(0),
+                (by1 - by0 - 1).max(0),
+            );
             if !escaped && area(rect) <= cap && holds_point(rect, sx, sy) {
                 found.push(rect);
             }
@@ -600,7 +621,9 @@ impl Hover {
     /// a panel falls inside the panel's box, and without it the panel would stay
     /// outlined however precisely the user aimed at the button.
     fn holds(&self, frame: &Frame, x: i32, y: i32) -> bool {
-        let Some((rx, ry, w, h)) = self.shown else { return false };
+        let Some((rx, ry, w, h)) = self.shown else {
+            return false;
+        };
         let inside = x >= rx && y >= ry && x < rx + w && y < ry + h;
         inside
             && x >= 0
@@ -632,8 +655,19 @@ mod tests {
 
     impl Canvas {
         fn new(w: u32, h: u32, bg: [u8; 3]) -> Self {
-            let bgr = bg.iter().copied().cycle().take((w * h * 3) as usize).collect();
-            Self { frame: Frame { bgr, width: w, height: h } }
+            let bgr = bg
+                .iter()
+                .copied()
+                .cycle()
+                .take((w * h * 3) as usize)
+                .collect();
+            Self {
+                frame: Frame {
+                    bgr,
+                    width: w,
+                    height: h,
+                },
+            }
         }
 
         fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: [u8; 3]) -> &mut Self {
@@ -765,7 +799,11 @@ mod tests {
     fn a_panel_larger_than_the_other_two_windows_still_snaps() {
         let mut c = Canvas::new(1400, 900, [20, 20, 20]);
         c.rect(100, 100, 900, 600, [90, 90, 90]);
-        assert_eq!(grow(&c.frame, 550, 400), None, "the fill was supposed to run out of window");
+        assert_eq!(
+            grow(&c.frame, 550, 400),
+            None,
+            "the fill was supposed to run out of window"
+        );
         assert_eq!(snap_at(&c.frame, 550, 400), Some((100, 100, 900, 600)));
     }
 
@@ -802,7 +840,10 @@ mod tests {
         c.rect(100, 80, 120, 1, [95, 95, 95]);
         c.rect(100, 79, 120, 1, [130, 130, 130]);
         let (_, y, _, h) = snap_at(&c.frame, 160, 100).expect("button");
-        assert!(y >= 80 && y + h <= 116, "leaked out of the button: y={y} h={h}");
+        assert!(
+            y >= 80 && y + h <= 116,
+            "leaked out of the button: y={y} h={h}"
+        );
     }
 
     #[test]
@@ -813,8 +854,14 @@ mod tests {
 
         assert!(h.aim(&c.frame, 150, 95), "the first aim is a change");
         assert_eq!(h.rect(), Some((100, 80, 120, 36)));
-        assert!(!h.aim(&c.frame, 190, 105), "moving along the face is not a change");
-        assert!(h.aim(&c.frame, 20, 20), "leaving the control drops the outline");
+        assert!(
+            !h.aim(&c.frame, 190, 105),
+            "moving along the face is not a change"
+        );
+        assert!(
+            h.aim(&c.frame, 20, 20),
+            "leaving the control drops the outline"
+        );
         assert_eq!(h.rect(), None);
     }
 
@@ -864,7 +911,11 @@ mod bench {
     #[ignore = "timing benchmark, run by hand: prints, asserts nothing about duration"]
     fn worst_case_hover() {
         // A flat desktop: every grow runs the full budget before answering None.
-        let f = Frame { bgr: vec![40u8; 2560 * 1440 * 3], width: 2560, height: 1440 };
+        let f = Frame {
+            bgr: vec![40u8; 2560 * 1440 * 3],
+            width: 2560,
+            height: 1440,
+        };
         let t = Instant::now();
         for i in 0..20 {
             assert_eq!(snap_at(&f, 1200 + i, 700), None);
@@ -872,7 +923,11 @@ mod bench {
         println!("BACKGROUND: {:?} per hover", t.elapsed() / 20);
 
         // A button-sized control: the common case.
-        let mut c = Frame { bgr: vec![40u8; 2560 * 1440 * 3], width: 2560, height: 1440 };
+        let mut c = Frame {
+            bgr: vec![40u8; 2560 * 1440 * 3],
+            width: 2560,
+            height: 1440,
+        };
         for y in 700..760 {
             for x in 1200..1400 {
                 let i = (y * 2560 + x) * 3;

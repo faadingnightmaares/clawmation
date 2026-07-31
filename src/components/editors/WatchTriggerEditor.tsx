@@ -10,7 +10,6 @@ import {
   IconKeyboard,
   IconLetterT,
   IconLoader2,
-  IconPhoto,
   IconPointer,
   type Icon,
 } from "@tabler/icons-react";
@@ -20,6 +19,7 @@ import {
   guardPickColor,
   guardPickRegion,
   guardTest,
+  saveTemplateUpload,
   surgicalCapture,
   type Guard,
 } from "@/api";
@@ -27,6 +27,12 @@ import { hsvToCss } from "@/format";
 import { pxRectToPct } from "@/lib/screen";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import {
+  appendImageCandidate,
+  imageCandidates,
+  removeImageCandidate,
+  splitImageCandidates,
+} from "@/lib/visionImages";
 import {
   REPEAT_STOPS,
   guardFromDraft,
@@ -47,6 +53,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ImageCandidateGallery } from "@/components/vision/ImageCandidateGallery";
 
 const CANCELLED = "cancelled";
 const asDataUri = (thumb: string, mime = "image/png") =>
@@ -67,7 +74,8 @@ export function WatchTriggerEditor({
 }: WatchTriggerEditorProps) {
   const [draft, setDraft] = useState(initial);
   const [namedByHand, setNamedByHand] = useState(Boolean(initial.name));
-  const [thumb, setThumb] = useState<string | null>(null);
+  const [thumbs, setThumbs] = useState<(string | null)[]>([]);
+  const [imageDragOver, setImageDragOver] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -77,6 +85,7 @@ export function WatchTriggerEditor({
   const look = lookOf(draft.method);
   const ready = isTriggerReady(draft);
   const preview = draft._preview;
+  const candidates = imageCandidates(draft.template_path, draft.template_paths);
 
   const run = async (tag: string, action: () => Promise<void>) => {
     setBusy(tag);
@@ -89,21 +98,63 @@ export function WatchTriggerEditor({
     }
   };
 
+  const appendImage = (
+    path: string,
+    thumb: string | undefined,
+    clickGeometry?: {
+      offset?: number[];
+      click_line?: number[];
+      click_lines?: number[][];
+    },
+  ) => {
+    const appended = appendImageCandidate(candidates, path);
+    if (appended.full) {
+      notify("warning", "A Watch trigger can use up to 8 images.");
+      return false;
+    }
+    if (!appended.added) {
+      notify("info", "That image is already included.");
+      return false;
+    }
+    const split = splitImageCandidates(appended.candidates);
+    patch({
+      method: methodFor("image"),
+      template_path: split.primary,
+      template_paths: split.alternatives,
+      ...(candidates.length === 0 && clickGeometry
+        ? {
+            click_offset: clickGeometry.offset ?? [],
+            click_line: clickGeometry.click_line ?? [],
+            click_lines: clickGeometry.click_lines ?? [],
+          }
+        : {}),
+      _preview: null,
+    });
+    setThumbs((current) => [
+      ...candidates.map((_, index) => current[index] ?? null),
+      thumb ? asDataUri(thumb) : null,
+    ]);
+    return true;
+  };
+
   const captureImage = () =>
     run("image", async () => {
       const result = await surgicalCapture();
       if (result.error === CANCELLED) return;
       if (result.ok && result.path) {
-        patch({
-          method: methodFor("image"),
-          template_path: result.path,
-          click_offset: (result as { offset?: number[] }).offset ?? [],
-          click_line: (result as { click_line?: number[] }).click_line ?? [],
-          click_lines: (result as { click_lines?: number[][] }).click_lines ?? [],
-          _preview: null,
+        const added = appendImage(result.path, result.thumb, {
+          offset: (result as { offset?: number[] }).offset,
+          click_line: result.click_line,
+          click_lines: result.click_lines,
         });
-        if (result.thumb) setThumb(asDataUri(result.thumb));
-        notify("success", "Picture and click point saved.");
+        if (added) {
+          notify(
+            "success",
+            candidates.length === 0
+              ? "Picture and click point saved."
+              : "Another visual state was added.",
+          );
+        }
       } else if (result.error) {
         notify("error", result.error);
       }
@@ -114,20 +165,54 @@ export function WatchTriggerEditor({
       const result = await addTemplateImage();
       if (result.error === CANCELLED) return;
       if (result.ok && result.path) {
-        patch({
-          method: methodFor("image"),
-          template_path: result.path,
-          click_offset: [],
-          click_line: [],
-          click_lines: [],
-          _preview: null,
-        });
-        if (result.thumb) setThumb(asDataUri(result.thumb));
-        notify("success", "Image chosen.");
+        if (appendImage(result.path, result.thumb)) {
+          notify("success", "Image state added.");
+        }
       } else if (result.error) {
         notify("error", result.error);
       }
     });
+
+  const uploadDroppedImage = (file: File) =>
+    run("drop", async () => {
+      if (!file.type.startsWith("image/")) {
+        notify("error", "Drop a PNG, JPG, BMP, or WebP image.");
+        return;
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        notify("error", "The image must be 20 MB or smaller.");
+        return;
+      }
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error("Could not read image"));
+        reader.readAsDataURL(file);
+      });
+      const result = await saveTemplateUpload(
+        dataUrl.slice(dataUrl.indexOf(",") + 1),
+      );
+      if (result.ok && result.path) {
+        if (appendImage(result.path, result.thumb)) {
+          notify("success", "Dropped image state added.");
+        }
+      } else if (result.error) {
+        notify("error", result.error);
+      }
+    });
+
+  const removeImage = (index: number) => {
+    const remaining = removeImageCandidate(candidates, index);
+    const split = splitImageCandidates(remaining);
+    patch({
+      template_path: split.primary,
+      template_paths: split.alternatives,
+      _preview: null,
+    });
+    setThumbs((current) =>
+      current.filter((_, candidateIndex) => candidateIndex !== index),
+    );
+  };
 
   const pickColor = () =>
     run("color", async () => {
@@ -209,7 +294,7 @@ export function WatchTriggerEditor({
         <Preview
           draft={draft}
           look={look}
-          thumb={thumb}
+          thumb={thumbs[0] ?? null}
           preview={preview}
         />
 
@@ -236,8 +321,16 @@ export function WatchTriggerEditor({
             <div className="grid gap-2">
               <DetectionChoice
                 icon={IconFocus2}
-                title="Snap it and mark where to click"
-                description="Draw around the button, then mark the exact spot to press."
+                title={
+                  candidates.length > 0
+                    ? "Add another visual state"
+                    : "Snap it and mark where to click"
+                }
+                description={
+                  candidates.length > 0
+                    ? "Capture its hovered, highlighted, or changed appearance."
+                    : "Draw around the button, then mark the exact spot to press."
+                }
                 selected={look === "image"}
                 busy={busy === "image"}
                 onClick={captureImage}
@@ -287,20 +380,25 @@ export function WatchTriggerEditor({
               />
             )}
 
-            {look === "image" && draft.template_path && (
-              <button
-                type="button"
-                onClick={chooseImage}
-                disabled={busy === "file"}
-                className="mt-2 inline-flex items-center gap-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-              >
-                {busy === "file" ? (
-                  <IconLoader2 className="size-4 animate-spin" />
-                ) : (
-                  <IconPhoto className="size-4" />
-                )}
-                Choose an existing image instead
-              </button>
+            {look === "image" && (
+              <div className="mt-3">
+                <ImageCandidateGallery
+                  candidates={candidates}
+                  thumbnails={thumbs}
+                  busy={busy === "image" || busy === "file" || busy === "drop"}
+                  dragOver={imageDragOver}
+                  magicLabel={
+                    candidates.length > 0
+                      ? "Capture another state"
+                      : "Capture from screen"
+                  }
+                  onDragOverChange={setImageDragOver}
+                  onChoose={chooseImage}
+                  onMagicSelect={captureImage}
+                  onRemove={removeImage}
+                  onDrop={(file) => void uploadDroppedImage(file)}
+                />
+              </div>
             )}
           </EditorStep>
 
