@@ -8,7 +8,7 @@
     <img alt="Source available license" src="https://img.shields.io/badge/license-source--available-3f3a34?style=flat-square">
   </p>
   <p>
-    <a href="https://github.com/faadingnightmaares/clawmation/releases/download/v1.2.1/clawmation_1.2.1_x64-setup.exe"><strong>Download the Windows installer</strong></a>
+    <a href="https://github.com/faadingnightmaares/clawmation/releases/download/v1.2.5/clawmation_1.2.5_x64-setup.exe"><strong>Download the Windows installer</strong></a>
     ·
     <a href="https://github.com/faadingnightmaares/clawmation/releases/latest">View the latest release</a>
   </p>
@@ -103,7 +103,7 @@ development with C++**.
 ## Installation
 
 1. Download
-   [`clawmation_1.2.1_x64-setup.exe`](https://github.com/faadingnightmaares/clawmation/releases/download/v1.2.1/clawmation_1.2.1_x64-setup.exe).
+   [`clawmation_1.2.5_x64-setup.exe`](https://github.com/faadingnightmaares/clawmation/releases/download/v1.2.5/clawmation_1.2.5_x64-setup.exe).
 2. Run the installer.
 3. Launch Clawmation and configure the record, play, and emergency-stop
    shortcuts in Settings.

@@ -3,7 +3,7 @@ name = "clawmation"
 # The single source of truth for the app's version: `commands/misc.rs` reads it
 # through `CARGO_PKG_VERSION`, `tauri.conf.json` repeats it for the bundler, and
 # the updater compares the manifest's version against it. Bump all three together.
-version = "1.2.4"
+version = "1.2.5"
 description = "Windows macro recorder with visual workflows, screen detection, OCR, and local automation"
 authors = ["faadingnightmaares"]
 license-file = "../LICENSE"
